@@ -56,7 +56,11 @@ import {
   jobEnvironmentAttempt,
   jobEnvironmentFile,
 } from "./job.mjs";
-import { poolIdentityDigest, poolLabelValue } from "./poolIdentity.mjs";
+import {
+  poolIdentityDigest,
+  poolIdentityPersonal,
+  poolLabelValue,
+} from "./poolIdentity.mjs";
 import { imageRegistryHost, withRegistryAuth } from "./registryAuth.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
 
@@ -168,14 +172,25 @@ const inspectedSchema = z.array(
  * @param {string} assignment
  */
 export function containerName(pool, assignment) {
-  return `chuggy-${pool.pool}-${poolIdentityDigest(pool, assignment)}`;
+  return `chuggy-${containerNameSegment(pool)}-${poolIdentityDigest(pool, assignment)}`;
+}
+
+/**
+ * What a container's name carries of the runner it serves: a pool's name, or
+ * `personal` for a personal runner, whose owner's principal names no container.
+ *
+ * @param {PoolIdentity} pool
+ */
+function containerNameSegment(pool) {
+  return poolIdentityPersonal(pool) ? "personal" : pool.pool;
 }
 
 /** @param {ContainerBackendSettings} settings */
 export function checkedContainerBackendSettings(settings) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(settings.pool.pool))
+  const segment = containerNameSegment(settings.pool);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(segment))
     throw new RangeError(
-      `pool ${settings.pool.pool} cannot name a container; register it under a name of letters, digits, '_', '.' and '-'`,
+      `pool ${segment} cannot name a container; register it under a name of letters, digits, '_', '.' and '-'`,
     );
   return settings;
 }

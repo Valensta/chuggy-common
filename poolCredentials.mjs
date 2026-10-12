@@ -1,6 +1,8 @@
 /**
  * The file a pool's registration writes: who the pool is, where its issuer,
- * plane and image registry are, and its client credential. It is refused unless
+ * plane and image registry are, and its client credential. A personal
+ * runner's is a pool's with the project and pool taken out and the member it
+ * serves put in, told apart by its `kind`. It is refused unless
  * only its owner can read or write it, and no refusal carries the file's text,
  * because the secret is in it.
  */
@@ -11,10 +13,9 @@ import { workerPoolRegistrationSchema } from "@chuggy/worker-contract/workerPool
 import { z } from "zod";
 
 /**
- * @typedef {object} PoolCredentials
- * @property {string} tenant
- * @property {string} project
- * @property {string} pool
+ * @typedef {import("./poolIdentity.mjs").PoolIdentity} PoolIdentity
+ *
+ * @typedef {object} PoolEndpoints
  * @property {string[]} capabilities
  * @property {string} tokenUrl
  * @property {string} audience
@@ -23,6 +24,8 @@ import { z } from "zod";
  *   token to when it pulls
  * @property {string} clientId
  * @property {string} clientSecret
+ *
+ * @typedef {PoolIdentity & PoolEndpoints} PoolCredentials
  */
 
 /** Far above what a registration writes, so a file past it is not one. */
@@ -50,6 +53,10 @@ const poolCredentialsSchema = z.strictObject({
   clientId: poolCredentialsTextSchema,
   clientSecret: poolCredentialsTextSchema,
 });
+
+const personalRunnerCredentialsSchema = poolCredentialsSchema
+  .omit({ project: true, pool: true })
+  .extend({ kind: z.literal("Personal"), owner: poolCredentialsTextSchema });
 
 /**
  * The credentials at `file`, checked and read through one handle so the file
@@ -83,7 +90,11 @@ export async function poolCredentials(file) {
   } catch {
     throw new Error(`pool credentials ${file} is not JSON`);
   }
-  const parsed = poolCredentialsSchema.safeParse(document);
+  const parsed = (
+    document?.kind === "Personal"
+      ? personalRunnerCredentialsSchema
+      : poolCredentialsSchema
+  ).safeParse(document);
   if (!parsed.success)
     throw new Error(
       `pool credentials ${file}: ${parsed.error.issues

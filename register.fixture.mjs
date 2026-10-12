@@ -1,6 +1,6 @@
 /**
- * What chuggy answers a redemption with, and a fetch that answers with it, for
- * a suite that registers a pool without the network.
+ * What chuggy answers a pool's or a personal redemption with, and a fetch
+ * that answers with it, for a suite that registers without the network.
  */
 
 /** The pool file chuggy answers a redemption for pool `shame` on an x64 machine with. */
@@ -15,6 +15,20 @@ export const registeredFixture = {
   registryHost: "chuggy-registry.chuggy.example",
   clientId: "chuggy-pool-client",
   clientSecret: "pool-client-secret-fixture",
+};
+
+/** The file chuggy answers a personal redemption on an x64 machine with: a pool's, less its project and pool, naming its member. */
+export const registeredPersonalFixture = {
+  kind: "Personal",
+  tenant: "newtenant",
+  owner: "28:https://auth.chuggy.example/0f3c9a52-member",
+  capabilities: ["Platform:Linux:Amd64"],
+  tokenUrl: "https://auth.chuggy.example/oauth2/token",
+  audience: "https://chuggy.example/api",
+  planeUrl: "https://chuggy-pool.chuggy.example/",
+  registryHost: "chuggy-registry.chuggy.example",
+  clientId: "chuggy-personal-client",
+  clientSecret: "personal-client-secret-fixture",
 };
 
 /**

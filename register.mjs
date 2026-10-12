@@ -1,9 +1,14 @@
 /**
- * Registering this machine as a pool: a single-use token minted in chuggy's
- * console is redeemed for the pool file, which is written where `run` reads
- * it. What the operator could have asked wrongly is refused before the token
- * is spent, and the answer is checked whole before anything is written. The
- * pool's secret is never printed and never in an argv.
+ * Registering this machine as a pool, or as a member's personal runner: a
+ * single-use token is redeemed for the pool file, which is written where `run`
+ * reads it. A pool's token is a project's, minted in chuggy's console, and
+ * names the pool it registers; a personal token is a member's in a tenant,
+ * minted through chuggy's API at
+ * `/api/v1/tenants/:tenant/personal-runner-registration-tokens`, and registers
+ * the one runner that member has there. What the operator
+ * could have asked wrongly is refused before the token is spent, and the
+ * answer is checked whole before anything is written. The runner's secret is
+ * never printed and never in an argv.
  */
 
 import { Buffer } from "node:buffer";
@@ -22,30 +27,40 @@ import {
 import { z } from "zod";
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
-import { poolIdentityDigest } from "./poolIdentity.mjs";
+import {
+  poolIdentityDigest,
+  poolIdentityNames,
+  poolIdentityPersonal,
+} from "./poolIdentity.mjs";
 
 /**
  * @typedef {import("./poolIdentity.mjs").PoolIdentity} PoolIdentity
- * @typedef {z.infer<typeof registeredPoolSchema>} RegisteredPool
+ * @typedef {z.infer<typeof registeredPoolSchema>} RegisteredDedicatedPool
+ * @typedef {z.infer<typeof registeredPersonalRunnerSchema>} RegisteredPersonalRunner
+ * @typedef {RegisteredDedicatedPool | RegisteredPersonalRunner} RegisteredPool
  *
- * @typedef {object} RegisterRequest
- * @property {URL} api chuggy's origin
- * @property {string} token
- * @property {string} pool the name the pool takes
- * @property {string} capability this machine's platform, the one capability the pool declares
+ * @typedef {{kind?: undefined, api: URL, token: string, pool: string}
+ *   | {kind: "Personal", api: URL, token: string}} RegisterAskedRequest
+ *   chuggy's origin, the token, and the name a pool takes; a personal runner takes none
+ * @typedef {RegisterAskedRequest & {capability: string}} RegisterRequest
+ *   `capability` is this machine's platform, the one capability the runner declares
  *
  * @typedef {object} RegisterAsked what the operator asked
  * @property {string | undefined} api
  * @property {string | undefined} token
  * @property {string | undefined} pool
+ * @property {boolean | undefined} [personal] the token is a member's personal one
  *
  * @typedef {object} RegisterMachine
  * @property {string} hostname
  * @property {string} arch as `process.arch` names it
  */
 
-/** Where a token is redeemed, under chuggy's API. */
+/** Where a pool's token is redeemed, under chuggy's API. */
 const registerPath = "/api/v1/worker-pool-registrations";
+
+/** Where a personal token is redeemed, under chuggy's API. */
+const registerPersonalPath = "/api/v1/personal-runner-registrations";
 
 /** The media type chuggy's API takes a body in and answers with, its `nativeHttpMediaType`. */
 const registerMediaType = "application/vnd.chuggy.v1+json";
@@ -139,6 +154,14 @@ export const registeredPoolSchema = z.strictObject({
 });
 
 /**
+ * A personal runner's file, as chuggy answers a personal redemption with it: a
+ * pool's with the project and pool taken out and the member it serves put in.
+ */
+export const registeredPersonalRunnerSchema = registeredPoolSchema
+  .omit({ project: true, pool: true })
+  .extend({ kind: z.literal("Personal"), owner: registerNameSchema });
+
+/**
  * The pool name this machine's hostname makes: its first label, lowercase,
  * each run of other characters a hyphen. Nothing where it makes none.
  *
@@ -185,13 +208,23 @@ function registerApi(text) {
  *
  * @param {RegisterAsked} asked
  * @param {string} hostname
- * @returns {{checked: Omit<RegisterRequest, "capability">} | {refused: string}}
+ * @returns {{checked: RegisterAskedRequest} | {refused: string}}
  */
 export function registerAskedChecked(asked, hostname) {
   if (asked.api === undefined || asked.token === undefined)
     return { refused: "register needs --api and --token" };
   const api = registerApi(asked.api);
   if (typeof api === "string") return { refused: api };
+  if (asked.personal === true) {
+    if (asked.pool !== undefined)
+      return {
+        refused:
+          "--pool names a pool, and a personal runner is its member's one in the tenant; register it without --pool",
+      };
+    if (!registerTokenAllowed(asked.token))
+      return { refused: "--token is not a registration token" };
+    return { checked: { kind: "Personal", api, token: asked.token } };
+  }
   const pool = asked.pool ?? registerPoolNameDefault(hostname);
   if (pool === undefined)
     return {
@@ -201,9 +234,19 @@ export function registerAskedChecked(asked, hostname) {
     return {
       refused: `--pool ${pool} is not a pool name: at most ${String(registerPoolNameCharsMax)} lowercase letters, digits and hyphens, beginning and ending with a letter or digit`,
     };
-  if (!workerPoolRedemptionSchema.shape.token.safeParse(asked.token).success)
+  if (!registerTokenAllowed(asked.token))
     return { refused: "--token is not a registration token" };
   return { checked: { api, token: asked.token, pool } };
+}
+
+/**
+ * Whether a token is one chuggy redeems. A personal token is bounded as a
+ * pool's is.
+ *
+ * @param {string} token
+ */
+function registerTokenAllowed(token) {
+  return workerPoolRedemptionSchema.shape.token.safeParse(token).success;
 }
 
 /**
@@ -267,6 +310,8 @@ function registerRefusal(status, body, request) {
     return "the registration token is unknown, spent or expired; mint another in chuggy's console";
   if (status === 403)
     return `the registration token does not permit ${request.capability}; mint one that does`;
+  if (status === 409 && request.kind === "Personal")
+    return "chuggy registered this member's runner again meanwhile, and the token is not spent; run register again";
   if (status === 400) {
     const reason = registerErrorReason(body);
     return `chuggy refused the registration as malformed${reason === "" ? "" : `: ${reason}`}`;
@@ -285,42 +330,100 @@ function registerFailureReason(failure) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** What a refusal of a 201 tells the operator: its token is gone. */
+const registeredSpent = "the token is spent, so mint another";
+
 /**
  * The pool file a 201 carries, checked whole: it must be one the worker core
- * reads, for the pool asked for, declaring the capability asked for.
+ * reads, of the kind asked for and for the pool asked for, declaring the
+ * capability asked for.
  *
  * @param {Uint8Array} body
  * @param {RegisterRequest} request
  * @returns {RegisteredPool}
  */
 function registeredPool(body, request) {
-  const spent = "the token is spent, so mint another";
   let document;
   try {
     document = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(body),
     );
   } catch {
-    throw new Error(`chuggy answered the registration with no JSON; ${spent}`);
+    throw new Error(
+      `chuggy answered the registration with no JSON; ${registeredSpent}`,
+    );
   }
-  const parsed = registeredPoolSchema.safeParse(document);
+  if (request.kind === "Personal") {
+    const runner = registeredParsed(registeredPersonalRunnerSchema, document);
+    registeredCapabilityAsked(runner, request);
+    return runner;
+  }
+  const pool = registeredParsed(registeredPoolSchema, document);
+  if (pool.pool !== request.pool) registeredAnotherAnswered();
+  registeredCapabilityAsked(pool, request);
+  return pool;
+}
+
+/**
+ * A 201's document as `schema` reads it, or why it is no file this runner
+ * reads, naming no value in it.
+ *
+ * @template {z.ZodType} Schema
+ * @param {Schema} schema
+ * @param {unknown} document
+ * @returns {z.infer<Schema>}
+ */
+function registeredParsed(schema, document) {
+  const parsed = schema.safeParse(document);
   if (!parsed.success)
     throw new Error(
       `chuggy answered the registration with no pool file this runner reads (${registerPrintable(
         parsed.error.issues
           .map((issue) => `${issue.path.join(".")} ${issue.message}`)
           .join("; "),
-      )}); ${spent}`,
-    );
-  if (
-    parsed.data.pool !== request.pool ||
-    parsed.data.capabilities.length !== 1 ||
-    parsed.data.capabilities[0] !== request.capability
-  )
-    throw new Error(
-      `chuggy answered the registration for another pool or capability than the one asked for; ${spent}`,
+      )}); ${registeredSpent}`,
     );
   return parsed.data;
+}
+
+/**
+ * Refuses a file declaring other than the one capability asked for.
+ *
+ * @param {RegisteredPool} file
+ * @param {RegisterRequest} request
+ */
+function registeredCapabilityAsked(file, request) {
+  if (
+    file.capabilities.length !== 1 ||
+    file.capabilities[0] !== request.capability
+  )
+    registeredAnotherAnswered();
+}
+
+/** @returns {never} */
+function registeredAnotherAnswered() {
+  throw new Error(
+    `chuggy answered the registration for another pool or capability than the one asked for; ${registeredSpent}`,
+  );
+}
+
+/**
+ * Where a redemption is posted, and what with: a pool's names the pool, and a
+ * personal runner's names none.
+ *
+ * @param {RegisterRequest} request
+ */
+function registerPosted(request) {
+  const capabilities = [request.capability];
+  return request.kind === "Personal"
+    ? {
+        path: registerPersonalPath,
+        body: { token: request.token, capabilities },
+      }
+    : {
+        path: registerPath,
+        body: { token: request.token, pool: request.pool, capabilities },
+      };
 }
 
 /**
@@ -331,20 +434,17 @@ function registeredPool(body, request) {
  * @returns {Promise<RegisteredPool>}
  */
 export async function registerRedeemed(request, fetch) {
+  const posted = registerPosted(request);
   let status;
   let body;
   try {
-    const response = await fetch(new URL(registerPath, request.api), {
+    const response = await fetch(new URL(posted.path, request.api), {
       method: "POST",
       headers: {
         "content-type": registerMediaType,
         accept: registerMediaType,
       },
-      body: JSON.stringify({
-        token: request.token,
-        pool: request.pool,
-        capabilities: [request.capability],
-      }),
+      body: JSON.stringify(posted.body),
       redirect: "error",
       signal: globalThis.AbortSignal.timeout(registerTimeoutMs),
     });
@@ -382,9 +482,11 @@ function registerPoolFileNamePart(name) {
 }
 
 /**
- * The pool file's name: tenant, project and pool, joined by a `.` no part
- * carries, so no two pools share one. Names longer than the runner's service
- * can be named for make a digest of the identity instead, which has no `.`.
+ * The pool file's name: a pool's tenant, project and pool, or a personal
+ * runner's tenant and owner, joined by a `.` no part carries, so no two
+ * runners share one and a pool's three parts are never a personal runner's
+ * two. Names longer than the runner's service can be named for make a digest
+ * of the identity instead, which has no `.` and leads with the runner's kind.
  *
  * @param {PoolIdentity} identity
  * @param {number} nameCharsMax the longest name the runner's service manager takes in a pool's service's name
@@ -394,12 +496,13 @@ export function registerPoolFileName(identity, nameCharsMax) {
     throw new RangeError(
       `a pool file's name is bounded by a count of characters, not ${String(nameCharsMax)}`,
     );
-  const name = [identity.tenant, identity.project, identity.pool]
+  const name = poolIdentityNames(identity)
     .map(registerPoolFileNamePart)
     .join(".");
+  const kind = poolIdentityPersonal(identity) ? "personal" : "pool";
   return name.length <= nameCharsMax
     ? `${name}.json`
-    : `pool-${poolIdentityDigest(identity)}.json`;
+    : `${kind}-${poolIdentityDigest(identity)}.json`;
 }
 
 /**

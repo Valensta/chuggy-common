@@ -28,6 +28,7 @@ import {
 import {
   answeringFetch,
   registeredFixture as registered,
+  registeredPersonalFixture as personal,
 } from "./register.fixture.mjs";
 import { poolCredentials } from "./poolCredentials.mjs";
 
@@ -38,6 +39,14 @@ const request = {
   api: new URL("https://chuggy.example"),
   token: "registration-token-fixture",
   pool: "shame",
+  capability: "Platform:Linux:Amd64",
+};
+
+/** @type {import("./register.mjs").RegisterRequest} */
+const personalRequest = {
+  kind: "Personal",
+  api: new URL("https://chuggy.example"),
+  token: "registration-token-fixture",
   capability: "Platform:Linux:Amd64",
 };
 
@@ -490,4 +499,185 @@ test("a pool file that cannot be renamed into place leaves no temporary file beh
     registerPoolFileWritten(directory, registered, nameCharsMax),
   );
   assert.deepEqual(await readdir(directory), ["newtenant.arbbot.shame.json"]);
+});
+
+test("a personal redemption is posted to chuggy's personal registrations, naming no pool", async () => {
+  const { fetch, requests } = answeringFetch(201, personal);
+  assert.deepEqual(await registerRedeemed(personalRequest, fetch), personal);
+  assert.equal(requests.length, 1);
+  const [{ url, init }] = requests;
+  assert.equal(
+    url,
+    "https://chuggy.example/api/v1/personal-runner-registrations",
+  );
+  assert.equal(init.method, "POST");
+  assert.equal(init.redirect, "error");
+  assert.deepEqual(init.headers, {
+    "content-type": "application/vnd.chuggy.v1+json",
+    accept: "application/vnd.chuggy.v1+json",
+  });
+  assert.deepEqual(JSON.parse(String(init.body)), {
+    token: "registration-token-fixture",
+    capabilities: ["Platform:Linux:Amd64"],
+  });
+});
+
+test("a 201 whose body is no personal runner's file for the capability asked for is refused, naming no value in it", async () => {
+  const { kind, ...kindless } = personal;
+  assert.equal(kind, "Personal");
+  const refused = [
+    [registered, /Unrecognized key/u],
+    [kindless, /kind /u],
+    [{ ...personal, kind: "Dedicated" }, /kind /u],
+    [{ ...personal, project: "arbbot" }, /Unrecognized key/u],
+    [{ ...personal, owner: "" }, /owner /u],
+    [{ ...personal, owner: "o".repeat(257) }, /owner /u],
+    [{ ...personal, tenant: "" }, /tenant /u],
+    [{ ...personal, clientSecret: "" }, /clientSecret /u],
+    [
+      { ...personal, planeUrl: "http://chuggy-pool.chuggy.example/" },
+      /planeUrl is not an https URL/u,
+    ],
+    [
+      { ...personal, capabilities: ["Platform:Linux:Arm64"] },
+      /for another pool or capability/u,
+    ],
+  ];
+  for (const [body, why] of refused)
+    await assert.rejects(
+      registerRedeemed(personalRequest, answeringFetch(201, body).fetch),
+      (failure) => {
+        const { message } = /** @type {Error} */ (failure);
+        assert.match(message, why, message);
+        assert.match(message, /the token is spent, so mint another$/u);
+        assert.ok(!message.includes("client-secret-fixture"), message);
+        return true;
+      },
+      JSON.stringify(body),
+    );
+});
+
+test("a pool's redemption answered with a personal runner's file is refused", async () => {
+  await assert.rejects(
+    registerRedeemed(request, answeringFetch(201, personal).fetch),
+    /no pool file this runner reads \(.*Unrecognized key.*\); the token is spent, so mint another$/u,
+  );
+});
+
+test("a personal registration that lost a race is told to run again, its token unspent; a pool's is answered as any status", async () => {
+  const conflict = {
+    error: { code: "RegistrationConflict", message: "try again" },
+  };
+  await assert.rejects(
+    registerRedeemed(personalRequest, answeringFetch(409, conflict).fetch),
+    /^Error: chuggy registered this member's runner again meanwhile, and the token is not spent; run register again$/u,
+  );
+  await assert.rejects(
+    registerRedeemed(request, answeringFetch(409, conflict).fetch),
+    /^Error: chuggy answered the registration with HTTP 409$/u,
+  );
+  await assert.rejects(
+    registerRedeemed(personalRequest, answeringFetch(404, "").fetch),
+    /^Error: the registration token is unknown, spent or expired/u,
+  );
+});
+
+test("a personal ask names no pool, and is checked as a pool's is otherwise", () => {
+  const asked = {
+    api: "https://chuggy.example/",
+    token: "t",
+    pool: undefined,
+    personal: true,
+  };
+  assert.deepEqual(registerAskedChecked(asked, "---"), {
+    checked: {
+      kind: "Personal",
+      api: new URL("https://chuggy.example"),
+      token: "t",
+    },
+  });
+  assert.deepEqual(registerRequest(asked, { hostname: "---", arch: "arm64" }), {
+    request: {
+      kind: "Personal",
+      api: new URL("https://chuggy.example"),
+      token: "t",
+      capability: "Platform:Linux:Arm64",
+    },
+  });
+  for (const [refusedAsk, why] of [
+    [{ ...asked, pool: "shame" }, /^--pool names a pool, .*without --pool$/u],
+    [{ ...asked, token: "" }, /^--token is not a registration token$/u],
+    [
+      { ...asked, token: "t".repeat(257) },
+      /^--token is not a registration token$/u,
+    ],
+    [{ ...asked, api: "http://chuggy.example" }, /must be https/u],
+    [{ ...asked, token: undefined }, /needs --api and --token/u],
+  ]) {
+    const answer = registerAskedChecked(refusedAsk, "shame");
+    assert.ok("refused" in answer, JSON.stringify(refusedAsk));
+    assert.match(answer.refused, why);
+  }
+  assert.deepEqual(registerRequest(asked, { hostname: "x", arch: "ia32" }), {
+    refused: "this machine is ia32, and a pool runs Linux on x64 or arm64",
+  });
+});
+
+test("a personal runner's file is named by its tenant and owner, two parts where a pool's has three", () => {
+  assert.equal(
+    registerPoolFileName(personal, nameCharsMax),
+    "newtenant.28_3ahttps_3a_2f_2fauth_2echuggy_2eexample_2f0f3c9a52-member.json",
+  );
+  const one = {
+    kind: /** @type {const} */ ("Personal"),
+    tenant: "a",
+    owner: "b",
+  };
+  assert.equal(registerPoolFileName(one, nameCharsMax), "a.b.json");
+  assert.notEqual(
+    registerPoolFileName(one, nameCharsMax),
+    registerPoolFileName({ ...one, owner: "c" }, nameCharsMax),
+  );
+  assert.notEqual(
+    registerPoolFileName({ ...one, tenant: "a.b", owner: "c" }, nameCharsMax),
+    registerPoolFileName(
+      { tenant: "a", project: "b", pool: "c" },
+      nameCharsMax,
+    ),
+  );
+});
+
+test("a personal runner's names too long for a service make a digest of their own kind", () => {
+  const long = { ...personal, owner: "o".repeat(nameCharsMax) };
+  const name = registerPoolFileName(long, nameCharsMax);
+  assert.match(name, /^personal-[0-9a-f]{20}\.json$/u);
+  assert.notEqual(
+    name,
+    registerPoolFileName({ ...long, tenant: "other" }, nameCharsMax),
+  );
+});
+
+test("a personal runner's file is written owner-only beside a pool's of its tenant, read back by the core, and replaced by registering again", async (t) => {
+  const directory = await scratch(t);
+  await registerPoolFileWritten(directory, registered, nameCharsMax);
+  const { file, replaced } = await registerPoolFileWritten(
+    directory,
+    personal,
+    nameCharsMax,
+  );
+  assert.equal(replaced, false);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.deepEqual(await poolCredentials(file), personal);
+  const again = await registerPoolFileWritten(
+    directory,
+    { ...personal, clientId: "chuggy-personal-client-2" },
+    nameCharsMax,
+  );
+  assert.equal(again.file, file);
+  assert.equal(again.replaced, true);
+  assert.equal(
+    (await poolCredentials(file)).clientId,
+    "chuggy-personal-client-2",
+  );
+  assert.equal((await readdir(directory)).length, 2);
 });

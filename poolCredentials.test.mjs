@@ -20,6 +20,19 @@ const registration = {
   clientSecret: secret,
 };
 
+/** A personal runner's file: a pool's less its project and pool, naming its member. */
+const personal = {
+  kind: "Personal",
+  tenant: registration.tenant,
+  owner: "28:https://auth.invalid/oauth2/geoff",
+  capabilities: registration.capabilities,
+  tokenUrl: registration.tokenUrl,
+  audience: registration.audience,
+  planeUrl: registration.planeUrl,
+  clientId: registration.clientId,
+  clientSecret: secret,
+};
+
 /** A file holding `text` at `mode` in a directory of its own, removed after `read`. */
 async function written(text, mode, read) {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-pool-credentials-"));
@@ -139,4 +152,26 @@ test("a path that is no file is refused", async () => {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("a personal runner's file is read back whole", async () => {
+  assert.deepEqual(
+    await written(JSON.stringify(personal), 0o600, poolCredentials),
+    personal,
+  );
+});
+
+test("a personal runner's file naming a project or pool, or no member, or a pool's naming a kind, is refused by name", async () => {
+  const { owner, ...ownerless } = personal;
+  assert.match(owner, /geoff$/u);
+  for (const [document, named] of [
+    [{ ...personal, project: "chuggy" }, /project/u],
+    [{ ...personal, pool: "shame" }, /pool/u],
+    [ownerless, /owner/u],
+    [{ ...personal, owner: "" }, /owner/u],
+    [{ ...personal, kind: "personal" }, /project.*pool|pool.*project/u],
+    [{ ...registration, kind: "Personal" }, /project/u],
+    [{ ...registration, kind: "Dedicated" }, /kind/u],
+  ])
+    assert.match(await refusal(JSON.stringify(document)), named);
 });

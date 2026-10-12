@@ -7,7 +7,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 
-import { containerBackend, containerName } from "./containerBackend.mjs";
+import {
+  checkedContainerBackendSettings,
+  containerBackend,
+  containerName,
+} from "./containerBackend.mjs";
 import { deferred, fakeEngine } from "./engine.fixture.mjs";
 import { jobEnvelope } from "./job.mjs";
 
@@ -1112,3 +1116,47 @@ test("an assignment placed as no kind the loop names is thrown before anything i
   assert.deepEqual(state.calls, []);
   assert.deepEqual(backend.inFlight(), []);
 });
+
+test("a personal runner's containers are named and labelled by its tenant and owner, and a pool's of its tenant are not its own", async (t) => {
+  const personal = {
+    kind: /** @type {const} */ ("Personal"),
+    tenant: "vteng",
+    owner: "28:https://auth.chuggy.example/geoff",
+  };
+  const { backend, state } = await harness(t, { pool: personal });
+  const poolName = seeded(state, "asg-2", "running", startMs / 1000 + 60);
+  state.images.add(image);
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  const name = containerName(personal, "asg-1");
+  assert.match(name, /^chuggy-personal-[0-9a-f]{20}$/u);
+  assert.equal(
+    state.containers.get(name)?.labels["io.chuggy.pool"],
+    "vteng/28:https:%2F%2Fauth.chuggy.example%2Fgeoff",
+  );
+  assert.deepEqual(await backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
+  assert.equal(state.containers.get(poolName)?.status, "running");
+});
+
+test("a pool whose name cannot name a container is refused, and a personal runner, which names none, is not", () => {
+  assert.throws(
+    () => containerBackendSettingsChecked({ ...pool, pool: "a b" }),
+    /pool a b cannot name a container/u,
+  );
+  const personal = {
+    kind: /** @type {const} */ ("Personal"),
+    tenant: "vteng",
+    owner: "a b",
+  };
+  assert.equal(containerBackendSettingsChecked(personal).pool, personal);
+});
+
+/** @param {import("./poolIdentity.mjs").PoolIdentity} identity */
+function containerBackendSettingsChecked(identity) {
+  return checkedContainerBackendSettings(
+    /** @type {import("./containerBackend.mjs").ContainerBackendSettings} */ ({
+      pool: identity,
+    }),
+  );
+}
