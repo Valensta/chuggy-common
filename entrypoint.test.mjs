@@ -23,7 +23,11 @@ import {
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
-import { workerCheckCommands, workerSummaryCharsMax } from "./checks.mjs";
+import {
+  workerChangeBaseVariable,
+  workerCheckCommands,
+  workerSummaryCharsMax,
+} from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
@@ -657,6 +661,165 @@ test("a setup line sees the pod's environment but not the task document", async 
     ])
       delete process.env[name];
   }
+});
+
+/** A shell line that prints what its stage told it of the change's base, or `unset`. */
+const printsChangeBase = `printf "%s" "\${${workerChangeBaseVariable}-unset}"`;
+
+/**
+ * One commanded evaluation run whole in a real checkout, over a plane answering
+ * its input as the repository, the checkout's own commit, and whatever
+ * `references` names given that commit; and what its setup line and its
+ * command each printed. The pod holds a base of its own throughout, which no
+ * run may pass on.
+ */
+async function evaluationPrinted(references) {
+  let printed;
+  let setUp;
+  process.env[workerChangeBaseVariable] = "f".repeat(40);
+  try {
+    await inCheckout(async ({ directory, base }) => {
+      const plane = await servedPlane((route) => {
+        switch (route) {
+          case "task":
+            return {
+              status: 200,
+              body: workTaskAnswerSchema.parse({
+                ...fetchedAnswer,
+                taskKind: "Evaluation",
+                worker: {
+                  mode: {
+                    type: "Commands",
+                    commands: [`${printsChangeBase} > told`],
+                  },
+                  setup: [`${printsChangeBase} > set-up`],
+                  files: [],
+                },
+              }),
+            };
+          case "input": {
+            const placed = inputAnswer("repository-1", base);
+            placed.body.references.push(...references(base));
+            return placed;
+          }
+          case "credential":
+            return {
+              status: 200,
+              body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+            };
+          case "report":
+            return { status: 202, body: { action: "stop" } };
+          default:
+            return { status: 204 };
+        }
+      });
+      const mintedDirectory = await mkdtemp(join(tmpdir(), "chuggy-minted-"));
+      try {
+        const served = { ...envelope, callbackUrl: plane.url };
+        const { task } = await envelopeTask(served);
+        await workerAttempt(envelopeLaunch(served, task), {
+          minted: mintedDirectory,
+          write: async () => undefined,
+          clone: async () => directory,
+        });
+        printed = await readFile(join(directory, "told"), "utf8");
+        setUp = await readFile(join(directory, "set-up"), "utf8");
+      } finally {
+        await plane.close();
+        await rm(mintedDirectory, { recursive: true, force: true });
+      }
+    });
+  } finally {
+    delete process.env[workerChangeBaseVariable];
+  }
+  return { printed, setUp };
+}
+
+/**
+ * Catches the base the bundle pinned not reaching a check stage's commands or
+ * the setup lines of its block, or reaching them as anything but the commit
+ * itself.
+ */
+test("a check stage's shells are told the commit its input names the change started from", async () => {
+  let pinned;
+
+  const told = await evaluationPrinted((base) => {
+    pinned = base;
+    return [{ ordinal: 3, kind: "ChangeBase", reference: base }];
+  });
+
+  assert.deepEqual(told, { printed: pinned, setUp: pinned });
+});
+
+/**
+ * Catches a stage told a base its bundle never named, which a check would
+ * narrow to; unset, it runs everything.
+ */
+test("a check stage whose input names no base leaves the variable unset", async () => {
+  const told = await evaluationPrinted(() => []);
+
+  assert.deepEqual(told, { printed: "unset", setUp: "unset" });
+});
+
+/**
+ * Catches a base the clone does not hold being passed on, which leaves the
+ * check's own diff to fail, and one that is not a full hash, which names
+ * whatever git resolves it to rather than the commit the bundle pinned.
+ */
+test("a base the clone cannot hold as that very commit leaves the variable unset", async () => {
+  for (const named of [() => "e".repeat(40), (base) => base.slice(0, 12)]) {
+    const { printed } = await evaluationPrinted((base) => [
+      { ordinal: 3, kind: "ChangeBase", reference: named(base) },
+    ]);
+
+    assert.equal(printed, "unset");
+  }
+});
+
+/**
+ * One workspace over a real checkout, its input naming the checkout's own
+ * commit as where the attempt starts and whatever `references` adds.
+ */
+async function workspaceNaming(references) {
+  let workspace;
+  await inCheckout(async ({ directory, base }) => {
+    workspace = await workerWorkspace(
+      { ...task, authority: { credentials: ["forge"] } },
+      repositories,
+      credentialFiles,
+      "capability",
+      () => undefined,
+      {
+        request: async (_task, _bearer, path) =>
+          path === "/v1/input"
+            ? {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  references: [
+                    { kind: "Repository", reference: "repository-1" },
+                    { kind: "TargetCommit", reference: base },
+                    ...references(base),
+                  ],
+                }),
+              }
+            : { status: 404, json: async () => ({ reason: "NotMinted" }) },
+        clone: async () => directory,
+        workspace: "/workspace",
+      },
+    );
+  });
+  return workspace;
+}
+
+test("a bundle naming two bases is refused rather than either taken", async () => {
+  await assert.rejects(
+    workspaceNaming((base) => [
+      { kind: "ChangeBase", reference: base },
+      { kind: "ChangeBase", reference: "e".repeat(40) },
+    ]),
+    /input bundle must carry at most one ChangeBase/u,
+  );
 });
 
 /**
