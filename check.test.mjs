@@ -28,7 +28,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
 
-import * as workerEnvironment from "@chuggy/worker-contract/workerEnvironment";
+import { workerImageFaultStatuses } from "@chuggy/worker-contract/workerEnvironment";
 
 import {
   workerImageSteeringVariables,
@@ -36,19 +36,6 @@ import {
   workerStageEnvironment,
 } from "./checks.mjs";
 import { posixShells } from "./shells.fixture.mjs";
-
-/**
- * The status the check exits with for each fault it finds, keyed as chuggy's
- * worker contract keys its image faults. The contract this core locks names
- * no status for one, so they are this suite's until it does.
- */
-const faultStatuses = {
-  ImageLibcUnsupported: 81,
-  ImageLacksGit: 82,
-  ImageHomeUnwritable: 83,
-  ImageWorkspaceUnwritable: 84,
-  ImageTmpUnwritable: 85,
-};
 
 /** What the check exits with where the fault is not the image's: its own usage, and a runtime that is not whole. */
 const usageStatus = 2;
@@ -168,9 +155,11 @@ function checkWritable(path) {
   }
 }
 
-/** Why a case is skipped where uid 0 writes a directory whatever its mode. */
+/** Why a case is skipped where uid 0 writes and searches a directory whatever its mode. */
 const checkRootWrites =
-  process.getuid?.() === 0 ? "uid 0 writes a read-only directory" : false;
+  process.getuid?.() === 0
+    ? "uid 0 writes and searches a directory whatever its mode"
+    : false;
 
 /** The line naming a directory this user cannot write. */
 const unwritable = (label, path) =>
@@ -363,7 +352,7 @@ async function checkFault(t, shell, fault) {
   for (const args of [[], ["check"]]) {
     const ran = checked(shell, tree, fault.environment?.(tree), args);
 
-    assert.equal(ran.status, faultStatuses[fault.fault], ran.stderr);
+    assert.equal(ran.status, workerImageFaultStatuses[fault.fault], ran.stderr);
     assert.equal(ran.line, fault.line(tree), ran.stderr);
     assert.equal(ran.stdout, "", "the core started on an image with a fault");
     if (fault.loader !== undefined)
@@ -558,7 +547,9 @@ const checkCases = [
   },
   ...imageFaults.map((fault) => ({
     name: fault.name,
-    skip: fault.readOnly !== undefined && checkRootWrites,
+    skip:
+      (fault.readOnly !== undefined || fault.unsearchable !== undefined) &&
+      checkRootWrites,
     run: (t, shell) => checkFault(t, shell, fault),
   })),
   {
@@ -571,7 +562,10 @@ const checkCases = [
 
       if (checkWritable("/workspace")) assert.equal(ran.status, 0, ran.stderr);
       else {
-        assert.equal(ran.status, faultStatuses.ImageWorkspaceUnwritable);
+        assert.equal(
+          ran.status,
+          workerImageFaultStatuses.ImageWorkspaceUnwritable,
+        );
         assert.equal(ran.line, unwritable("the workspace", "/workspace"));
       }
     },
@@ -585,7 +579,7 @@ const checkCases = [
 
         if (checkWritable("/tmp")) assert.equal(ran.status, 0, ran.stderr);
         else {
-          assert.equal(ran.status, faultStatuses.ImageTmpUnwritable);
+          assert.equal(ran.status, workerImageFaultStatuses.ImageTmpUnwritable);
           assert.equal(ran.line, unwritable("the temporary directory", "/tmp"));
         }
       }
@@ -642,18 +636,17 @@ test("every name check.sh assigns is its own", () => {
 
 /** Catches a status that is a fault's and is also what the check exits with for something that is not the image's. */
 test("no status the check exits with for itself is a fault's", () => {
-  const statuses = Object.values(faultStatuses);
+  const statuses = Object.values(workerImageFaultStatuses);
 
   assert.equal(new Set(statuses).size, statuses.length);
   assert.ok(!statuses.includes(usageStatus));
   assert.ok(!statuses.includes(runtimeBrokenStatus));
 });
 
-/** Fails once the locked contract names the statuses, so the suite is then held to the contract's and not its own. */
-test("the locked contract names no status for an image fault", () => {
-  assert.equal(
-    Object.hasOwn(workerEnvironment, "workerImageFaultStatuses"),
-    false,
-    "the contract names the statuses: hold check.sh to workerImageFaultStatuses in place of faultStatuses",
+/** Catches a fault the contract says the check tells by its status that no case has the check find. */
+test("every fault the contract gives a status has the check find it", () => {
+  assert.deepEqual(
+    [...new Set(imageFaults.map(({ fault }) => fault))].sort(),
+    Object.keys(workerImageFaultStatuses).sort(),
   );
 });

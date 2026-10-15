@@ -572,11 +572,17 @@ async function heldToMap(
   }
 }
 
+/**
+ * The job routes the pod's core does not call: a brief's image, whose bytes
+ * the briefing tells the agent to read itself.
+ */
+const agentJobRoutes = ["inputArtifact"];
+
 test("every status a job route the pod calls may answer is one the pod has a named reaction to", async () => {
   await heldToMap(
     planes.job,
     jobReactions,
-    [],
+    agentJobRoutes,
     jobCallers,
     jobSuccess,
     jobTransport,
