@@ -12,6 +12,7 @@
 
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -104,6 +105,7 @@ import { sessionMailbox } from "./sessionMailbox.mjs";
 import { sessionStopWatch } from "./sessionStop.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 import { sessionRequest, sessionRequestOnce } from "./sessionTransport.mjs";
+import { readTicketImages } from "./ticketImages.mjs";
 import { workerRequest } from "./transport.mjs";
 
 const jobTask = {
@@ -118,6 +120,14 @@ const repositories = {
   "repository-1": { url: "https://github.com/kasofsk/chuggy.git" },
 };
 const base = "0".repeat(40);
+
+/** A brief's image as the plane serves it, and the input reference that pins it. */
+const image = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const imagePinned = {
+  kind: "ProjectArtifact",
+  reference: "image-1",
+  digest: createHash("sha256").update(image).digest("hex"),
+};
 
 /** What each job route answers when it is not the one a case is about. */
 function jobSuccess(route) {
@@ -142,6 +152,8 @@ function jobSuccess(route) {
       return { status: 200, body: { turnsRecorded: 1 } };
     case "credential":
       return { status: 200, body: mintedCredential };
+    case "inputArtifact":
+      return { status: 200, body: image };
     default:
       return { status: 204 };
   }
@@ -241,6 +253,20 @@ const jobCallers = {
   runEnded: async (request) => {
     const recorder = await recorded(request);
     await recorder.ended();
+  },
+  inputArtifact: async (request) => {
+    const directory = await mkdtemp(join(tmpdir(), "chuggy-contract-images-"));
+    try {
+      await readTicketImages({
+        task: jobTask,
+        bearer,
+        references: [imagePinned],
+        directory,
+        request,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   },
   credential: (request) =>
     planeCredential({
@@ -449,6 +475,14 @@ const jobReactions = {
     413: "reads",
   },
   runEnded: { 204: "reads", 400: "stops", 401: "stops", 409: "stops" },
+  inputArtifact: {
+    200: "reads",
+    401: "stops",
+    404: "stops",
+    409: "stops",
+    413: "stops",
+    503: "retries",
+  },
   credential: {
     200: "reads",
     401: "stops",
@@ -572,17 +606,11 @@ async function heldToMap(
   }
 }
 
-/**
- * The job routes the pod's core does not call: a brief's image, whose bytes
- * the briefing tells the agent to read itself.
- */
-const agentJobRoutes = ["inputArtifact"];
-
 test("every status a job route the pod calls may answer is one the pod has a named reaction to", async () => {
   await heldToMap(
     planes.job,
     jobReactions,
-    agentJobRoutes,
+    [],
     jobCallers,
     jobSuccess,
     jobTransport,
