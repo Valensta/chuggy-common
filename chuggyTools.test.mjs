@@ -987,6 +987,7 @@ test("the descriptions say what the server does where a session reads it", () =>
     revoke_ticket: [/same turn is the same operation/, /other than Pending/],
     read_lead: [
       /None, and `absence\.reason` says why/,
+      /`Paused`: [^.]*, so no ticket is picked up automatically; it must be resumed by someone who may, and this reason is answered ahead of the others\./,
       /`NotNeeded`: no refusal stands/,
       /before anything is released/,
       /release a ticket/,
