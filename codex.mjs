@@ -31,6 +31,7 @@ const reservedCodexArguments = [
   "--dangerously-bypass-approvals-and-sandbox",
   "--skip-git-repo-check",
   "--resume",
+  "--",
 ];
 
 const reservedCodexShortArguments = ["-m", "-c", "-p", "-s", "-C"];
@@ -87,7 +88,10 @@ export async function prepareCodexShell(handed) {
 
 /**
  * The argv of one run. `run` names the result schema's file and the arguments
- * the run's shell was prepared with.
+ * the run's shell was prepared with. The briefing comes after `--`, so it is
+ * the prompt whatever precedes it: an option a worker configures may take
+ * every word after it, as `--image` does, and would otherwise take the
+ * briefing as one of its values.
  */
 export function codexInvocation(task, run) {
   return [
@@ -103,6 +107,7 @@ export function codexInvocation(task, run) {
     run.resultSchema,
     ...run.shellArguments,
     ...configuredArguments(task),
+    "--",
     task.briefing.text,
   ];
 }

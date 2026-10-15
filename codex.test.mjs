@@ -53,8 +53,44 @@ test("a Codex invocation is ephemeral and constrained to the result schema", () 
       "/tmp/result.json",
       "--config",
       "shell",
+      "--",
       "briefing",
     ],
+  );
+});
+
+/**
+ * Catches the briefing taken as a value of the option before it, which an
+ * option a worker configures, such as `--image`, takes every word after it
+ * for, and which leaves a run with no prompt.
+ */
+test("a Codex briefing is the prompt whatever options precede it", () => {
+  for (const configured of [[], ["--image", "screen.png"]]) {
+    const argv = codexInvocation(
+      {
+        ...task,
+        worker: { mode: { ...task.worker.mode, arguments: configured } },
+      },
+      run,
+    );
+
+    assert.deepEqual(argv.slice(-2), ["--", "briefing"]);
+    assert.equal(argv.indexOf("--"), argv.length - 2);
+  }
+});
+
+/** Catches a worker's `--` making the run's own `--` and briefing two prompts. */
+test("ticket configuration cannot end a Codex run's options itself", () => {
+  assert.throws(
+    () =>
+      codexInvocation(
+        {
+          ...task,
+          worker: { mode: { ...task.worker.mode, arguments: ["--"] } },
+        },
+        run,
+      ),
+    /reserves Codex argument --$/u,
   );
 });
 
