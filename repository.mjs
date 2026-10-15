@@ -1,4 +1,5 @@
-const askpass = "/usr/local/lib/chuggy/git-askpass.sh";
+import { workerStageEnvironment } from "./checks.mjs";
+import { coreRuntime } from "./coreRuntime.mjs";
 
 /** @typedef {{ url?: unknown, credential?: unknown, credentialUsername?: unknown }} WorkerRepositoryConfiguration */
 
@@ -25,7 +26,8 @@ export function workerRepositories(value) {
 
 /**
  * The askpass environment one credential is presented to git through, whether
- * the value behind the file was mounted by the launcher or minted by the plane.
+ * the value behind the file was mounted by the launcher or minted by the plane:
+ * what the image's own programs are handed, and the askpass beside it.
  *
  * @param {string} credentialFile
  * @param {string} credentialUsername
@@ -35,10 +37,10 @@ export function workerCredentialEnvironment(
   credentialUsername,
 ) {
   return {
-    ...process.env,
+    ...workerStageEnvironment(process.env),
     CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
     CHUG_WORKER_GIT_CREDENTIAL_USERNAME: credentialUsername,
-    GIT_ASKPASS: askpass,
+    GIT_ASKPASS: coreRuntime.askpass,
     GIT_TERMINAL_PROMPT: "0",
   };
 }

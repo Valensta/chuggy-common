@@ -1,9 +1,11 @@
+import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult } from "./result.mjs";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
-const codexHome = "/tmp/chuggy-codex-home";
 const executeFile = promisify(execFile);
 
 const reservedCodexArguments = [
@@ -29,6 +31,7 @@ const reservedCodexArguments = [
   "--dangerously-bypass-approvals-and-sandbox",
   "--skip-git-repo-check",
   "--resume",
+  "--",
 ];
 
 const reservedCodexShortArguments = ["-m", "-c", "-p", "-s", "-C"];
@@ -53,7 +56,44 @@ function configuredArguments(task) {
   return args;
 }
 
-export function codexInvocation(task, paths) {
+/**
+ * `text` as a TOML basic string, which is how a `--config` value is read. A
+ * backslash, a quote and every control character are escaped, so no character
+ * TOML refuses in one is left in it.
+ */
+function codexTomlString(text) {
+  return `"${text.replace(/[\\"\p{Cc}]/gu, (character) =>
+    character === "\\" || character === '"'
+      ? `\\${character}`
+      : `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`,
+  )}"`;
+}
+
+/**
+ * The override of Codex's `shell_environment_policy` that hands the shell Codex
+ * runs each command in each variable of `handed` as it is, which is what a
+ * check stage's shells are handed beyond what Codex's own process runs with.
+ */
+export function codexShellArguments(handed) {
+  const set = Object.entries(handed).map(
+    ([name, value]) => `${name} = ${codexTomlString(value)}`,
+  );
+  return ["--config", `shell_environment_policy.set={${set.join(", ")}}`];
+}
+
+/** What a Codex run's shell is handed, which is given by arguments alone. */
+export async function prepareCodexShell(handed) {
+  return { environment: {}, arguments: codexShellArguments(handed) };
+}
+
+/**
+ * The argv of one run. `run` names the result schema's file and the arguments
+ * the run's shell was prepared with. The briefing comes after `--`, so it is
+ * the prompt whatever precedes it: an option a worker configures may take
+ * every word after it, as `--image` does, and would otherwise take the
+ * briefing as one of its values.
+ */
+export function codexInvocation(task, run) {
   return [
     "exec",
     "--json",
@@ -64,8 +104,10 @@ export function codexInvocation(task, paths) {
     task.worker.mode.model,
     "--dangerously-bypass-approvals-and-sandbox",
     "--output-schema",
-    paths.resultSchema,
+    run.resultSchema,
+    ...run.shellArguments,
     ...configuredArguments(task),
+    "--",
     task.briefing.text,
   ];
 }
@@ -75,7 +117,7 @@ export async function codexConfiguration(
   environment,
   execute = executeFile,
 ) {
-  const { stdout } = await execute("codex", ["--version"], {
+  const { stdout } = await execute(coreRuntime.codex, ["--version"], {
     env: environment,
     maxBuffer: 4096,
   });
@@ -109,7 +151,14 @@ export function codexResult(events) {
   return { output, result: agentResult(parsed, "Codex") };
 }
 
-export async function prepareCodexCredential(auth, home = codexHome) {
+/**
+ * The credential a Codex run reads, written to a Codex home of its own under
+ * the image's HOME, which is the directory a job's check has found writable.
+ */
+export async function prepareCodexCredential(
+  auth,
+  home = join(homedir(), ".chuggy-codex-home"),
+) {
   let document;
   try {
     document = JSON.parse(auth);
@@ -147,11 +196,12 @@ function codexObserved(event) {
 export const codexAgent = {
   name: "Codex",
   runtime: "Codex",
-  executable: "codex",
+  executable: coreRuntime.codex,
   credential: "codex-auth",
   invocation: codexInvocation,
   result: codexResult,
   prepareCredential: prepareCodexCredential,
+  prepareShell: prepareCodexShell,
   configuration: codexConfiguration,
   configurationEvent: () => false,
   resultEvent: (event) => codexMessage(event) !== undefined,

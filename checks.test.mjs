@@ -31,6 +31,10 @@ import {
   workerCheckCommands,
   workerCheckOutputCharsMax,
   workerCheckStageOutputCharsMax,
+  workerImageSteeringVariables,
+  workerImageVariable,
+  workerInheritedEnvironment,
+  workerStageEnvironment,
   workerSummaryCharsMax,
   workerSummaryText,
 } from "./checks.mjs";
@@ -339,6 +343,91 @@ test("a stage that knows no base leaves the variable unset, whatever the pod hol
   } finally {
     delete process.env[workerChangeBaseVariable];
   }
+});
+
+/**
+ * What `check.sh` keeps of an image that set each variable it moves aside to
+ * `value(name)`, and what that image set.
+ */
+function imageMoved(value) {
+  const pairs = workerImageSteeringVariables.map((name) => [name, value(name)]);
+  return {
+    kept: Object.fromEntries(
+      pairs.map(([name, set]) => [workerImageVariable(name), set]),
+    ),
+    set: Object.fromEntries(pairs),
+  };
+}
+
+/**
+ * Catches a stage's shells run without what the project's image set them up
+ * with, or with chuggy's names for it in their place. The loader's own
+ * variables are set empty, which also holds an empty value handed back as
+ * set, so the shell the stage starts loads as it would anyway.
+ */
+test("a stage's commands get back each variable check.sh moved aside, under its own name", async () => {
+  const image = imageMoved((name) =>
+    name.startsWith("LD_") ? "" : `the image's ${name}`,
+  );
+  Object.assign(process.env, image.kept);
+  try {
+    const { output } = await ran([
+      workerImageSteeringVariables
+        .map((name) => `printf "%s|" "\${${name}-unset}"`)
+        .join("; "),
+      `printf "%s" "\${${workerImageVariable("NODE_PATH")}-unset}"`,
+    ]);
+
+    assert.equal(
+      output.checks[0].output,
+      Object.values(image.set)
+        .map((value) => `${value}|`)
+        .join(""),
+    );
+    assert.equal(output.checks[1].output, "unset");
+  } finally {
+    for (const name of Object.keys(image.kept)) delete process.env[name];
+  }
+});
+
+/**
+ * Catches a value handed back under another variable's name, or losing to one
+ * standing under its own, which only chuggy's own processes could have set.
+ */
+test("a value check.sh kept is handed back under its own name, over any standing there", () => {
+  const image = imageMoved((name) => `the image's ${name}`);
+
+  assert.deepEqual(
+    workerStageEnvironment({ ...image.kept, NODE_PATH: "chuggy's" }),
+    image.set,
+  );
+});
+
+/**
+ * Catches the stage dropping what an image run without `check.sh` sets, as
+ * chuggy's own worker image sets `NODE_PATH`.
+ */
+test("a variable nothing moved aside reaches a stage as it stands", () => {
+  const standing = { NODE_PATH: "/usr/local/lib/node_modules", PATH: "/bin" };
+
+  assert.deepEqual(workerStageEnvironment(standing), standing);
+});
+
+/**
+ * Catches the image's values reaching what is not a stage's shell: what a
+ * session's runtime inherits is chuggy's own process, and keeps them aside.
+ */
+test("what a pod's runtime inherits keeps the image's values aside", () => {
+  const image = imageMoved((name) => `the image's ${name}`);
+
+  assert.deepEqual(
+    workerInheritedEnvironment({
+      ...image.kept,
+      [workerTaskVariable]: "{}",
+      [workerChangeBaseVariable]: "c".repeat(40),
+    }),
+    image.kept,
+  );
 });
 
 test("each command runs in the workspace the stage was given", async () => {

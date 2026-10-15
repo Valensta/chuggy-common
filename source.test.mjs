@@ -7,10 +7,13 @@ import test from "node:test";
 import {
   author,
   git,
+  handedAsTheImage,
   headOf,
   inCheckout,
+  recordingGit,
   remoteRefs,
 } from "./checkout.fixture.mjs";
+import { workerCredentialEnvironment } from "./repository.mjs";
 import {
   commitAndPushSource,
   resultDocument,
@@ -391,6 +394,56 @@ test("a check git cannot run refuses the push", async () => {
     );
     assert.equal(asked.refreshes, 0);
     assert.equal(await remoteRefs(checkout.remote), "");
+  });
+});
+
+/**
+ * An image's git, and the hooks its project installed, may need a value
+ * `check.sh` moved aside. Catches any git call of the push's, or a hook one of
+ * them runs, handed the core's own environment: without that value, or with
+ * the task document, which carries the attempt's bearer.
+ */
+test("each git a push runs, and each hook it runs, is handed the image's environment and no task document", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const recording = await recordingGit(t);
+    await git("git", ["config", "core.hooksPath", recording.hooks], {
+      cwd: directory,
+    });
+    await writeFile(join(directory, "provisioned"), "set up\n");
+    recording.start();
+
+    await commitAndPushSource({
+      task: {
+        ticket: 9,
+        attempt: "opaque",
+        worker: { files: [{ path: "provisioned" }] },
+      },
+      repositoryId: "chuggy",
+      repository: remote,
+      base,
+      directory,
+      command: git,
+      environment: workerCredentialEnvironment(join(remote, "unread"), "x"),
+      secrets: held,
+    });
+
+    const records = await recording.records();
+    for (const [label, ...handed] of records)
+      assert.deepEqual(handed, handedAsTheImage, label);
+    const labels = records.map(([label]) => label);
+    for (const expected of [
+      "git config",
+      "git add",
+      "git reset",
+      "git commit",
+      "pre-commit",
+      "git rev-parse",
+      "git rev-list",
+      "git cat-file",
+      "git push",
+      "pre-push",
+    ])
+      assert.ok(labels.includes(expected), `${expected} was never recorded`);
   });
 });
 

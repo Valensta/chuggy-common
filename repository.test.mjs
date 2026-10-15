@@ -8,15 +8,20 @@ import { fileURLToPath, URL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  sessionTaskVariable,
   workerCredentialFilesSchema,
   workerRepositoriesSchema,
+  workerTaskVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import { workerImageVariable } from "./checks.mjs";
 import {
+  workerCredentialEnvironment,
   workerRepositories,
   workerRepository,
   workerRepositoryUrl,
 } from "./repository.mjs";
+import { posixShells } from "./shells.fixture.mjs";
 
 const executeFile = promisify(execFile);
 const askpass = fileURLToPath(new URL("./git-askpass.sh", import.meta.url));
@@ -88,11 +93,42 @@ test("a worker repository selects its own credential", () => {
     selected.environment.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
     repositories.github.credentialUsername,
   );
-  assert.equal(
-    selected.environment.GIT_ASKPASS,
-    "/usr/local/lib/chuggy/git-askpass.sh",
-  );
+  assert.equal(selected.environment.GIT_ASKPASS, askpass);
   assert.equal(selected.environment.GIT_TERMINAL_PROMPT, "0");
+});
+
+/**
+ * Catches git reaching a remote with the core's own environment: without the
+ * image's value of a variable `check.sh` moved aside, with the name `check.sh`
+ * kept it under, or with a task document. A session's clone is handed the same.
+ */
+test("the askpass environment is what the image's programs are handed, and the askpass", (t) => {
+  const kept = workerImageVariable("LD_LIBRARY_PATH");
+  const pod = {
+    [kept]: "/the/image/lib",
+    [workerTaskVariable]: "the task document",
+    [sessionTaskVariable]: "the session's task document",
+    SITE_VARIABLE: "set by the site",
+  };
+  const saved = Object.keys(pod).map((name) => [name, process.env[name]]);
+  Object.assign(process.env, pod);
+  t.after(() => {
+    for (const [name, value] of saved)
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+
+  const environment = workerCredentialEnvironment("/credentials/github", "x");
+
+  assert.equal(environment.LD_LIBRARY_PATH, "/the/image/lib");
+  assert.equal(environment.SITE_VARIABLE, "set by the site");
+  for (const name of [kept, workerTaskVariable, sessionTaskVariable])
+    assert.ok(!Object.hasOwn(environment, name), `${name} reaches git`);
+  assert.equal(
+    environment.CHUG_WORKER_GIT_CREDENTIAL_FILE,
+    "/credentials/github",
+  );
+  assert.equal(environment.GIT_ASKPASS, askpass);
 });
 
 test("a worker repository refuses incomplete credential configuration", () => {
@@ -203,3 +239,47 @@ test("git askpass reads the selected repository credential", async (t) => {
   assert.equal(username.stdout, "selected-user\n");
   assert.equal(password.stdout, "selected-token\n");
 });
+
+/** The answer the askpass gives under `shell` on a PATH of nothing, the credential file holding `content`. */
+async function askpassAnswer(shell, directory, content) {
+  const credentialFile = join(directory, "credential");
+  await rm(credentialFile, { force: true });
+  if (content !== undefined) await writeFile(credentialFile, content);
+  return executeFile(
+    shell.argv[0],
+    [...shell.argv.slice(1), askpass, "Password for repository"],
+    {
+      env: {
+        PATH: join(directory, "nothing"),
+        CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
+      },
+    },
+  );
+}
+
+/**
+ * Catches an askpass that reaches for a command, which an image a job runs in
+ * need not have, or that trims more than the trailing whitespace a mounted
+ * token ends with.
+ */
+for (const shell of posixShells)
+  test(
+    `git askpass answers from its shell's builtins alone, under ${shell.name}`,
+    { skip: shell.absent },
+    async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "chuggy-askpass-"));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      for (const [content, answer] of [
+        ["token  \t\r\nsecond line\n", "token\n"],
+        ["  leading kept *? [x]  ", "  leading kept *? [x]\n"],
+        ["", "\n"],
+      ]) {
+        const { stdout } = await askpassAnswer(shell, directory, content);
+
+        assert.equal(stdout, answer, JSON.stringify(content));
+      }
+      await assert.rejects(askpassAnswer(shell, directory, undefined), {
+        code: 1,
+      });
+    },
+  );

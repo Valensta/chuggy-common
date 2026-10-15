@@ -21,12 +21,23 @@
  * earlier: narrowing one shell and not the other leaves the document one `cp`
  * away from the commands.
  *
+ * THOSE SHELLS ARE HANDED BACK WHAT THE IMAGE SET TO STEER A PROCESS. A job's
+ * `check.sh` moves each such variable aside before chuggy's node starts, so
+ * that none of chuggy's own processes is steered by the image; a stage's
+ * shells are the project's, and run as the image set them up to.
+ *
  * THOSE SHELLS ARE TOLD THE COMMIT THE CHANGE STARTED FROM, in
  * `CHUG_CHANGE_BASE`, so a check can run only what the change touched. It is
  * set only where the attempt knows that commit, and one the pod inherited is
  * dropped, so a shell that finds it unset runs everything rather than trusting
  * a base nobody gave this attempt. The shell runs with `-u`, so a line reads it
  * as `${CHUG_CHANGE_BASE-}`, and `"$CHUG_CHANGE_BASE"` aborts where it is unset.
+ *
+ * AN AGENT'S SHELL IS HANDED WHAT THOSE SHELLS ARE, so that a check the agent
+ * runs is handed what the stage's would be. The agent is started from what
+ * they inherit, and its shell is handed the moved values and the attempt's own
+ * change base by the agent's own means, beside what the agent itself was
+ * given to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -147,20 +158,93 @@ const checkTaskDocuments = [workerTaskVariable, sessionTaskVariable];
 export const workerChangeBaseVariable = "CHUG_CHANGE_BASE";
 
 /**
- * What the pod holds, less the document that placed it, and with `changeBase`
- * where the attempt knows one. Everything else stands, the site's own variables
- * among it.
+ * The variables an image's environment would steer chuggy's own processes by,
+ * which a job's `check.sh` moves aside before chuggy's node starts.
+ */
+export const workerImageSteeringVariables = [
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "LD_AUDIT",
+];
+
+/** The name `check.sh` keeps the image's value of one of them under. */
+export function workerImageVariable(name) {
+  return `CHUG_IMAGE_${name}`;
+}
+
+/** Every name `check.sh` keeps a moved value under. */
+const checkImageKeptVariables =
+  workerImageSteeringVariables.map(workerImageVariable);
+
+/** `environment` less every name `check.sh` keeps a moved value under. */
+function workerUnkeptEnvironment(environment) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => !checkImageKeptVariables.includes(name),
+    ),
+  );
+}
+
+/**
+ * What the pod holds, less the documents that placed it and any change base it
+ * inherited. Everything else stands, the site's own variables among it.
+ */
+export function workerInheritedEnvironment(environment) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !checkTaskDocuments.includes(name) && name !== workerChangeBaseVariable,
+    ),
+  );
+}
+
+/** The image's own value of each variable `check.sh` moved aside, under its own name again. */
+function workerImageEnvironment(environment) {
+  return Object.fromEntries(
+    workerImageSteeringVariables.flatMap((name) => {
+      const kept = workerImageVariable(name);
+      return Object.hasOwn(environment, kept)
+        ? [[name, environment[kept]]]
+        : [];
+    }),
+  );
+}
+
+/**
+ * What an agent's own process is started from: the pod's inherited
+ * environment, less every name `check.sh` keeps a moved value under.
+ */
+export function workerAgentEnvironment(environment) {
+  return workerUnkeptEnvironment(workerInheritedEnvironment(environment));
+}
+
+/**
+ * What a stage's shells are handed beyond that, which an agent's shell is
+ * handed by the agent's own means: each variable `check.sh` moved aside, back
+ * under its own name, and `changeBase` where the attempt knows one.
+ */
+export function workerShellEnvironment(environment, changeBase) {
+  return {
+    ...workerImageEnvironment(environment),
+    ...(changeBase === undefined
+      ? {}
+      : { [workerChangeBaseVariable]: changeBase }),
+  };
+}
+
+/**
+ * What a stage's shells are handed. With no `changeBase` it is what each of
+ * the image's programs the core runs itself is handed: git, and every hook a
+ * project's setup installed for it, which need the image's values as its
+ * shells do and are not to be handed the task document.
  */
 export function workerStageEnvironment(environment, changeBase) {
-  const kept = Object.entries(environment).filter(
-    ([name]) =>
-      !checkTaskDocuments.includes(name) && name !== workerChangeBaseVariable,
-  );
-  return Object.fromEntries(
-    changeBase === undefined
-      ? kept
-      : [...kept, [workerChangeBaseVariable, changeBase]],
-  );
+  return {
+    ...workerAgentEnvironment(environment),
+    ...workerShellEnvironment(environment, changeBase),
+  };
 }
 
 /** One command's account: what ran, how it ended, and what it wrote. */

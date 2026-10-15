@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,10 +29,17 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
-import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
+import {
+  git,
+  handedAsTheImage,
+  inCheckout,
+  recordingGit,
+  remoteRefs,
+} from "./checkout.fixture.mjs";
 import {
   workerChangeBaseVariable,
   workerCheckCommands,
+  workerImageVariable,
   workerSummaryCharsMax,
 } from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
@@ -42,6 +56,7 @@ import {
   workerMintedWritable,
   workerMode,
   workerRun,
+  workerTemporaryFile,
   workerWorkspace,
 } from "./entrypoint.mjs";
 import {
@@ -50,7 +65,8 @@ import {
   poolHeldSessionAnswer,
 } from "./envelope.fixture.mjs";
 import { keepWorkerLease } from "./lease.mjs";
-import { planeFetch, planes } from "./plane.fixture.mjs";
+import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
+import { agentResultSchema } from "./result.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
 import { facts } from "./sessionHarness.fixture.mjs";
@@ -264,6 +280,48 @@ test("a commanded work task is admitted with no agent credential mounted", async
     credentialFilesMissing,
     "a commanded work task asked for something an agent's credential answers",
   );
+});
+
+/**
+ * Catches the core writing a file of its own outside the temporary directory
+ * the image names, which is the only one its check found it can write.
+ */
+test("an agent's task keeps its result schema in the image's temporary directory", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const ran = await launched({
+    TMPDIR: temporary,
+    [workerTaskVariable]: JSON.stringify({
+      taskKind: "Work",
+      worker: { mode: { type: "SingleAgent", agent: "Claude" } },
+      authority: {
+        network: true,
+        filesystem: "WriteWorkspace",
+        credentials: [claudeAgent.credential],
+      },
+    }),
+  });
+
+  assert.match(ran.stderr, credentialFilesMissing);
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(
+        join(temporary, "chuggy-agent-result-schema.json"),
+        "utf8",
+      ),
+    ),
+    agentResultSchema,
+  );
+});
+
+/** Where a job keeps its own files is the temporary directory as `check.sh` names it. */
+test("an unnamed or empty TMPDIR keeps a job's files in /tmp", () => {
+  assert.equal(
+    workerTemporaryFile("kept", { TMPDIR: "/image/temporary" }),
+    "/image/temporary/kept",
+  );
+  for (const environment of [{}, { TMPDIR: "" }])
+    assert.equal(workerTemporaryFile("kept", environment), "/tmp/kept");
 });
 
 /** Both halves of what a commanded work task must be granted before it runs. */
@@ -812,6 +870,21 @@ async function workspaceNaming(references) {
   return workspace;
 }
 
+/** Catches a workspace that drops the images its bundle pins, or names some where it pins none. */
+test("a workspace carries the images its bundle pins, and none where it pins none", async () => {
+  const pinning = await workspaceNaming(() => [
+    briefImage.reference,
+    { ordinal: 4, kind: "ProjectArtifact", reference: "image/gif:two" },
+  ]);
+  const pinningNone = await workspaceNaming(() => []);
+
+  assert.deepEqual(pinning.images, [
+    briefImage.reference,
+    { ordinal: 4, kind: "ProjectArtifact", reference: "image/gif:two" },
+  ]);
+  assert.ok(!Object.hasOwn(pinningNone, "images"));
+});
+
 test("a bundle naming two bases is refused rather than either taken", async () => {
   await assert.rejects(
     workspaceNaming((base) => [
@@ -1189,7 +1262,8 @@ test("an agent's summary is cut to a report on a code point", async () => {
 
 /**
  * The run an agent's process leaves, the agent stood in for by a shell that
- * writes the one result event Claude Code ends with.
+ * writes the one result event Claude Code ends with, its shell prepared with
+ * nothing: Claude's own would write under this machine's HOME.
  */
 function agentRun(summary, verdict = "Pass") {
   const ended = JSON.stringify({
@@ -1204,10 +1278,210 @@ function agentRun(summary, verdict = "Pass") {
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
+      prepareShell: async () => ({ environment: {}, arguments: [] }),
       invocation: () => ["-c", 'printf "%s\\n" "$1"', "agent", ended],
     },
   });
 }
+
+/** Sets each of `variables` in this process's environment until `t` ends. */
+function podHolds(t, variables) {
+  const saved = Object.fromEntries(
+    Object.keys(variables).map((name) => [name, process.env[name]]),
+  );
+  Object.assign(process.env, variables);
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+}
+
+/**
+ * Catches an agent started without what its shell was prepared with, with a
+ * name `check.sh` kept the image's value under, with the task document or the
+ * change base the pod inherited, any of which would reach the agent's shell;
+ * or its shell prepared without the image's value or the attempt's own base.
+ */
+test("an agent is started as a check stage's shells inherit, and its shell prepared with the rest", async (t) => {
+  const kept = workerImageVariable("NODE_PATH");
+  podHolds(t, {
+    [kept]: "/image/node_modules",
+    [workerTaskVariable]: "the task document",
+    [workerChangeBaseVariable]: "e".repeat(40),
+  });
+  const changeBase = "a".repeat(40);
+  const preparedWith = [];
+  const reads = [kept, workerTaskVariable, workerChangeBaseVariable]
+    .map((name) => `\${${name}-dropped}`)
+    .join(" ");
+  const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s %s %s"}}\\n' "$CHUG_SUITE_SHELL" "$1" "${reads}"`;
+
+  const run = await runWorkerTask({
+    task,
+    directory: process.cwd(),
+    changeBase,
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async (handed) => {
+        preparedWith.push(handed);
+        return {
+          environment: { CHUG_SUITE_SHELL: "prepared" },
+          arguments: ["argued"],
+        };
+      },
+      invocation: (_, prepared) => [
+        "-c",
+        ended,
+        "agent",
+        ...prepared.shellArguments,
+      ],
+    },
+  });
+
+  assert.equal(run.result.summary, "prepared argued dropped dropped dropped");
+  assert.deepEqual(preparedWith, [
+    {
+      NODE_PATH: "/image/node_modules",
+      [workerChangeBaseVariable]: changeBase,
+    },
+  ]);
+});
+
+/** Catches an agent's shell handed a change base where the attempt knows none. */
+test("an agent's shell is handed no change base where the attempt knows none", async (t) => {
+  podHolds(t, { [workerChangeBaseVariable]: "e".repeat(40) });
+  const preparedWith = [];
+  const ended = JSON.stringify({
+    type: "result",
+    structured_output: { verdict: "Pass", summary: "ended" },
+  });
+
+  await runWorkerTask({
+    task,
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async (handed) => {
+        preparedWith.push(handed);
+        return { environment: {}, arguments: [] };
+      },
+      invocation: () => ["-c", 'printf "%s\\n" "$1"', "agent", ended],
+    },
+  });
+
+  assert.equal(preparedWith.length, 1);
+  assert.ok(!Object.hasOwn(preparedWith[0], workerChangeBaseVariable));
+});
+
+/** An image as a brief carries it: its bytes, and the reference its bundle pins it under. */
+const briefImage = {
+  bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7]),
+  reference: {
+    ordinal: 3,
+    kind: "ProjectArtifact",
+    reference: "image/png:one",
+  },
+};
+
+/**
+ * A stand-in agent ending its run with a failing verdict, so a work attempt it
+ * runs pushes nothing, and every task it was started on.
+ */
+function briefedAgent() {
+  const started = [];
+  const ended = JSON.stringify({
+    type: "result",
+    structured_output: { verdict: "Fail", summary: "ended" },
+  });
+  return {
+    started,
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async () => ({ environment: {}, arguments: [] }),
+      invocation: (begun) => {
+        started.push(begun);
+        return ["-c", 'printf "%s\\n" "$1"', "agent", ended];
+      },
+    },
+  };
+}
+
+/** The file a briefing names for `identity`, from the section its images end it with. */
+function briefedFile(text, identity) {
+  const line = text
+    .split("\n")
+    .find((candidate) => candidate.startsWith(`- ${identity}: `));
+  return line?.slice(`- ${identity}: `.length);
+}
+
+/**
+ * Catches an agent started on a briefing that names images it cannot read:
+ * none read before it starts, read without the attempt's bearer, kept outside
+ * the temporary directory, or its briefing not told where.
+ */
+test("an agent is started on its briefing told where each image was read to", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  podHolds(t, { TMPDIR: temporary });
+  const read = [];
+  const plane = planeFetch(planes.job, (route, request) => {
+    read.push(request.path);
+    return { status: 200, body: briefImage.bytes };
+  });
+  const { started, agent } = briefedAgent();
+  const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
+
+  await runWorkerTask({
+    task: briefed,
+    bearer: "the attempt's bearer",
+    images: [briefImage.reference],
+    request: overPlane(workerRequest, async (url, init) => {
+      assert.equal(init.headers.authorization, "Bearer the attempt's bearer");
+      return plane.fetch(url, init);
+    }),
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent,
+  });
+
+  assert.deepEqual(read, ["/v1/input/artifacts/image/png:one"]);
+  const [{ briefing }] = started;
+  assert.ok(briefing.text.startsWith("## Your role\nWork.\n\n"));
+  const file = briefedFile(briefing.text, "image/png:one");
+  assert.equal(dirname(dirname(file)), temporary);
+  assert.match(file, /\/chuggy-ticket-images-[^/]+\/1\.png$/u);
+  assert.deepEqual(await readFile(file), briefImage.bytes);
+});
+
+/** Catches a briefing changed, or a directory made, where the bundle pins no image. */
+test("an agent whose bundle pins no image is started on its briefing as written", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  podHolds(t, { TMPDIR: temporary });
+  const { started, agent } = briefedAgent();
+  const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
+
+  await runWorkerTask({
+    task: briefed,
+    bearer: "the attempt's bearer",
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent,
+  });
+
+  assert.equal(started[0], briefed);
+  assert.deepEqual(await readdir(temporary), []);
+});
 
 /** Each artifact a finished run uploaded, in the order it was sent. */
 function uploadedArtifacts(calls) {
@@ -1922,6 +2196,205 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
       await plane.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * A plane serving one commanded work attempt that passes, its setup line
+ * installing `hooks` as the clone's hooks and its block provisioning a file,
+ * and its input pinning `base` of `remote` as where it starts and where its
+ * change started.
+ */
+function hookedPlane(remote, base, hooks) {
+  return servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return {
+          status: 200,
+          body: workTaskAnswerSchema.parse({
+            ...fetchedAnswer,
+            worker: {
+              mode: { type: "Commands", commands: ["true"] },
+              setup: [`git config core.hooksPath '${hooks}'`],
+              files: [{ path: ".provisioned", content: "set up\n" }],
+            },
+          }),
+        };
+      case "input": {
+        const input = inputAnswer(remote, base);
+        input.body.references.push({
+          ordinal: 3,
+          kind: "ChangeBase",
+          reference: base,
+        });
+        return input;
+      }
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/**
+ * A project's setup may install hooks, as husky does on `npm ci`, and an
+ * image's git and those hooks may need a value `check.sh` moved aside. Catches
+ * any git a work attempt runs itself, from its clone to its push, or a hook
+ * one of them runs, handed the core's own environment: without that value, or
+ * with the task document, which carries the attempt's bearer.
+ */
+test("a work attempt's git, from its clone to its push, and the hooks its setup installs are handed the image's environment and no task document", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    await git("git", ["push", remote, `${base}:refs/heads/main`], {
+      cwd: directory,
+    });
+    const recording = await recordingGit(t);
+    const root = await mkdtemp(join(tmpdir(), "chuggy-attempt-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const plane = await hookedPlane(remote, base, recording.hooks);
+    t.after(() => plane.close());
+    const served = {
+      ...envelope,
+      callbackUrl: plane.url,
+      workspace: join(root, "workspace"),
+    };
+    const { task: answered } = await envelopeTask(served);
+    recording.start();
+
+    await workerAttempt(envelopeLaunch(served, answered), {
+      minted: root,
+      write: async () => undefined,
+    });
+
+    const records = await recording.records();
+    for (const [label, ...handed] of records)
+      assert.deepEqual(handed, handedAsTheImage, label);
+    const labels = records.map(([label]) => label);
+    for (const expected of [
+      "git clone",
+      "git checkout",
+      "git cat-file",
+      "git rev-parse",
+      "git status",
+      "git commit",
+      "pre-commit",
+      "git rev-list",
+      "git push",
+      "pre-push",
+    ])
+      assert.ok(labels.includes(expected), `${expected} was never recorded`);
+    assert.notEqual(await remoteRefs(remote), "");
+    assert.ok(plane.asked.some(({ route }) => route === "report"));
+  });
+});
+
+/** A plane serving one attempt `answer` as its task, an input bundle pinning `briefImage`, and that image. */
+function imagePlane(answer, remote, base) {
+  return servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return answer;
+      case "input": {
+        const input = inputAnswer(remote, base);
+        input.body.references.push(briefImage.reference);
+        return input;
+      }
+      case "inputArtifact":
+        return { status: 200, body: briefImage.bytes };
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "runTurns":
+        return { status: 200, body: { turnsRecorded: 0 } };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/**
+ * One attempt from an envelope over `plane`, in a temporary directory of its
+ * own, its agent `agent` and its credential mounted.
+ */
+async function imageAttempt(t, plane, directory, agent) {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-attempt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const temporary = join(root, "temporary");
+  await mkdir(temporary);
+  podHolds(t, { TMPDIR: temporary });
+  const providerCredentialFile = join(root, "claude-code");
+  await writeFile(providerCredentialFile, `${secret}\n`);
+  const served = {
+    ...envelope,
+    callbackUrl: plane.url,
+    providerCredentialFile,
+  };
+  const { task: answered } = await envelopeTask(served);
+  await workerAttempt(envelopeLaunch(served, answered), {
+    minted: root,
+    write: async () => undefined,
+    clone: async () => directory,
+    ...(agent === undefined ? {} : { agent }),
+  });
+  return temporary;
+}
+
+/**
+ * Catches an attempt that starts its agent without reading the images its
+ * bundle pins, or reads them without its own bearer: the wiring from the
+ * workspace to the agent's run.
+ */
+test("an agent's attempt reads the images its bundle pins with its bearer before the agent starts", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const plane = await imagePlane(
+      {
+        status: 200,
+        body: workTaskAnswerSchema.parse({
+          ...fetchedAnswer,
+          authority: {
+            ...fetchedAnswer.authority,
+            credentials: ["forge", claudeAgent.credential],
+          },
+        }),
+      },
+      remote,
+      base,
+    );
+    t.after(() => plane.close());
+    const { started, agent } = briefedAgent();
+
+    const temporary = await imageAttempt(t, plane, directory, agent);
+
+    const reads = plane.asked.filter(({ route }) => route === "inputArtifact");
+    assert.deepEqual(reads, [
+      { route: "inputArtifact", authorization: `Bearer ${envelope.bearer}` },
+    ]);
+    const file = briefedFile(started[0].briefing.text, "image/png:one");
+    assert.equal(dirname(dirname(file)), temporary);
+    assert.deepEqual(await readFile(file), briefImage.bytes);
+  });
+});
+
+/** Catches a check stage reading images nothing in it is briefed with. */
+test("a commanded attempt never reads the images its bundle pins", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const plane = await imagePlane(commandedTask(["true"]), remote, base);
+    t.after(() => plane.close());
+
+    await imageAttempt(t, plane, directory);
+
+    assert.ok(plane.asked.some(({ route }) => route === "report"));
+    assert.ok(!plane.asked.some(({ route }) => route === "inputArtifact"));
   });
 });
 

@@ -1,18 +1,26 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 
 import {
+  workerChangeBaseVariable,
+  workerImageVariable,
+  workerShellEnvironment,
+} from "./checks.mjs";
+import {
   codexAgent,
   codexConfiguration,
   codexInvocation,
   codexResult,
+  codexShellArguments,
   prepareCodexCredential,
+  prepareCodexShell,
 } from "./codex.mjs";
+import { coreRuntime } from "./coreRuntime.mjs";
 
 const task = {
   worker: {
@@ -26,9 +34,12 @@ const task = {
   briefing: { text: "briefing" },
 };
 
+/** What a run's argv is composed with beside the task, its shell prepared with nothing. */
+const run = { resultSchema: "/tmp/result.json", shellArguments: [] };
+
 test("a Codex invocation is ephemeral and constrained to the result schema", () => {
   assert.deepEqual(
-    codexInvocation(task, { resultSchema: "/tmp/result.json" }),
+    codexInvocation(task, { ...run, shellArguments: ["--config", "shell"] }),
     [
       "exec",
       "--json",
@@ -40,8 +51,46 @@ test("a Codex invocation is ephemeral and constrained to the result schema", () 
       "--dangerously-bypass-approvals-and-sandbox",
       "--output-schema",
       "/tmp/result.json",
+      "--config",
+      "shell",
+      "--",
       "briefing",
     ],
+  );
+});
+
+/**
+ * Catches the briefing taken as a value of the option before it, which an
+ * option a worker configures, such as `--image`, takes every word after it
+ * for, and which leaves a run with no prompt.
+ */
+test("a Codex briefing is the prompt whatever options precede it", () => {
+  for (const configured of [[], ["--image", "screen.png"]]) {
+    const argv = codexInvocation(
+      {
+        ...task,
+        worker: { mode: { ...task.worker.mode, arguments: configured } },
+      },
+      run,
+    );
+
+    assert.deepEqual(argv.slice(-2), ["--", "briefing"]);
+    assert.equal(argv.indexOf("--"), argv.length - 2);
+  }
+});
+
+/** Catches a worker's `--` making the run's own `--` and briefing two prompts. */
+test("ticket configuration cannot end a Codex run's options itself", () => {
+  assert.throws(
+    () =>
+      codexInvocation(
+        {
+          ...task,
+          worker: { mode: { ...task.worker.mode, arguments: ["--"] } },
+        },
+        run,
+      ),
+    /reserves Codex argument --$/u,
   );
 });
 
@@ -62,7 +111,7 @@ test("Codex configuration records the runtime version and pinned model", async (
   );
   assert.deepEqual(executed, [
     [
-      "codex",
+      coreRuntime.codex,
       ["--version"],
       { env: { CODEX_HOME: "/tmp/codex" }, maxBuffer: 4096 },
     ],
@@ -86,7 +135,7 @@ test("attached values cannot evade reserved Codex short options", () => {
               mode: { ...task.worker.mode, arguments: [argument] },
             },
           },
-          { resultSchema: "/tmp/result.json" },
+          run,
         ),
       /reserves Codex argument/u,
     );
@@ -146,7 +195,7 @@ test("ticket configuration cannot replace worker-owned Codex arguments", () => {
             },
           },
         },
-        { resultSchema: "/tmp/result.json" },
+        run,
       ),
     /reserves Codex argument --output-schema=/u,
   );
@@ -165,7 +214,7 @@ test("ticket configuration cannot override the pinned Codex model through config
             },
           },
         },
-        { resultSchema: "/tmp/result.json" },
+        run,
       ),
     /reserves Codex argument --config=/u,
   );
@@ -205,4 +254,93 @@ test("a mounted Codex OAuth document becomes a private writable CODEX_HOME", asy
     "refresh-token-long-enough",
   ]);
   assert.equal(await readFile(join(home, "auth.json"), "utf8"), `${auth}\n`);
+});
+
+/** Catches a Codex home outside HOME, the directory a job's check found writable. */
+test("a Codex credential's home is under HOME where none is named", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "chuggy-codex-default-"));
+  const saved = process.env.HOME;
+  process.env.HOME = home;
+  t.after(async () => {
+    if (saved === undefined) delete process.env.HOME;
+    else process.env.HOME = saved;
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const prepared = await prepareCodexCredential(JSON.stringify({ tokens: {} }));
+
+  assert.equal(dirname(prepared.environment.CODEX_HOME), home);
+  await readFile(join(prepared.environment.CODEX_HOME, "auth.json"), "utf8");
+});
+
+/**
+ * What a Codex run's shell is handed for a pod whose image set three of the
+ * variables `check.sh` moves aside, one plain, one empty, and one to every
+ * character a TOML basic string must escape and some it need not, and whose
+ * attempt knows the commit its change started from.
+ */
+const handed = workerShellEnvironment(
+  {
+    PATH: "/usr/bin",
+    [workerImageVariable("NODE_OPTIONS")]: "--max-old-space-size=4096",
+    [workerImageVariable("NODE_PATH")]: "",
+    [workerImageVariable("LD_LIBRARY_PATH")]:
+      '/image/it\'s "lib"\\\n\t\u0001\u007f\u009f\u{1F600}end',
+  },
+  "a".repeat(40),
+);
+
+/**
+ * The table a `shell_environment_policy.set` override sets, read back. Each
+ * value is a TOML basic string holding only the escapes a JSON string means
+ * the same by, so JSON reads it as TOML does; and what is read must be the
+ * whole table, so nothing in it goes unread.
+ */
+function codexSetTable(argument) {
+  const prefix = "shell_environment_policy.set={";
+  assert.ok(argument.startsWith(prefix) && argument.endsWith("}"), argument);
+  const body = argument.slice(prefix.length, -1);
+  const entries = [
+    ...body.matchAll(/([A-Z_]+) = ("(?:[^"\\]|\\.)*")(?:, |$)/gu),
+  ];
+  assert.equal(entries.map(([entry]) => entry).join(""), body);
+  return Object.fromEntries(
+    entries.map(([, name, value]) => [name, JSON.parse(value)]),
+  );
+}
+
+/**
+ * Catches Codex's shell set a value other than the one a check stage's shells
+ * are handed, or set it in a string TOML refuses for a raw control character.
+ */
+test("a Codex run's shell is set exactly what it is handed", () => {
+  const [flag, argument, ...rest] = codexShellArguments(handed);
+
+  assert.equal(flag, "--config");
+  assert.deepEqual(rest, []);
+  assert.doesNotMatch(argument, /\p{Cc}/u);
+  assert.deepEqual(codexSetTable(argument), handed);
+  assert.deepEqual(Object.keys(codexSetTable(argument)).sort(), [
+    workerChangeBaseVariable,
+    "LD_LIBRARY_PATH",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+  ]);
+});
+
+/** Catches a Codex shell set a variable it was not handed. */
+test("a Codex shell handed nothing is set nothing", () => {
+  assert.deepEqual(codexShellArguments({}), [
+    "--config",
+    "shell_environment_policy.set={}",
+  ]);
+});
+
+/** Catches a Codex run whose shell is prepared otherwise than by its arguments. */
+test("a Codex run's shell is prepared by arguments alone", async () => {
+  assert.deepEqual(await prepareCodexShell(handed), {
+    environment: {},
+    arguments: codexShellArguments(handed),
+  });
+  assert.equal(codexAgent.prepareShell, prepareCodexShell);
 });

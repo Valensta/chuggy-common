@@ -169,6 +169,14 @@ function answered(plane, route, status, body) {
       throw violated(`${route} answers ${String(status)} with no body`);
     return new globalThis.Response(null, { status });
   }
+  if (schema === "bytes") {
+    if (!(body instanceof Uint8Array))
+      throw violated(`${route} answers ${String(status)} with bytes`);
+    return new globalThis.Response(body, {
+      status,
+      headers: { "content-type": workerPlaneBytesMediaType },
+    });
+  }
   const sent = body ?? refusalBody(schema);
   if (!schema.safeParse(sent).success)
     throw violated(`${route} never answers ${String(status)} with that body`);

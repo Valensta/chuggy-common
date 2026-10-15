@@ -1,3 +1,8 @@
+import { writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
 /**
@@ -5,9 +10,14 @@ import { agentResult, agentResultSchema } from "./result.mjs";
  * is headless, so it ends with the agent's last reply, and Claude Code kills a
  * command it moved to the background once the run ends, without the agent ever
  * seeing it finish. So no command is moved there: a long one is waited for,
- * up to the Bash tool's timeout.
+ * up to the Bash tool's timeout. Nor does it update itself: a run's Claude Code
+ * is the one its runtime ships, and an image need not set the variable that
+ * says so.
  */
-export const claudeEnvironment = { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" };
+export const claudeEnvironment = {
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+  DISABLE_AUTOUPDATER: "1",
+};
 
 const reservedClaudeArguments = [
   "-p",
@@ -24,6 +34,7 @@ const reservedClaudeArguments = [
   "--worktree",
   "--resume",
   "--continue",
+  "--",
 ];
 
 function configuredArguments(task) {
@@ -42,6 +53,13 @@ function configuredArguments(task) {
   return args;
 }
 
+/**
+ * The argv of one run. The briefing comes after `--`, so it is the prompt
+ * whatever precedes it: `--mcp-config` takes every word after it up to the
+ * next option, as can an option a worker configures, and either would
+ * otherwise take the briefing as one of its values. The configuration is
+ * given as `--mcp-config=` for the same reason.
+ */
 export function claudeInvocation(task) {
   return [
     "-p",
@@ -53,11 +71,44 @@ export function claudeInvocation(task) {
     "--permission-mode",
     "bypassPermissions",
     "--strict-mcp-config",
-    "--mcp-config",
-    JSON.stringify({ mcpServers: {} }),
+    `--mcp-config=${JSON.stringify({ mcpServers: {} })}`,
     ...configuredArguments(task),
+    "--",
     task.briefing.text,
   ];
+}
+
+/** `text` as one POSIX shell word, whatever quotes it holds. */
+function claudeShellWord(text) {
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The lines Claude Code runs before each command of its Bash tool, in that
+ * command's own shell: each variable of `handed` exported as it is, which is
+ * what a check stage's shells are handed beyond what Claude Code's own process
+ * runs with.
+ */
+export function claudeShellScript(handed) {
+  return Object.entries(handed)
+    .map(([name, value]) => `export ${name}=${claudeShellWord(value)}\n`)
+    .join("");
+}
+
+/**
+ * Those lines, written where Claude Code is told to read them by
+ * `CLAUDE_ENV_FILE`: under the image's HOME, which a job's check found this
+ * user can write.
+ */
+export async function prepareClaudeShell(
+  handed,
+  file = join(homedir(), ".chuggy-claude-shell.sh"),
+) {
+  await writeFile(file, claudeShellScript(handed), {
+    flag: "wx",
+    mode: 0o600,
+  });
+  return { environment: { CLAUDE_ENV_FILE: file }, arguments: [] };
 }
 
 export function claudeResult(events) {
@@ -72,7 +123,7 @@ export function claudeResult(events) {
 export const claudeAgent = {
   name: "Claude",
   runtime: "Claude Code",
-  executable: "claude",
+  executable: coreRuntime.claude,
   credential: "claude-code",
   invocation: claudeInvocation,
   result: claudeResult,
@@ -80,6 +131,7 @@ export const claudeAgent = {
     environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
     secrets: [token],
   }),
+  prepareShell: prepareClaudeShell,
   configurationEvent: (event) =>
     event?.type === "system" && event.subtype === "init",
   resultEvent: (event) => event?.type === "result",

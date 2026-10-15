@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fileURLToPath, URL } from "node:url";
 
 import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnvironment";
 
@@ -74,7 +75,7 @@ test("an attempt asks for nothing and is answered a credential git reads from a 
   );
   assert.equal(
     credential.environment.GIT_ASKPASS,
-    "/usr/local/lib/chuggy/git-askpass.sh",
+    fileURLToPath(new URL("./git-askpass.sh", import.meta.url)),
   );
   assert.equal(credential.environment.GIT_TERMINAL_PROMPT, "0");
 });

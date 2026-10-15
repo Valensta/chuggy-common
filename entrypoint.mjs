@@ -44,6 +44,7 @@ import {
   appendFile,
   constants,
   mkdir,
+  mkdtemp,
   readFile,
   stat,
   writeFile,
@@ -82,8 +83,10 @@ import {
 import { workerAgent } from "./agent.mjs";
 import {
   runChecks,
+  workerAgentEnvironment,
   workerCheckCommands,
   workerReportText,
+  workerShellEnvironment,
   workerStageEnvironment,
   workerSummaryText,
 } from "./checks.mjs";
@@ -102,12 +105,17 @@ import {
 } from "./runEvidence.mjs";
 import { runConfigurationSnapshot } from "./snapshot.mjs";
 import { commitAndPushSource, resultDocument } from "./source.mjs";
+import {
+  readTicketImages,
+  ticketImageReferences,
+  ticketImagesBriefed,
+} from "./ticketImages.mjs";
 import { workerRequest } from "./transport.mjs";
 import { agentResultSchema } from "./result.mjs";
 import { answeredWith, rosterLabel, routePath } from "./wire.mjs";
 
 const executeFile = promisify(execFile);
-const agentResultSchemaFile = "/tmp/chuggy-agent-result-schema.json";
+const agentResultSchemaName = "chuggy-agent-result-schema.json";
 const agentDiagnosticPath = ".chuggy/agent-result.json";
 /** Where an agent's summary is kept as it was written: the path chuggy reads its `work-summary` output from. */
 const agentSummaryPath = ".chuggy/outputs/summary.md";
@@ -190,9 +198,14 @@ async function workerChangeBase(input, directory) {
   );
 }
 
+/**
+ * One of the image's programs run to its end, git or a setup line: handed what
+ * the image's own programs are where `options` names no environment of its own.
+ */
 async function command(executable, args, options = {}) {
   return executeFile(executable, args, {
     maxBuffer: 16 * 1024 * 1024,
+    env: workerStageEnvironment(process.env),
     ...options,
   });
 }
@@ -313,22 +326,51 @@ async function readAgentStream(context, child, argv) {
   return resultEvent;
 }
 
-async function runAgent(context) {
-  const argv = context.agent.invocation(context.task, {
-    resultSchema: agentResultSchemaFile,
+/**
+ * Each image the attempt's bundle pins, read with its bearer into a directory
+ * of this run's own under the temporary directory, or none.
+ */
+async function agentImages(context) {
+  const references = context.images ?? [];
+  if (references.length === 0) return [];
+  return readTicketImages({
+    task: context.task,
+    bearer: context.bearer,
+    references,
+    directory: await mkdtemp(workerTemporaryFile("chuggy-ticket-images-")),
+    ...(context.request === undefined ? {} : { request: context.request }),
   });
+}
+
+/**
+ * The agent started on the task from what a check stage's shells inherit, its
+ * shell prepared to hand the project's commands the rest of what those shells
+ * are handed, and its briefing told where each image its brief carries was
+ * read to.
+ */
+async function runAgent(context) {
+  const task = ticketImagesBriefed(context.task, await agentImages(context));
+  const shell = await context.agent.prepareShell(
+    workerShellEnvironment(process.env, context.changeBase),
+  );
+  const argv = context.agent.invocation(task, {
+    resultSchema: workerTemporaryFile(agentResultSchemaName),
+    shellArguments: shell.arguments,
+  });
+  const environment = {
+    ...workerAgentEnvironment(process.env),
+    ...context.agentEnvironment,
+    ...shell.environment,
+  };
   if (context.agent.configuration !== undefined)
     await captureConfiguration(
       context,
       argv,
-      await context.agent.configuration(context.task, {
-        ...process.env,
-        ...context.agentEnvironment,
-      }),
+      await context.agent.configuration(task, environment),
     );
   const child = spawn(context.agent.executable, argv, {
     cwd: context.directory,
-    env: { ...process.env, ...context.agentEnvironment },
+    env: environment,
     stdio: ["ignore", "pipe", "inherit"],
   });
   const exited = new Promise((resolve, reject) => {
@@ -442,7 +484,8 @@ export async function workerCredential(asked) {
  * plane minted it, and the commit the change started from where the bundle
  * names one the clone holds. `seams` names the plane, the clone, the file the
  * password is written to and the directory cloned into, this module's own and
- * the image's `CHUG_WORKER_WORKSPACE` where it names none.
+ * the image's `CHUG_WORKER_WORKSPACE` where it names none. `images` are the
+ * brief's images the bundle pins, where it pins any.
  */
 export async function workerWorkspace(
   task,
@@ -480,6 +523,7 @@ export async function workerWorkspace(
     environment,
   );
   const changeBase = await workerChangeBase(input, directory);
+  const images = ticketImageReferences(input);
   return {
     repositoryId,
     repository,
@@ -488,6 +532,7 @@ export async function workerWorkspace(
     environment,
     ...(refresh === undefined ? {} : { refresh }),
     ...(changeBase === undefined ? {} : { changeBase }),
+    ...(images.length === 0 ? {} : { images }),
   };
 }
 
@@ -597,14 +642,24 @@ function scrubbed(text) {
   return activeScrub === undefined ? text : activeScrub(text);
 }
 
+/**
+ * Where a job keeps a file of its own: the temporary directory, named as the
+ * job's `check.sh` names the one it found this user can write.
+ */
+export function workerTemporaryFile(name, environment = process.env) {
+  return join(environment.TMPDIR || "/tmp", name);
+}
+
 /** What the task must grant before it runs, and what an agent-run task needs on disk. */
 async function admitWorkerTask(task, agent) {
   if (agent !== undefined) {
     if (!task.authority.credentials.includes(agent.credential))
       throw new Error(`worker authority does not grant ${agent.credential}`);
-    await writeFile(agentResultSchemaFile, JSON.stringify(agentResultSchema), {
-      flag: "wx",
-    });
+    await writeFile(
+      workerTemporaryFile(agentResultSchemaName),
+      JSON.stringify(agentResultSchema),
+      { flag: "wx" },
+    );
   }
   if (!task.authority.network || task.authority.filesystem !== workspaceWrite)
     throw new Error(
@@ -805,16 +860,22 @@ export async function workerMintedWritable(directory) {
 
 /**
  * One attempt, run from its task onwards the same whichever carrier brought it.
- * `seams` are `workerWorkspace`'s, less the directory, which is the launch's,
- * and `minted`, the directory checked in place of the contract's.
+ * `seams` are `workerWorkspace`'s, less the directory, which is the launch's;
+ * `minted`, the directory checked in place of the contract's; and `agent`, run
+ * in place of the one the task names.
  */
 export async function workerAttempt(launch, seams = {}) {
-  const { minted = mintedCredentialDirectory, ...workspaceSeams } = seams;
+  const {
+    minted = mintedCredentialDirectory,
+    agent: standIn,
+    ...workspaceSeams
+  } = seams;
   const task = await launch.task();
   activeTask = task;
   activeBearer = launch.bearer;
   const commands = workerCheckCommands(task);
-  const agent = commands === undefined ? workerAgent(task) : undefined;
+  const agent =
+    commands === undefined ? (standIn ?? workerAgent(task)) : undefined;
   await admitWorkerTask(task, agent);
   const repositories = optionalRepositories(workerRepositoriesVariable);
   const {
@@ -841,8 +902,10 @@ export async function workerAttempt(launch, seams = {}) {
     const run = await runWorkerTask(
       {
         task,
+        bearer,
         directory: workspace.directory,
         changeBase: workspace.changeBase,
+        images: workspace.images,
         agentEnvironment,
         scrub,
         evidence,

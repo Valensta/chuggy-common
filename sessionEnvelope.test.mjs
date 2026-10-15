@@ -10,6 +10,7 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
+import { workerImageVariable } from "./checks.mjs";
 import { poolHeldSessionAnswer as answer } from "./envelope.fixture.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { sessionEnvelopeServices } from "./session.mjs";
@@ -170,6 +171,21 @@ test("an envelope's credential file is mounted in the slot the plane's task name
   assert.deepEqual(JSON.parse(environment[workerCredentialFilesVariable]), {
     "pool-slot": envelope.providerCredentialFile,
   });
+});
+
+/**
+ * Catches a session's runtime, which is chuggy's own process and no project's
+ * shell, handed back what `check.sh` moved aside to keep it unsteered.
+ */
+test("an envelope's session runtime is not handed what check.sh moved aside", () => {
+  const kept = workerImageVariable("LD_PRELOAD");
+  const { environment } = sessionEnvelopeServices(envelope, answer, {
+    ...site,
+    [kept]: "/image/preload.so",
+  });
+
+  assert.equal(environment.LD_PRELOAD, undefined);
+  assert.equal(environment[kept], "/image/preload.so");
 });
 
 /** Catches a bound the plane answered unchecked, which the contract reads as any number at all. */
