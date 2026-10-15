@@ -25,7 +25,8 @@
  * `CHUG_CHANGE_BASE`, so a check can run only what the change touched. It is
  * set only where the attempt knows that commit, and one the pod inherited is
  * dropped, so a shell that finds it unset runs everything rather than trusting
- * a base nobody gave this attempt.
+ * a base nobody gave this attempt. The shell runs with `-u`, so a line reads it
+ * as `${CHUG_CHANGE_BASE-}`, and `"$CHUG_CHANGE_BASE"` aborts where it is unset.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
