@@ -2,8 +2,8 @@
  * `check.sh` run as a job container runs it, against a runtime tree whose stub
  * binaries fail as a real image makes chuggy's fail: the loader's own words
  * and statuses, an interpreter the image does not have, no git, and a HOME, a
- * workspace and a temporary directory this user cannot write. Every case runs
- * under each shell an image's `/bin/sh` may be.
+ * workspace and a temporary directory this user cannot write or search. Every
+ * case runs under each shell an image's `/bin/sh` may be.
  *
  * THE NODE A PASSING TREE STARTS THE CORE WITH IS THIS SUITE'S OWN, on a stub
  * core that reports what it was started with. That is how what the check
@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -180,6 +180,8 @@ const unwritable = (label, path) =>
  * Each fault an image can have, the tree and environment that reproduce it,
  * the fault the check names it by, and its line. `loader` is what the failing
  * binary wrote, which reaches the container's log ahead of the check's line.
+ * `readOnly` names a directory of the tree left unwritable, and `unsearchable`
+ * one left writable but not searchable.
  */
 const imageFaults = [
   {
@@ -262,6 +264,12 @@ const imageFaults = [
     line: (tree) => unwritable("HOME", tree.home),
   },
   {
+    name: "a HOME this user can write but not search",
+    unsearchable: "home",
+    fault: "ImageHomeUnwritable",
+    line: (tree) => unwritable("HOME", tree.home),
+  },
+  {
     name: "a workspace that does not exist",
     environment: (tree) => ({
       CHUG_WORKER_WORKSPACE: join(tree.root, "absent"),
@@ -276,6 +284,12 @@ const imageFaults = [
     line: (tree) => unwritable("the workspace", tree.workspace),
   },
   {
+    name: "a workspace this user can write but not search",
+    unsearchable: "workspace",
+    fault: "ImageWorkspaceUnwritable",
+    line: (tree) => unwritable("the workspace", tree.workspace),
+  },
+  {
     name: "a temporary directory that does not exist",
     environment: (tree) => ({ TMPDIR: join(tree.root, "absent") }),
     fault: "ImageTmpUnwritable",
@@ -285,6 +299,12 @@ const imageFaults = [
   {
     name: "a temporary directory this user cannot write",
     readOnly: "temporary",
+    fault: "ImageTmpUnwritable",
+    line: (tree) => unwritable("the temporary directory", tree.temporary),
+  },
+  {
+    name: "a temporary directory this user can write but not search",
+    unsearchable: "temporary",
     fault: "ImageTmpUnwritable",
     line: (tree) => unwritable("the temporary directory", tree.temporary),
   },
@@ -338,6 +358,8 @@ const imageFaults = [
 async function checkFault(t, shell, fault) {
   const tree = await checkTree(t, fault.binaries);
   if (fault.readOnly !== undefined) await chmod(tree[fault.readOnly], 0o555);
+  if (fault.unsearchable !== undefined)
+    await chmod(tree[fault.unsearchable], 0o666);
   for (const args of [[], ["check"]]) {
     const ran = checked(shell, tree, fault.environment?.(tree), args);
 
@@ -357,10 +379,11 @@ const imageStanding = {
 };
 
 /**
- * An image setting every variable the check moves aside, one of them empty,
- * and `NODE_OPTIONS` to what would stop this suite's node where it reached it.
- * The loader's own complaints are no evidence either way, since the image's
- * shell is started with them before the check can move anything.
+ * An image setting every variable the check moves aside: one empty, one to
+ * what a shell would change were the value parsed again rather than copied,
+ * and `NODE_OPTIONS` to what would stop this suite's node where it reached
+ * it. The loader's own complaints are no evidence either way, since the
+ * image's shell is started with them before the check can move anything.
  */
 function imageSteering() {
   return {
@@ -369,6 +392,8 @@ function imageSteering() {
     ),
     NODE_OPTIONS: "--require /image/absent-preload.cjs",
     NODE_PATH: "",
+    LD_LIBRARY_PATH:
+      '/image/it\'s "lib" $(echo substituted) `echo ticked` back\\slash\nembedded\n',
   };
 }
 
@@ -445,6 +470,38 @@ async function checkRuntimeBroken(t, shell, tree, binary) {
   );
 }
 
+/** What every name `check.sh` assigns starts with. */
+const checkOwnPrefix = "chuggy_check_";
+
+/** The names `check.sh` assigns, each one only it would set. */
+const checkOwnNames = [
+  "chuggy_check_binary",
+  "chuggy_check_name",
+  "chuggy_check_runtime",
+  "chuggy_check_start",
+  "chuggy_check_temporary",
+  "chuggy_check_workspace",
+];
+
+/** Every name `check.sh` assigns, read from the script: each assignment and each loop's variable, comments aside. */
+function checkAssignedNames() {
+  const code = readFileSync(
+    fileURLToPath(new URL("check.sh", import.meta.url)),
+    "utf8",
+  )
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+  const named = (pattern) =>
+    [...code.matchAll(pattern)].map(([, name]) => name);
+  return [
+    ...new Set([
+      ...named(/(?:^|[\s;()])([A-Za-z_]\w*)=/gmu),
+      ...named(/\bfor\s+([A-Za-z_]\w*)\s+in\b/gu),
+    ]),
+  ].sort();
+}
+
 /** Every case run under each shell, beside one per image fault. */
 const checkCases = [
   {
@@ -468,6 +525,25 @@ const checkCases = [
 
       assert.equal(ran.status, 0, ran.stderr);
       assert.deepEqual(checkStarted(ran).environment, checkBase(tree));
+    },
+  },
+  {
+    name: "an image's variables under the plain names of the check's own reach the core as the image set them",
+    run: async (t, shell) => {
+      const tree = await checkTree(t);
+      const image = Object.fromEntries(
+        checkOwnNames.map((name) => {
+          const plain = name.slice(checkOwnPrefix.length);
+          return [plain, `the image's own ${plain}`];
+        }),
+      );
+      const ran = checked(shell, tree, image);
+
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.deepEqual(checkStarted(ran).environment, {
+        ...checkBase(tree),
+        ...image,
+      });
     },
   },
   {
@@ -553,6 +629,16 @@ for (const shell of posixShells)
     for (const { name, skip, run } of checkCases)
       await t.test(name, { skip }, (t) => run(t, shell));
   });
+
+/**
+ * Catches a name the check assigns that an image may have exported, which
+ * the check would overwrite in place and the core would inherit overwritten.
+ */
+test("every name check.sh assigns is its own", () => {
+  assert.deepEqual(checkAssignedNames(), checkOwnNames);
+  for (const name of checkOwnNames)
+    assert.ok(name.startsWith(checkOwnPrefix), name);
+});
 
 /** Catches a status that is a fault's and is also what the check exits with for something that is not the image's. */
 test("no status the check exits with for itself is a fault's", () => {

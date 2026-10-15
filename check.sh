@@ -16,6 +16,10 @@
 # kept under the name `workerImageVariable` gives it, from which the core
 # hands it back to the project's own shells.
 #
+# EVERY NAME THIS SCRIPT ASSIGNS STARTS `chuggy_check_`. A variable the image
+# exported under a name the script assigns would be overwritten in place, and
+# the overwritten value is the one the core would inherit.
+#
 # POSIX sh and its builtins only: nothing is known of the image yet but that
 # it has a /bin/sh, which may be dash or busybox's.
 #
@@ -25,8 +29,8 @@
 set -u
 
 case "$#:${1-}" in
-0:) start=yes ;;
-1:check) start=no ;;
+0:) chuggy_check_start=yes ;;
+1:check) chuggy_check_start=no ;;
 *)
 	printf 'usage: /bin/sh %s [check]\n' "$0" >&2
 	exit 2
@@ -34,16 +38,16 @@ case "$#:${1-}" in
 esac
 
 case "$0" in
-*/*) runtime="${0%/*}" ;;
-*) runtime=. ;;
+*/*) chuggy_check_runtime="${0%/*}" ;;
+*) chuggy_check_runtime=. ;;
 esac
 
-for name in NODE_OPTIONS NODE_PATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT; do
-	if eval "[ -n \"\${$name+set}\" ]"; then
-		eval "export CHUG_IMAGE_$name=\"\$$name\""
-		unset "$name"
+for chuggy_check_name in NODE_OPTIONS NODE_PATH LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT; do
+	if eval "[ -n \"\${$chuggy_check_name+set}\" ]"; then
+		eval "export CHUG_IMAGE_$chuggy_check_name=\"\$$chuggy_check_name\""
+		unset "$chuggy_check_name"
 	else
-		unset "CHUG_IMAGE_$name"
+		unset "CHUG_IMAGE_$chuggy_check_name"
 	fi
 done
 
@@ -56,15 +60,16 @@ writable() { # <directory>
 	[ -d "$1" ] && [ -w "$1" ] && [ -x "$1" ]
 }
 
-for binary in node claude; do
-	if [ ! -f "$runtime/bin/$binary" ] || [ ! -x "$runtime/bin/$binary" ]; then
-		fault 1 "the runtime at $runtime holds no $binary this container can execute"
+for chuggy_check_binary in node claude; do
+	if [ ! -f "$chuggy_check_runtime/bin/$chuggy_check_binary" ] ||
+		[ ! -x "$chuggy_check_runtime/bin/$chuggy_check_binary" ]; then
+		fault 1 "the runtime at $chuggy_check_runtime holds no $chuggy_check_binary this container can execute"
 	fi
 done
 
-"$runtime/bin/node" --version >/dev/null ||
+"$chuggy_check_runtime/bin/node" --version >/dev/null ||
 	fault 81 "this image cannot load chuggy's node, which needs the image's glibc and libstdc++"
-"$runtime/bin/claude" --version >/dev/null ||
+"$chuggy_check_runtime/bin/claude" --version >/dev/null ||
 	fault 81 "this image cannot load chuggy's claude, which needs the image's glibc"
 command -v git >/dev/null 2>&1 ||
 	fault 82 "this image has no git on PATH"
@@ -74,15 +79,15 @@ git --version >/dev/null ||
 	fault 83 "this image sets no HOME"
 writable "$HOME" ||
 	fault 83 "HOME, $HOME, is not a directory this user can write"
-workspace="${CHUG_WORKER_WORKSPACE:-/workspace}"
-writable "$workspace" ||
-	fault 84 "the workspace, $workspace, is not a directory this user can write"
-temporary="${TMPDIR:-/tmp}"
-writable "$temporary" ||
-	fault 85 "the temporary directory, $temporary, is not a directory this user can write"
+chuggy_check_workspace="${CHUG_WORKER_WORKSPACE:-/workspace}"
+writable "$chuggy_check_workspace" ||
+	fault 84 "the workspace, $chuggy_check_workspace, is not a directory this user can write"
+chuggy_check_temporary="${TMPDIR:-/tmp}"
+writable "$chuggy_check_temporary" ||
+	fault 85 "the temporary directory, $chuggy_check_temporary, is not a directory this user can write"
 
-if [ "$start" = no ]; then
+if [ "$chuggy_check_start" = no ]; then
 	printf 'chuggy: this image can run a job\n'
 	exit 0
 fi
-exec "$runtime/bin/node" "$runtime/lib/chuggy/worker.mjs"
+exec "$chuggy_check_runtime/bin/node" "$chuggy_check_runtime/lib/chuggy/worker.mjs"
