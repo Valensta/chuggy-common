@@ -30,6 +30,9 @@ const printed = {
     'Error: no container with ID or name "chuggy-linux-probe-absent" found: no such container',
     'Error: no container with name or ID "chuggy-linux-probe-absent" found: no such container',
   ],
+  NoSuchVolume: [
+    "Error response from daemon: get chuggy-linux-probe-absent: no such volume",
+  ],
   NameConflict: [
     'docker: Error response from daemon: Conflict. The container name "/chuggy-linux-probe-conflict" is already in use by container "fe97585ba1aa2ae3c309f0851f48ff35ac3ca7f3e3d17bcb7c504e2ae5691c31". You have to remove (or rename) that container to be able to reuse that name.\n\nRun \'docker run --help\' for more information',
     'Error: creating container storage: the container name "chuggy-linux-probe-conflict" is already in use by ab5a3a462f4584914e637e786a3d38444bb903d3a94af0c392460ecfa3a8f330. You have to remove that container to be able to reuse that name: that name is already in use, or use --replace to instruct Podman to do so.',
@@ -129,6 +132,20 @@ test("a pull the registry refused the image to, or whose reference names none, i
     }),
   );
 });
+
+for (const [cause, stderr] of [
+  [
+    "a file the engine's user may not open",
+    `Error: copying system image from manifest list: writing blob: adding layer with blob "${digest}": creating read-only layer: mkdir /home/chuggy/.local/share/containers/storage/overlay/l: permission denied`,
+  ],
+  [
+    "a credential helper its PATH lacks",
+    'error getting credentials - err: exec: "docker-credential-secretservice": executable file not found in $PATH, out: ``',
+  ],
+])
+  test(`a pull that failed on ${cause} is not refused, though its words hold a refusal's`, () => {
+    assert.ok(!enginePullRefused(pullAnswer(stderr)), stderr);
+  });
 
 test("a run whose command could not be started is read so only where the engine names that command", () => {
   const runc = (/** @type {string} */ cause) =>

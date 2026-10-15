@@ -7,7 +7,7 @@
 /**
  * @typedef {import("./engine.mjs").EngineAnswer} EngineAnswer
  *
- * @typedef {"Unreachable" | "NoSuchContainer" | "NameConflict" | "Unauthorized" | "NotFound" | "Other"} EngineFailure
+ * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "Unauthorized" | "NotFound" | "Other"} EngineFailure
  */
 
 const engineFailures = /** @type {const} */ ([
@@ -16,6 +16,7 @@ const engineFailures = /** @type {const} */ ([
     /cannot connect to the docker daemon|permission denied while trying to connect to the docker daemon|cannot connect to podman/iu,
   ],
   ["NoSuchContainer", /no such container/iu],
+  ["NoSuchVolume", /no such volume/iu],
   ["NameConflict", /is already in use/iu],
   [
     "Unauthorized",
@@ -63,6 +64,14 @@ const pullRefusal = new RegExp(
 );
 
 /**
+ * What this machine says of a failure of its own, in words a refusal also
+ * uses: a file the engine's user may not open, as rootless storage can be,
+ * and a program its PATH lacks, as a credential helper can. Neither is read
+ * as a refusal.
+ */
+const localFailurePhrasings = /permission denied|executable file not found/giu;
+
+/**
  * Whether a pull or an inspection of an image the engine answered as failed
  * was refused in a way no second try changes. An engine that could not be
  * reached refused nothing, whatever its words.
@@ -71,7 +80,8 @@ const pullRefusal = new RegExp(
  */
 export function enginePullRefused(answer) {
   return (
-    engineFailure(answer) !== "Unreachable" && pullRefusal.test(answer.stderr)
+    engineFailure(answer) !== "Unreachable" &&
+    pullRefusal.test(answer.stderr.replace(localFailurePhrasings, " "))
   );
 }
 

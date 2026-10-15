@@ -2,7 +2,8 @@
  * A container engine held in memory, answering the runner's argv with the
  * words docker 28 prints. A pull waits on whatever the suite hands it, so a
  * suite decides how long one takes and how it ends, and so does a `run --rm`,
- * which is how chuggy's runtime is copied into a volume.
+ * which is how chuggy's runtime is copied into a volume: its container holds
+ * the volumes it mounts until then, and goes once it has answered.
  */
 
 import { readFileSync, writeSync } from "node:fs";
@@ -226,23 +227,40 @@ function found(state, reference) {
 }
 
 /**
+ * A `run --rm`, whose container holds the volumes it mounts until the suite's
+ * `fill` has answered, and is removed then, as the engine removes one run so.
+ *
+ * @param {FakeEngineState} state
+ * @param {FakeCall} call
+ * @param {string} image
+ */
+function filled(state, call, image) {
+  if (!state.images.has(image))
+    return failed(
+      `docker: Error response from daemon: No such image: ${image}`,
+      125,
+    );
+  const id = `c${String(state.nextId++).padStart(63, "0")}`;
+  const [name = id] = flagValues(call.argv, "--name");
+  const volumes = flagValues(call.argv, "--volume");
+  /** @type {FakeContainer} */
+  const container = { id, name, labels: {}, status: "running", image, volumes };
+  state.containers.set(name, container);
+  return Promise.resolve(
+    state.fill(image, namedVolumes(volumes, true), call),
+  ).finally(() => {
+    if (state.containers.get(name) === container) state.containers.delete(name);
+  });
+}
+
+/**
  * @param {FakeEngineState} state
  * @param {FakeCall} call
  */
 function run(state, call) {
   const { argv } = call;
   const { image, command } = runImage(argv);
-  if (argv.includes("--rm"))
-    return state.images.has(image)
-      ? state.fill(
-          image,
-          namedVolumes(flagValues(argv, "--volume"), true),
-          call,
-        )
-      : failed(
-          `docker: Error response from daemon: No such image: ${image}`,
-          125,
-        );
+  if (argv.includes("--rm")) return filled(state, call, image);
   const [name] = flagValues(argv, "--name");
   call.envFile = readFileSync(flagValues(argv, "--env-file")[0], "utf8");
   const existing = state.containers.get(name);
@@ -372,8 +390,42 @@ function networked(state, network, verb) {
 }
 
 /**
- * `volume create`, which answers a name already made as made, and `volume rm`,
- * which refuses one a container mounts.
+ * The labels a listing's `--filter`s ask for, as key and value.
+ *
+ * @param {string[]} argv
+ */
+function labelFilters(argv) {
+  return flagValues(argv, "--filter").map((filter) => {
+    const [key, ...value] = filter.replace(/^label=/u, "").split("=");
+    return [key, value.join("=")];
+  });
+}
+
+/**
+ * @param {FakeEngineState} state
+ * @param {string[]} names
+ */
+function volumesInspected(state, names) {
+  const absent = names.find((name) => !state.volumes.has(name));
+  const stdout = `${JSON.stringify(
+    names.flatMap((name) => {
+      const volume = state.volumes.get(name);
+      return volume === undefined
+        ? []
+        : [{ Driver: "local", Labels: volume.labels, Name: name }];
+    }),
+  )}\n`;
+  return absent === undefined
+    ? answered(stdout)
+    : {
+        ...failed(`Error response from daemon: get ${absent}: no such volume`),
+        stdout,
+      };
+}
+
+/**
+ * `volume ls` and `volume inspect`; `volume create`, which answers a name
+ * already made as made; and `volume rm`, which refuses one a container mounts.
  *
  * @param {FakeEngineState} state
  * @param {FakeCall} call
@@ -381,6 +433,18 @@ function networked(state, network, verb) {
 function volumed(state, call) {
   const { argv } = call;
   const name = argv.at(-1) ?? "";
+  if (argv[1] === "ls") {
+    const wanted = labelFilters(argv);
+    return answered(
+      [...state.volumes]
+        .filter(([, volume]) =>
+          wanted.every(([key, value]) => volume.labels[key] === value),
+        )
+        .map(([listed]) => `${listed}\n`)
+        .join(""),
+    );
+  }
+  if (argv[1] === "inspect") return volumesInspected(state, argv.slice(2));
   if (argv[1] === "create") {
     if (!state.volumes.has(name))
       state.volumes.set(name, {
@@ -432,10 +496,7 @@ function answer(state, call) {
       : answered(`${state.contextHost}\n`);
   if (verb === "run") return run(state, call);
   if (verb === "ps") {
-    const wanted = flagValues(call.argv, "--filter").map((filter) => {
-      const [key, ...value] = filter.replace(/^label=/u, "").split("=");
-      return [key, value.join("=")];
-    });
+    const wanted = labelFilters(call.argv);
     return answered(
       [...state.containers.values()]
         .filter((container) =>
@@ -447,10 +508,12 @@ function answer(state, call) {
   }
   if (verb === "container") return inspected(state, call.argv.slice(2));
   if (verb === "kill") return killed(state, last);
-  if (verb === "rm")
-    return changed(state, last, (container) => {
+  if (verb === "rm") {
+    const removed = changed(state, last, (container) => {
       state.containers.delete(container.name);
     });
+    return call.argv.includes("--force") ? { ...removed, code: 0 } : removed;
+  }
   if (verb === "network") return networked(state, last, second);
   if (verb === "volume") return volumed(state, call);
   return failed(`unknown command: ${call.argv.join(" ")}`);

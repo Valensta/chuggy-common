@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   dockerContextArgv,
   dockerInfoArgv,
+  forcedRemoveArgv,
   imageInspectArgv,
   podmanRemoteArgv,
   podmanVersionArgv,
@@ -18,6 +19,8 @@ import {
   runArgv,
   runtimeFillArgv,
   runtimeVolumeCreateArgv,
+  volumeInspectArgv,
+  volumeListArgv,
   volumeRemoveArgv,
 } from "./engineArgv.mjs";
 
@@ -101,10 +104,16 @@ const runtime = `registry.chuggy.example/runtime@sha256:${"b".repeat(64)}`;
 const volumes = {
   volume: "chuggy-shame-0123456789abcdef0123-0a1b2c3d-runtime",
   workspace: "chuggy-shame-0123456789abcdef0123-0a1b2c3d-workspace",
+  fill: "chuggy-shame-0123456789abcdef0123-0a1b2c3d-fill",
 };
 
-test("a job given runtime volumes is labelled with them, mounts each uncopied, the runtime read-only, and starts the runtime's check through the image's shell", () => {
-  for (const engine of /** @type {const} */ (["docker", "podman"])) {
+test("a job given runtime volumes is labelled with them, mounts each uncopied, the runtime read-only, and starts the runtime's check through the image's shell; podman's workspace is chowned to the job's user", () => {
+  /** @type {[import("./engineArgv.mjs").EngineName, string][]} */
+  const workspaces = [
+    ["docker", "nocopy"],
+    ["podman", "nocopy,U"],
+  ];
+  for (const [engine, options] of workspaces) {
     const plain = runArgv(engine, job);
     const through = runArgv(engine, { ...job, runtime: volumes });
     const labels = plain.indexOf("--env-file");
@@ -116,7 +125,7 @@ test("a job given runtime volumes is labelled with them, mounts each uncopied, t
       "--label",
       `io.chuggy.workspace=${volumes.workspace}`,
       ...plain.slice(labels, workspace),
-      `${volumes.workspace}:/workspace:nocopy`,
+      `${volumes.workspace}:/workspace:${options}`,
       "--volume",
       `${volumes.volume}:/opt/chuggy:ro,nocopy`,
       "--entrypoint",
@@ -127,9 +136,14 @@ test("a job given runtime volumes is labelled with them, mounts each uncopied, t
   }
 });
 
-test("a runtime volume is made labelled by its pool and assignment, filled with the runtime image's own copy, whose node opens the workspace as a root holding nothing, and removed by name", () => {
+test("a runtime volume is made labelled by its pool, assignment and fill, filled by that named container with the runtime image's own copy, whose node opens the workspace as a root holding nothing, and removed by name", () => {
   assert.deepEqual(
-    runtimeVolumeCreateArgv(volumes.volume, "vteng/chuggy/shame", "asg-1"),
+    runtimeVolumeCreateArgv(
+      volumes.volume,
+      "vteng/chuggy/shame",
+      "asg-1",
+      volumes.fill,
+    ),
     [
       "volume",
       "create",
@@ -137,6 +151,8 @@ test("a runtime volume is made labelled by its pool and assignment, filled with 
       "io.chuggy.pool=vteng/chuggy/shame",
       "--label",
       "io.chuggy.assignment=asg-1",
+      "--label",
+      `io.chuggy.fill=${volumes.fill}`,
       volumes.volume,
     ],
   );
@@ -144,6 +160,8 @@ test("a runtime volume is made labelled by its pool and assignment, filled with 
     "run",
     "--rm",
     "--pull=never",
+    "--name",
+    volumes.fill,
     "--user",
     "0:0",
     "--cap-drop",
@@ -167,6 +185,27 @@ test("a runtime volume is made labelled by its pool and assignment, filled with 
     "volume",
     "rm",
     volumes.volume,
+  ]);
+});
+
+test("a pool's volumes are listed by its label and inspected by name, and a fill is removed running or not", () => {
+  assert.deepEqual(volumeListArgv("vteng/chuggy/shame"), [
+    "volume",
+    "ls",
+    "--quiet",
+    "--filter",
+    "label=io.chuggy.pool=vteng/chuggy/shame",
+  ]);
+  assert.deepEqual(volumeInspectArgv([volumes.volume, volumes.workspace]), [
+    "volume",
+    "inspect",
+    volumes.volume,
+    volumes.workspace,
+  ]);
+  assert.deepEqual(forcedRemoveArgv(volumes.fill), [
+    "rm",
+    "--force",
+    volumes.fill,
   ]);
 });
 

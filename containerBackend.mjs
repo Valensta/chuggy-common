@@ -40,8 +40,12 @@
  * started or pass that check is named refused rather than ended, with the
  * image's fault in one fixed text a fault. A runtime this runner cannot get or
  * copy is the site's failure and never the image's, so that job's placement
- * fails as any does. The volumes go with their container. An assignment
- * naming no runtime runs its image's own entrypoint.
+ * fails as any does. The volumes go with the job's container, or with its
+ * placement where the job never starts in them, the container filling them
+ * first. Any a runner left, stopped mid-placement or refused a removal, are
+ * removed by a later `held`, which never takes one of a placement in flight
+ * or of a container it lists. An assignment naming no runtime runs its
+ * image's own entrypoint.
  */
 
 import { randomBytes } from "node:crypto";
@@ -59,6 +63,8 @@ import { z } from "zod";
 import {
   assignmentLabel,
   deadlineLabel,
+  fillLabel,
+  forcedRemoveArgv,
   imageInspectArgv,
   inspectArgv,
   killArgv,
@@ -71,6 +77,8 @@ import {
   runtimeFillArgv,
   runtimeLabel,
   runtimeVolumeCreateArgv,
+  volumeInspectArgv,
+  volumeListArgv,
   volumeRemoveArgv,
   workspaceLabel,
 } from "./engineArgv.mjs";
@@ -143,10 +151,9 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} PlacementRuntime what a job placed through chuggy's runtime starts from
  * @property {string} image the runtime image its assignment named
  * @property {string[]} made the job's volumes made so far, which go where the job does not start in them
- * @property {import("./engineArgv.mjs").RuntimeVolumes | undefined} volumes once both are made
+ * @property {import("./engineArgv.mjs").RuntimeVolumes | undefined} volumes once both are made, and the container that fills them can have been run
  *
  * @typedef {InFlightPlacement & {
- *   placedMs: number,
  *   runtime: PlacementRuntime | undefined,
  *   controller: AbortController,
  *   done: Promise<void>,
@@ -179,7 +186,12 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
  * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
  *
- * @typedef {{settings: ContainerBackendSettings, seams: ContainerBackendSeams, placements: Map<string, Placement>, ends: Ends}} State
+ * @typedef {object} State
+ * @property {ContainerBackendSettings} settings
+ * @property {ContainerBackendSeams} seams
+ * @property {Map<string, Placement>} placements
+ * @property {Ends} ends
+ * @property {boolean} strays whether volumes of chuggy's runtime that nothing answers for may be left: from the start, since a predecessor may have left some, and after any removal of one failed
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -240,11 +252,12 @@ function checkedImageFault(exitCode) {
 }
 
 /**
- * How long after a job's placement began a pull of its image may go on
- * failing for a cause that can pass before the failure is read as the
- * image's: the counterpart of the dwell chuggy's cluster reads a pull by,
+ * How long after its first pull a job's image may go on failing to pull for
+ * a cause that can pass before the failure is read as the image's: the
+ * counterpart of the dwell chuggy's cluster reads a pull by,
  * `kubernetesPullFailureDwellSecs` in chuggy's
- * `src/adapters/kubernetes/podFaults.ts`.
+ * `src/adapters/kubernetes/podFaults.ts`. It is counted from that pull, so a
+ * runtime slow to pull before it takes none of it.
  */
 export const pullFailureDwellMs = 120_000;
 
@@ -289,6 +302,13 @@ const inspectedSchema = z.array(
       Env: z.array(z.string()).nullish(),
     }),
     State: z.object({ Status: z.string(), ExitCode: z.number().optional() }),
+  }),
+);
+
+const inspectedVolumesSchema = z.array(
+  z.object({
+    Name: z.string(),
+    Labels: z.record(z.string(), z.string()).nullish(),
   }),
 );
 
@@ -431,21 +451,127 @@ async function savedLogs(state, container) {
 }
 
 /**
+ * Removes one of a job's volumes of chuggy's runtime, answering whether it is
+ * gone. One that could not be removed is logged by name and left for a later
+ * `held` to remove.
+ *
+ * @param {State} state
+ * @param {string} owner the container it was made for
+ * @param {string} volume
+ */
+async function runtimeVolumeRemoved(state, owner, volume) {
+  const removed = await state.seams.engine.exec(volumeRemoveArgv(volume));
+  if (removed.code === 0 || engineFailure(removed) === "NoSuchVolume")
+    return true;
+  state.strays = true;
+  state.seams.log(
+    `${owner}: its volume ${volume} was not removed: ${engineFailureLine(removed)}`,
+  );
+  return false;
+}
+
+/**
  * Removes a job's volumes of chuggy's runtime, which an engine removing the
- * container they were mounted in keeps, as it keeps every named volume. One
- * that could not be removed is logged by name, for its owner to remove.
+ * container they were mounted in keeps, as it keeps every named volume.
  *
  * @param {State} state
  * @param {string} owner the container they were made for
  * @param {(string | undefined)[]} volumes
  */
 async function runtimeVolumesRemoved(state, owner, volumes) {
-  for (const volume of volumes) {
-    if (volume === undefined) continue;
-    const removed = await state.seams.engine.exec(volumeRemoveArgv(volume));
-    if (removed.code !== 0)
+  for (const volume of volumes)
+    if (volume !== undefined) await runtimeVolumeRemoved(state, owner, volume);
+}
+
+/**
+ * Removes the container that fills a job's volumes of chuggy's runtime,
+ * running or not, so that the volumes it holds can go; one already gone is
+ * no failure.
+ *
+ * @param {State} state
+ * @param {string} owner the container the volumes were made for
+ * @param {string} fill
+ */
+async function fillRemoved(state, owner, fill) {
+  const removed = await state.seams.engine.exec(forcedRemoveArgv(fill));
+  if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
+    state.seams.log(
+      `${owner}: the container filling its volumes, ${fill}, was not removed: ${engineFailureLine(removed)}`,
+    );
+}
+
+/**
+ * This pool's volumes as the engine describes them, or nothing where it
+ * could not, which is logged. One removed between the listing and the
+ * inspection is left out of the answer.
+ *
+ * @param {State} state
+ */
+async function poolVolumes(state) {
+  const { settings, seams } = state;
+  const listed = await seams.engine.exec(
+    volumeListArgv(poolLabelValue(settings.pool)),
+  );
+  if (listed.code !== 0) {
+    seams.log(
+      `${settings.engine} could not list this pool's volumes: ${engineFailureLine(listed)}`,
+    );
+    return undefined;
+  }
+  const names = listedIds(listed);
+  if (names.length === 0) return [];
+  const answer = await seams.engine.exec(volumeInspectArgv(names));
+  if (answer.code !== 0 && engineFailure(answer) !== "NoSuchVolume") {
+    seams.log(
+      `${settings.engine} could not inspect this pool's volumes: ${engineFailureLine(answer)}`,
+    );
+    return undefined;
+  }
+  try {
+    return inspectedVolumesSchema.parse(JSON.parse(answer.stdout));
+  } catch {
+    seams.log(
+      `${settings.engine} answered an inspection of this pool's volumes this runner cannot read`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Removes the volumes of chuggy's runtime that nothing answers for: each of
+ * an assignment `held` listed no container of and found no placement of in
+ * flight, the placements read again as each is removed, since a placement
+ * makes its volumes after it is placed. The container filling them goes
+ * first. A sweep that could not finish leaves `strays` set for the next.
+ *
+ * @param {State} state
+ * @param {ReadonlySet<string>} listed the assignments `held` found in flight or listed a container of
+ */
+async function strayVolumesRemoved(state, listed) {
+  state.strays = false;
+  const volumes = await poolVolumes(state);
+  if (volumes === undefined) {
+    state.strays = true;
+    return;
+  }
+  const fills = new Set();
+  for (const { Name: volume, Labels: labels } of volumes) {
+    const assignment = labels?.[assignmentLabel];
+    if (
+      assignment === undefined ||
+      listed.has(assignment) ||
+      state.placements.has(assignment)
+    )
+      continue;
+    const owner = containerName(state.settings.pool, assignment);
+    const fill = labels?.[fillLabel];
+    if (fill !== undefined && !fills.has(fill)) {
+      fills.add(fill);
+      await fillRemoved(state, owner, fill);
+    }
+    if (await runtimeVolumeRemoved(state, owner, volume))
       state.seams.log(
-        `${owner}: its volume ${volume} was not removed: ${engineFailureLine(removed)}`,
+        `${owner}: its volume ${volume}, which nothing answered for, was removed`,
       );
   }
 }
@@ -629,6 +755,11 @@ async function listedHeld(state, inspected, container, nowSecs) {
  * a `run` that failed can still have started one, and a listed container
  * answers for its own attempt.
  *
+ * While some may be left, the volumes of chuggy's runtime that nothing
+ * answers for are removed before any listed container is retired, so one
+ * that a retirement fails to remove is left to the next pass, which finds
+ * its container gone.
+ *
  * @param {State} state
  * @returns {Promise<WorkerPoolHeld[]>}
  */
@@ -646,8 +777,19 @@ async function heldAssignments(state) {
     state.ends.accounted.delete(endedAssignment(ended));
   const listed = new Set(placing);
   const nowSecs = Math.floor(state.seams.nowMs() / 1000);
-  for (const inspected of await poolContainers(state)) {
-    const container = poolContainer(inspected);
+  const containers = (await poolContainers(state)).map((inspected) => ({
+    inspected,
+    container: poolContainer(inspected),
+  }));
+  if (state.strays)
+    await strayVolumesRemoved(
+      state,
+      new Set([
+        ...placing,
+        ...containers.flatMap(({ container }) => container.assignment ?? []),
+      ]),
+    );
+  for (const { inspected, container } of containers) {
     const { assignment } = container;
     if (assignment === undefined || placing.has(assignment)) continue;
     listed.add(assignment);
@@ -818,7 +960,7 @@ function unpullable(failure) {
  * a pull that fails is the image's fault: at once where the registry refused
  * the image or the reference names none, and otherwise, since any other cause
  * can pass, only once it has gone on failing until `pullFailureDwellMs` after
- * the placement began. An engine that could not be reached, a pool with no
+ * the first pull. An engine that could not be reached, a pool with no
  * token to pull with and the deadline are this runner's, never the image's.
  *
  * @param {State} state
@@ -826,6 +968,7 @@ function unpullable(failure) {
  */
 async function jobImagePulled(state, placement) {
   const { settings, seams } = state;
+  const firstPullMs = seams.nowMs();
   for (;;) {
     try {
       await pulled(state, placement, placement.image, "its image");
@@ -838,7 +981,7 @@ async function jobImagePulled(state, placement) {
         throw failure;
       if (
         enginePullRefused(failure.answer) ||
-        seams.nowMs() - placement.placedMs >= pullFailureDwellMs
+        seams.nowMs() - firstPullMs >= pullFailureDwellMs
       )
         throw unpullable(failure);
       seams.log(
@@ -937,7 +1080,11 @@ async function runtimeHere(state, placement, runtime) {
 async function runtimeFilled(state, placement, runtime) {
   const { settings, seams } = state;
   const stem = `${placement.name}-${randomBytes(4).toString("hex")}`;
-  const volumes = { volume: `${stem}-runtime`, workspace: `${stem}-workspace` };
+  const volumes = {
+    volume: `${stem}-runtime`,
+    workspace: `${stem}-workspace`,
+    fill: `${stem}-fill`,
+  };
   try {
     for (const volume of [volumes.volume, volumes.workspace]) {
       const created = await seams.engine.exec(
@@ -945,6 +1092,7 @@ async function runtimeFilled(state, placement, runtime) {
           volume,
           poolLabelValue(settings.pool),
           placement.assignment,
+          volumes.fill,
         ),
       );
       if (created.code !== 0)
@@ -1088,7 +1236,9 @@ async function started(state, placement, assignment, envelope) {
  * Gets what a placement starts from and starts it: chuggy's runtime first
  * where the job starts through one, then the job's image, then the job's
  * volumes of the runtime. Those are removed where the job did not start in
- * them, as where a predecessor's container was found already running the job.
+ * them, as where a predecessor's container was found already running the job,
+ * and where it failed the container filling them goes first: a stop or the
+ * deadline ends only the engine's CLI, and leaves that container holding them.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1109,6 +1259,8 @@ async function placementRun(state, placement, assignment, envelope) {
     if (runtime !== undefined) await runtimeFilled(state, placement, runtime);
     outcome = await started(state, placement, assignment, envelope);
   } catch (failure) {
+    if (runtime?.volumes !== undefined)
+      await fillRemoved(state, placement.name, runtime.volumes.fill);
     if (runtime !== undefined)
       await runtimeVolumesRemoved(state, placement.name, runtime.made);
     throw failure;
@@ -1185,7 +1337,6 @@ async function placed(state, assignment, kind) {
     deadlineEpochSecs:
       Math.floor(placedMs / 1000) +
       Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
-    placedMs,
     runtime:
       kind === "Job" && assignment.runtime !== undefined
         ? { image: assignment.runtime, made: [], volumes: undefined }
@@ -1341,6 +1492,7 @@ export function containerBackend(settings, seams) {
     seams,
     placements: new Map(),
     ends: { pending: [], ready: [], accounted: new Set() },
+    strays: true,
   };
   return {
     place: (assignment, kind) => placed(state, assignment, kind),
