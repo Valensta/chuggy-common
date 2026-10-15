@@ -35,6 +35,7 @@ const reservedClaudeArguments = [
   "--worktree",
   "--resume",
   "--continue",
+  "--",
 ];
 
 function configuredArguments(task) {
@@ -53,6 +54,13 @@ function configuredArguments(task) {
   return args;
 }
 
+/**
+ * The argv of one run. The briefing comes after `--`, so it is the prompt
+ * whatever precedes it: `--mcp-config` takes every word after it up to the
+ * next option, as can an option a worker configures, and either would
+ * otherwise take the briefing as one of its values. The configuration is
+ * given as `--mcp-config=` for the same reason.
+ */
 export function claudeInvocation(task) {
   return [
     "-p",
@@ -64,9 +72,9 @@ export function claudeInvocation(task) {
     "--permission-mode",
     "bypassPermissions",
     "--strict-mcp-config",
-    "--mcp-config",
-    JSON.stringify({ mcpServers: {} }),
+    `--mcp-config=${JSON.stringify({ mcpServers: {} })}`,
     ...configuredArguments(task),
+    "--",
     task.briefing.text,
   ];
 }

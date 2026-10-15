@@ -53,9 +53,9 @@ test("a configured Claude worker composes a valid default Claude invocation", as
   };
 
   assert.deepEqual(claudeInvocation(task).slice(-4), [
-    "--mcp-config",
-    '{"mcpServers":{}}',
+    '--mcp-config={"mcpServers":{}}',
     "--allowedTools=Bash,Edit,Read,Write,Glob,Grep",
+    "--",
     "briefing",
   ]);
   assert.deepEqual(claudeInvocation(task).slice(0, 5), [
@@ -75,6 +75,41 @@ test("the final structured event is retained after streamed progress", () => {
   assert.deepEqual(
     claudeResult([{ type: "assistant", message: "working" }, final]),
     { output: final, result: final.structured_output },
+  );
+});
+
+/**
+ * Catches the briefing taken as a value of the option before it, which
+ * `--mcp-config` and a worker's own variadic option both take every word
+ * after them for, and which leaves a run with no prompt.
+ */
+test("a Claude briefing is the prompt whatever options precede it", () => {
+  for (const configured of [[], ["--allowedTools", "Bash", "Read"]]) {
+    const argv = claudeInvocation({
+      worker: {
+        mode: { type: "SingleAgent", agent: "Claude", arguments: configured },
+      },
+      briefing: { text: "briefing" },
+    });
+
+    assert.deepEqual(argv.slice(-2), ["--", "briefing"]);
+    assert.equal(argv.indexOf("--"), argv.length - 2);
+    assert.ok(argv.includes('--mcp-config={"mcpServers":{}}'));
+    assert.ok(!argv.includes("--mcp-config"));
+  }
+});
+
+/** Catches a worker's `--` making the run's own `--` and briefing two prompts. */
+test("ticket configuration cannot end the run's options itself", () => {
+  assert.throws(
+    () =>
+      claudeInvocation({
+        worker: {
+          mode: { type: "SingleAgent", agent: "Claude", arguments: ["--"] },
+        },
+        briefing: { text: "briefing" },
+      }),
+    /reserves Claude argument --$/u,
   );
 });
 
