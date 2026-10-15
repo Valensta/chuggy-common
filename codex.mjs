@@ -1,7 +1,7 @@
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult } from "./result.mjs";
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, constants, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -181,6 +181,41 @@ export async function prepareCodexCredential(
   };
 }
 
+/**
+ * The variables Codex finds the CAs it verifies a peer with by: its own, and
+ * the two TLS libraries read, any of which an image whose peers a private CA
+ * signs may already set.
+ */
+const codexCertificateVariables = [
+  "CODEX_CA_CERTIFICATE",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+];
+
+/**
+ * What a Codex run's own process is started with beside `environment`: the CA
+ * bundle at `certificates`, where that file is there and `environment` names
+ * no bundle of its own. Codex verifies a peer against the image's CA store,
+ * which an image without ca-certificates does not have, and trusts the bundle
+ * beside that store rather than in its place. The variable is one no other
+ * program reads, so git and every program the project runs keep whatever
+ * store the image has.
+ */
+export async function prepareCodexEnvironment(
+  environment,
+  certificates = coreRuntime.certificates,
+) {
+  if (
+    codexCertificateVariables.some((name) => Object.hasOwn(environment, name))
+  )
+    return {};
+  const shipped = await access(certificates, constants.R_OK).then(
+    () => true,
+    () => false,
+  );
+  return shipped ? { CODEX_CA_CERTIFICATE: certificates } : {};
+}
+
 function codexObserved(event) {
   if (event?.type !== "turn.completed") return undefined;
   return {
@@ -202,6 +237,7 @@ export const codexAgent = {
   result: codexResult,
   prepareCredential: prepareCodexCredential,
   prepareShell: prepareCodexShell,
+  prepareEnvironment: prepareCodexEnvironment,
   configuration: codexConfiguration,
   configurationEvent: () => false,
   resultEvent: (event) => codexMessage(event) !== undefined,

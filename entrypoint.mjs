@@ -343,6 +343,25 @@ async function agentImages(context) {
 }
 
 /**
+ * What an agent's own process is started with: the pod's inherited
+ * environment, the agent's credential's and its shell's, and what the agent
+ * adds to them once it has seen the whole of it.
+ */
+async function runAgentEnvironment(context, shell) {
+  const environment = {
+    ...workerAgentEnvironment(process.env),
+    ...context.agentEnvironment,
+    ...shell.environment,
+  };
+  return context.agent.prepareEnvironment === undefined
+    ? environment
+    : {
+        ...environment,
+        ...(await context.agent.prepareEnvironment(environment)),
+      };
+}
+
+/**
  * The agent started on the task from what a check stage's shells inherit, its
  * shell prepared to hand the project's commands the rest of what those shells
  * are handed, and its briefing told where each image its brief carries was
@@ -357,11 +376,7 @@ async function runAgent(context) {
     resultSchema: workerTemporaryFile(agentResultSchemaName),
     shellArguments: shell.arguments,
   });
-  const environment = {
-    ...workerAgentEnvironment(process.env),
-    ...context.agentEnvironment,
-    ...shell.environment,
-  };
+  const environment = await runAgentEnvironment(context, shell);
   if (context.agent.configuration !== undefined)
     await captureConfiguration(
       context,

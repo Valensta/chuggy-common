@@ -445,6 +445,7 @@ function checkSameRuntime(tree, started) {
     askpass: join(tree.runtime, "lib", "chuggy", "git-askpass.sh"),
     claude: join(tree.runtime, "bin", "claude"),
     codex: join(tree.runtime, "bin", "codex"),
+    certificates: join(tree.runtime, "share", "ca-certificates.crt"),
   });
 }
 
