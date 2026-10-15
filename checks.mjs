@@ -21,6 +21,12 @@
  * earlier: narrowing one shell and not the other leaves the document one `cp`
  * away from the commands.
  *
+ * THOSE SHELLS ARE TOLD THE COMMIT THE CHANGE STARTED FROM, in
+ * `CHUG_CHANGE_BASE`, so a check can run only what the change touched. It is
+ * set only where the attempt knows that commit, and one the pod inherited is
+ * dropped, so a shell that finds it unset runs everything rather than trusting
+ * a base nobody gave this attempt.
+ *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
  * cannot be trusted to mean anything, so the commands after it do not run and
@@ -136,15 +142,23 @@ function checkPassed(outcome) {
 /** The environment variables a launcher places a whole task document in. */
 const checkTaskDocuments = [workerTaskVariable, sessionTaskVariable];
 
+/** The variable a stage's shells find the commit the change started from in. */
+export const workerChangeBaseVariable = "CHUG_CHANGE_BASE";
+
 /**
- * What the pod holds, less the document that placed it. Everything else stands,
- * the site's own variables among it.
+ * What the pod holds, less the document that placed it, and with `changeBase`
+ * where the attempt knows one. Everything else stands, the site's own variables
+ * among it.
  */
-export function workerStageEnvironment(environment) {
+export function workerStageEnvironment(environment, changeBase) {
+  const kept = Object.entries(environment).filter(
+    ([name]) =>
+      !checkTaskDocuments.includes(name) && name !== workerChangeBaseVariable,
+  );
   return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) => !checkTaskDocuments.includes(name),
-    ),
+    changeBase === undefined
+      ? kept
+      : [...kept, [workerChangeBaseVariable, changeBase]],
   );
 }
 
@@ -152,7 +166,7 @@ export function workerStageEnvironment(environment) {
 async function runCheckCommand(command, room, services) {
   const child = services.spawnProcess("/bin/sh", ["-eu", "-c", command], {
     cwd: services.directory,
-    env: workerStageEnvironment(process.env),
+    env: services.environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -270,7 +284,8 @@ function checkReport(commands, ran, scrub) {
 /**
  * Runs one check stage: every command in order, stopping at the first that does
  * not exit cleanly, and reporting each command's own status through the
- * caller's credential scrub.
+ * caller's credential scrub. `context` names the directory the commands run in
+ * and, where the attempt knows it, the commit the change started from.
  */
 export async function runChecks(context, commands, services = {}) {
   if (commands.length === 0)
@@ -280,13 +295,14 @@ export async function runChecks(context, commands, services = {}) {
     write = (text) => process.stdout.write(text),
     scrub = checkNoScrub,
   } = services;
+  const environment = workerStageEnvironment(process.env, context.changeBase);
   const ran = [];
   let kept = 0;
   for (const command of commands) {
     const outcome = await runCheckCommand(
       command,
       workerCheckStageOutputCharsMax - kept,
-      { directory: context.directory, spawnProcess, write },
+      { directory: context.directory, environment, spawnProcess, write },
     );
     kept += outcome.output.length;
     ran.push(outcome);

@@ -160,6 +160,36 @@ function oneReference(input, kind) {
   return references[0].reference;
 }
 
+/** The input reference naming the commit the change an attempt carries started from. */
+const changeBaseKind = "ChangeBase";
+
+/** A full commit hash, in either of the object formats git names a commit in. */
+const changeBaseCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+/**
+ * The commit the change started from, as the input bundle pinned it, or
+ * nothing: where the bundle names none, as a plane that predates the reference
+ * does, where it is not a full hash, and where the clone at `directory` holds
+ * no such commit. The clone is of every branch, so a base the remote still
+ * reaches is in it; one no branch reaches is left unknown rather than fetched
+ * by its hash, which a forge need not serve.
+ */
+async function workerChangeBase(input, directory) {
+  const named = input.references.filter(
+    (reference) => reference.kind === changeBaseKind,
+  );
+  if (named.length > 1)
+    throw new Error(`input bundle must carry at most one ${changeBaseKind}`);
+  const base = named[0]?.reference;
+  if (base === undefined || !changeBaseCommit.test(base)) return undefined;
+  return command("git", ["cat-file", "-e", `${base}^{commit}`], {
+    cwd: directory,
+  }).then(
+    () => base,
+    () => undefined,
+  );
+}
+
 async function command(executable, args, options = {}) {
   return executeFile(executable, args, {
     maxBuffer: 16 * 1024 * 1024,
@@ -212,8 +242,11 @@ async function excludedFromWork(directory, paths) {
   await appendFile(excludeFile, `${patterns.join("\n")}\n`);
 }
 
-/** The files and the setup lines a worker block asks for, in the workspace it runs in. */
-export async function prepareWorker(task, directory) {
+/**
+ * The files and the setup lines a worker block asks for, in the workspace it
+ * runs in, its lines told `changeBase` as the stage's commands are.
+ */
+export async function prepareWorker(task, directory, changeBase) {
   const provisioned = [];
   for (const file of task.worker?.files ?? []) {
     const target = workspaceFile(directory, file.path);
@@ -225,7 +258,7 @@ export async function prepareWorker(task, directory) {
   for (const setup of task.worker?.setup ?? []) {
     await command("/bin/sh", ["-eu", "-c", setup], {
       cwd: directory,
-      env: workerStageEnvironment(process.env),
+      env: workerStageEnvironment(process.env, changeBase),
     });
   }
   const { stdout: status } = await command(
@@ -405,10 +438,11 @@ export async function workerCredential(asked) {
 
 /**
  * What one attempt works in: the repository its own bundle pinned, cloned with
- * the credential this pod resolved, and that credential's `refresh` where the
- * plane minted it. `seams` names the plane, the clone, the file the password
- * is written to and the directory cloned into, this module's own and the
- * image's `CHUG_WORKER_WORKSPACE` where it names none.
+ * the credential this pod resolved, that credential's `refresh` where the
+ * plane minted it, and the commit the change started from where the bundle
+ * names one the clone holds. `seams` names the plane, the clone, the file the
+ * password is written to and the directory cloned into, this module's own and
+ * the image's `CHUG_WORKER_WORKSPACE` where it names none.
  */
 export async function workerWorkspace(
   task,
@@ -445,6 +479,7 @@ export async function workerWorkspace(
     workspace ?? required(workerWorkspaceVariable),
     environment,
   );
+  const changeBase = await workerChangeBase(input, directory);
   return {
     repositoryId,
     repository,
@@ -452,6 +487,7 @@ export async function workerWorkspace(
     directory,
     environment,
     ...(refresh === undefined ? {} : { refresh }),
+    ...(changeBase === undefined ? {} : { changeBase }),
   };
 }
 
@@ -579,9 +615,11 @@ async function admitWorkerTask(task, agent) {
 /** What ran and what it found: one agent's result, or one check stage's. */
 export async function runWorkerTask(context, commands) {
   if (commands === undefined) return runAgent(context);
-  const run = await runChecks({ directory: context.directory }, commands, {
-    scrub: context.scrub,
-  });
+  const run = await runChecks(
+    { directory: context.directory, changeBase: context.changeBase },
+    commands,
+    { scrub: context.scrub },
+  );
   return { ...run, diagnosticPath: checkDiagnosticPath };
 }
 
@@ -799,11 +837,12 @@ export async function workerAttempt(launch, seams = {}) {
       keepSecret,
       { ...workspaceSeams, workspace: into },
     );
-    await prepareWorker(task, workspace.directory);
+    await prepareWorker(task, workspace.directory, workspace.changeBase);
     const run = await runWorkerTask(
       {
         task,
         directory: workspace.directory,
+        changeBase: workspace.changeBase,
         agentEnvironment,
         scrub,
         evidence,

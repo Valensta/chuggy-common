@@ -962,6 +962,7 @@ test("the descriptions say what the server does where a session reads it", () =>
     /run only in a program that reaches that stage/,
     /where it answers none a draft carrying checks is refused/,
     /\(BriefChecksUncommanded\)/,
+    /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
     /a brief naming none takes its repository's landing/,
     /for a newly bound repository is a pull request/,
     /never the default branch/,

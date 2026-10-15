@@ -27,6 +27,7 @@ import {
 import { credentialScrub } from "./runEvidence.mjs";
 import {
   runChecks,
+  workerChangeBaseVariable,
   workerCheckCommands,
   workerCheckOutputCharsMax,
   workerCheckStageOutputCharsMax,
@@ -299,6 +300,44 @@ test("a stage's commands inherit the pod's environment but not the task document
   } finally {
     for (const name of [...Object.keys(placed), "SITE_VARIABLE"])
       delete process.env[name];
+  }
+});
+
+/** A command that prints what the stage told it of the change's base, or `unset`. */
+const printsChangeBase = `printf "%s" "\${${workerChangeBaseVariable}-unset}"`;
+
+/**
+ * Catches the base not reaching the stage's shells, which leaves a check that
+ * narrows to what changed always running everything.
+ */
+test("a stage's commands are told the commit the change started from", async () => {
+  const changeBase = "b".repeat(40);
+
+  const { output } = await runChecks(
+    { ...workspace, changeBase },
+    [printsChangeBase, printsChangeBase],
+    { write: () => undefined },
+  );
+
+  assert.deepEqual(
+    output.checks.map((check) => check.output),
+    [changeBase, changeBase],
+  );
+});
+
+/**
+ * Catches a base the pod inherited reaching a stage whose attempt knows none:
+ * a check would narrow to a diff against a commit this change never started
+ * from, where unset makes it run everything.
+ */
+test("a stage that knows no base leaves the variable unset, whatever the pod holds", async () => {
+  process.env[workerChangeBaseVariable] = "c".repeat(40);
+  try {
+    const { output } = await ran([printsChangeBase]);
+
+    assert.equal(output.checks[0].output, "unset");
+  } finally {
+    delete process.env[workerChangeBaseVariable];
   }
 });
 
