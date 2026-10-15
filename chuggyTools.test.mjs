@@ -963,6 +963,8 @@ test("the descriptions say what the server does where a session reads it", () =>
     /where it answers none a draft carrying checks is refused/,
     /\(BriefChecksUncommanded\)/,
     /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
+    /runs under sh -eu with the commit/,
+    /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
     /a brief naming none takes its repository's landing/,
     /for a newly bound repository is a pull request/,
     /never the default branch/,
@@ -1423,4 +1425,16 @@ test("a capability this image does not know admits nothing", () => {
     disallowedTools.length,
     sessionBuiltInTools.length + allChuggyTools.length,
   );
+});
+
+// Claude Code cuts an MCP tool's description at this many characters, so a
+// clause past it is one the agent never reads.
+const toolDescriptionCharsMax = 2048;
+
+test("every tool's description is whole within what Claude Code passes an agent", () => {
+  for (const { name, description } of chuggyProjectTools)
+    assert.ok(
+      description.length <= toolDescriptionCharsMax,
+      `${name}: ${String(description.length)}`,
+    );
 });
