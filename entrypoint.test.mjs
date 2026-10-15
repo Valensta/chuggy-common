@@ -1256,32 +1256,50 @@ function agentRun(summary, verdict = "Pass") {
   });
 }
 
-/**
- * Catches an agent started without what its shell was prepared with, or with
- * a name `check.sh` kept the image's value under, which would reach the
- * agent's shell beside the value itself.
- */
-test("an agent is started with its shell as prepared, and without what check.sh kept aside", async (t) => {
-  const kept = workerImageVariable("NODE_PATH");
-  const saved = process.env[kept];
-  process.env[kept] = "/image/node_modules";
+/** Sets each of `variables` in this process's environment until `t` ends. */
+function podHolds(t, variables) {
+  const saved = Object.fromEntries(
+    Object.keys(variables).map((name) => [name, process.env[name]]),
+  );
+  Object.assign(process.env, variables);
   t.after(() => {
-    if (saved === undefined) delete process.env[kept];
-    else process.env[kept] = saved;
+    for (const [name, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
   });
-  const preparedFrom = [];
-  const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s %s %s"}}\\n' "$CHUG_SUITE_SHELL" "$1" "\${${kept}-dropped}"`;
+}
+
+/**
+ * Catches an agent started without what its shell was prepared with, with a
+ * name `check.sh` kept the image's value under, with the task document or the
+ * change base the pod inherited, any of which would reach the agent's shell;
+ * or its shell prepared without the image's value or the attempt's own base.
+ */
+test("an agent is started as a check stage's shells inherit, and its shell prepared with the rest", async (t) => {
+  const kept = workerImageVariable("NODE_PATH");
+  podHolds(t, {
+    [kept]: "/image/node_modules",
+    [workerTaskVariable]: "the task document",
+    [workerChangeBaseVariable]: "e".repeat(40),
+  });
+  const changeBase = "a".repeat(40);
+  const preparedWith = [];
+  const reads = [kept, workerTaskVariable, workerChangeBaseVariable]
+    .map((name) => `\${${name}-dropped}`)
+    .join(" ");
+  const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s %s %s"}}\\n' "$CHUG_SUITE_SHELL" "$1" "${reads}"`;
 
   const run = await runWorkerTask({
     task,
     directory: process.cwd(),
+    changeBase,
     agentEnvironment: {},
     evidence: { observed: () => undefined, record: () => undefined },
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
-      prepareShell: async (environment) => {
-        preparedFrom.push(environment[kept]);
+      prepareShell: async (handed) => {
+        preparedWith.push(handed);
         return {
           environment: { CHUG_SUITE_SHELL: "prepared" },
           arguments: ["argued"],
@@ -1296,8 +1314,42 @@ test("an agent is started with its shell as prepared, and without what check.sh 
     },
   });
 
-  assert.equal(run.result.summary, "prepared argued dropped");
-  assert.deepEqual(preparedFrom, ["/image/node_modules"]);
+  assert.equal(run.result.summary, "prepared argued dropped dropped dropped");
+  assert.deepEqual(preparedWith, [
+    {
+      NODE_PATH: "/image/node_modules",
+      [workerChangeBaseVariable]: changeBase,
+    },
+  ]);
+});
+
+/** Catches an agent's shell handed a change base where the attempt knows none. */
+test("an agent's shell is handed no change base where the attempt knows none", async (t) => {
+  podHolds(t, { [workerChangeBaseVariable]: "e".repeat(40) });
+  const preparedWith = [];
+  const ended = JSON.stringify({
+    type: "result",
+    structured_output: { verdict: "Pass", summary: "ended" },
+  });
+
+  await runWorkerTask({
+    task,
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async (handed) => {
+        preparedWith.push(handed);
+        return { environment: {}, arguments: [] };
+      },
+      invocation: () => ["-c", 'printf "%s\\n" "$1"', "agent", ended],
+    },
+  });
+
+  assert.equal(preparedWith.length, 1);
+  assert.ok(!Object.hasOwn(preparedWith[0], workerChangeBaseVariable));
 });
 
 /** Each artifact a finished run uploaded, in the order it was sent. */

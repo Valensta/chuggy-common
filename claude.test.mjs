@@ -6,12 +6,15 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { URL } from "node:url";
 
+import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import {
+  workerAgentEnvironment,
+  workerChangeBaseVariable,
   workerImageVariable,
+  workerShellEnvironment,
   workerStageEnvironment,
-  workerUnkeptEnvironment,
 } from "./checks.mjs";
 import {
   claudeAgent,
@@ -133,11 +136,15 @@ test("ticket configuration cannot replace worker-owned Claude arguments", () => 
 /**
  * A pod's environment as a job's `check.sh` leaves it, for an image that set
  * three of the variables it moves aside: one to what this suite's node runs
- * under, one empty, and one to a value no shell word survives unquoted.
+ * under, one empty, and one to a value no shell word survives unquoted. The
+ * pod holds its task document and a change base it inherited, neither of
+ * which a stage's shells are handed.
  */
 const checkedPod = {
   PATH: process.env.PATH ?? "",
   CHUG_SUITE_POD_VARIABLE: "the pod's own",
+  [workerTaskVariable]: '{"the task":"document"}',
+  [workerChangeBaseVariable]: "e".repeat(40),
   [workerImageVariable("NODE_OPTIONS")]: "--max-old-space-size=4096",
   [workerImageVariable("NODE_PATH")]: "",
   [workerImageVariable("LD_LIBRARY_PATH")]:
@@ -173,10 +180,14 @@ function claudeCommandEnvironment(shell, script, environment) {
   return seen;
 }
 
+/** The commit an attempt's change started from, where it knows one. */
+const attemptBase = "a".repeat(40);
+
 /**
  * Catches an agent's shell running a project's commands in an environment a
  * check stage's shells are not handed: a value lost, mangled by its quoting,
- * or left under the name `check.sh` kept it under.
+ * left under the name `check.sh` kept it under, the task document, or a change
+ * base other than the attempt's own.
  */
 for (const shell of [...agentShells, ...posixShells])
   test(
@@ -185,20 +196,21 @@ for (const shell of [...agentShells, ...posixShells])
       skip: shell.absent,
     },
     () => {
-      assert.deepEqual(
-        claudeCommandEnvironment(
-          shell,
-          claudeShellScript(checkedPod),
-          workerUnkeptEnvironment(checkedPod),
-        ),
-        workerStageEnvironment(checkedPod),
-      );
+      for (const changeBase of [attemptBase, undefined])
+        assert.deepEqual(
+          claudeCommandEnvironment(
+            shell,
+            claudeShellScript(workerShellEnvironment(checkedPod, changeBase)),
+            workerAgentEnvironment(checkedPod),
+          ),
+          workerStageEnvironment(checkedPod, changeBase),
+        );
     },
   );
 
-/** Catches a script that leaves a variable set where the image set none. */
-test("an image that set nothing a check moves aside gives Claude's shell nothing to run", () => {
-  assert.equal(claudeShellScript({ PATH: "/usr/bin" }), "");
+/** Catches a script that leaves a variable set where it was handed none. */
+test("a Claude shell handed nothing is given nothing to run", () => {
+  assert.equal(claudeShellScript({}), "");
 });
 
 /**
@@ -211,13 +223,15 @@ test("a Claude run's shell script is written once, privately, where CLAUDE_ENV_F
   t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, "shell.sh");
 
-  assert.deepEqual(await prepareClaudeShell(checkedPod, file), {
+  const handed = workerShellEnvironment(checkedPod, attemptBase);
+
+  assert.deepEqual(await prepareClaudeShell(handed, file), {
     environment: { CLAUDE_ENV_FILE: file },
     arguments: [],
   });
-  assert.equal(await readFile(file, "utf8"), claudeShellScript(checkedPod));
+  assert.equal(await readFile(file, "utf8"), claudeShellScript(handed));
   assert.equal((await stat(file)).mode & 0o777, 0o600);
-  await assert.rejects(prepareClaudeShell(checkedPod, file), /EEXIST/u);
+  await assert.rejects(prepareClaudeShell(handed, file), /EEXIST/u);
   assert.equal(claudeAgent.prepareShell, prepareClaudeShell);
 });
 
@@ -232,7 +246,7 @@ test("a Claude run's shell script is under HOME where none is named", async (t) 
     await rm(home, { recursive: true, force: true });
   });
 
-  const prepared = await prepareClaudeShell(checkedPod);
+  const prepared = await prepareClaudeShell({});
 
   assert.equal(dirname(prepared.environment.CLAUDE_ENV_FILE), home);
 });

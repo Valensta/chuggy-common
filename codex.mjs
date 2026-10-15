@@ -1,4 +1,3 @@
-import { workerImageEnvironment } from "./checks.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult } from "./result.mjs";
 import { execFile } from "node:child_process";
@@ -71,20 +70,19 @@ function codexTomlString(text) {
 
 /**
  * The override of Codex's `shell_environment_policy` that hands the shell Codex
- * runs each command in what a job's `check.sh` moved aside: its `set` puts each
- * variable back under its own name, as a check stage's shells are handed it.
- * Codex's own process runs without them.
+ * runs each command in each variable of `handed` as it is, which is what a
+ * check stage's shells are handed beyond what Codex's own process runs with.
  */
-export function codexShellArguments(environment) {
-  const restored = Object.entries(workerImageEnvironment(environment)).map(
+export function codexShellArguments(handed) {
+  const set = Object.entries(handed).map(
     ([name, value]) => `${name} = ${codexTomlString(value)}`,
   );
-  return ["--config", `shell_environment_policy.set={${restored.join(", ")}}`];
+  return ["--config", `shell_environment_policy.set={${set.join(", ")}}`];
 }
 
 /** What a Codex run's shell is handed, which is given by arguments alone. */
-export async function prepareCodexShell(environment) {
-  return { environment: {}, arguments: codexShellArguments(environment) };
+export async function prepareCodexShell(handed) {
+  return { environment: {}, arguments: codexShellArguments(handed) };
 }
 
 /**

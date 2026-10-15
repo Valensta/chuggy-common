@@ -2,7 +2,6 @@ import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { workerImageEnvironment } from "./checks.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
@@ -86,12 +85,12 @@ function claudeShellWord(text) {
 
 /**
  * The lines Claude Code runs before each command of its Bash tool, in that
- * command's own shell: each variable a job's `check.sh` moved aside, back under
- * its own name as a check stage's shells are handed it. Claude Code's own
- * process runs without them.
+ * command's own shell: each variable of `handed` exported as it is, which is
+ * what a check stage's shells are handed beyond what Claude Code's own process
+ * runs with.
  */
-export function claudeShellScript(environment) {
-  return Object.entries(workerImageEnvironment(environment))
+export function claudeShellScript(handed) {
+  return Object.entries(handed)
     .map(([name, value]) => `export ${name}=${claudeShellWord(value)}\n`)
     .join("");
 }
@@ -102,10 +101,10 @@ export function claudeShellScript(environment) {
  * user can write.
  */
 export async function prepareClaudeShell(
-  environment,
+  handed,
   file = join(homedir(), ".chuggy-claude-shell.sh"),
 ) {
-  await writeFile(file, claudeShellScript(environment), {
+  await writeFile(file, claudeShellScript(handed), {
     flag: "wx",
     mode: 0o600,
   });

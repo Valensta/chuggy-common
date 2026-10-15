@@ -82,11 +82,12 @@ import {
 import { workerAgent } from "./agent.mjs";
 import {
   runChecks,
+  workerAgentEnvironment,
   workerCheckCommands,
   workerReportText,
+  workerShellEnvironment,
   workerStageEnvironment,
   workerSummaryText,
-  workerUnkeptEnvironment,
 } from "./checks.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { planeCredential, workerCredentialPath } from "./planeCredential.mjs";
@@ -315,17 +316,20 @@ async function readAgentStream(context, child, argv) {
 }
 
 /**
- * The agent started on the task, its shell prepared to hand the project's
- * commands what the image set to steer them, as a check stage's shells are.
+ * The agent started on the task from what a check stage's shells inherit, its
+ * shell prepared to hand the project's commands the rest of what those shells
+ * are handed.
  */
 async function runAgent(context) {
-  const shell = await context.agent.prepareShell(process.env);
+  const shell = await context.agent.prepareShell(
+    workerShellEnvironment(process.env, context.changeBase),
+  );
   const argv = context.agent.invocation(context.task, {
     resultSchema: workerTemporaryFile(agentResultSchemaName),
     shellArguments: shell.arguments,
   });
   const environment = {
-    ...workerUnkeptEnvironment(process.env),
+    ...workerAgentEnvironment(process.env),
     ...context.agentEnvironment,
     ...shell.environment,
   };

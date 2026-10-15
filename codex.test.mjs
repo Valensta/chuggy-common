@@ -6,7 +6,11 @@ import test from "node:test";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 
-import { workerImageEnvironment, workerImageVariable } from "./checks.mjs";
+import {
+  workerChangeBaseVariable,
+  workerImageVariable,
+  workerShellEnvironment,
+} from "./checks.mjs";
 import {
   codexAgent,
   codexConfiguration,
@@ -234,17 +238,21 @@ test("a Codex credential's home is under HOME where none is named", async (t) =>
 });
 
 /**
- * A pod's environment as a job's `check.sh` leaves it, for an image that set
- * three of the variables it moves aside: one plain, one empty, and one to
- * every character a TOML basic string must escape and some it need not.
+ * What a Codex run's shell is handed for a pod whose image set three of the
+ * variables `check.sh` moves aside, one plain, one empty, and one to every
+ * character a TOML basic string must escape and some it need not, and whose
+ * attempt knows the commit its change started from.
  */
-const checkedPod = {
-  PATH: "/usr/bin",
-  [workerImageVariable("NODE_OPTIONS")]: "--max-old-space-size=4096",
-  [workerImageVariable("NODE_PATH")]: "",
-  [workerImageVariable("LD_LIBRARY_PATH")]:
-    '/image/it\'s "lib"\\\n\t\u0001\u007f\u009f\u{1F600}end',
-};
+const handed = workerShellEnvironment(
+  {
+    PATH: "/usr/bin",
+    [workerImageVariable("NODE_OPTIONS")]: "--max-old-space-size=4096",
+    [workerImageVariable("NODE_PATH")]: "",
+    [workerImageVariable("LD_LIBRARY_PATH")]:
+      '/image/it\'s "lib"\\\n\t\u0001\u007f\u009f\u{1F600}end',
+  },
+  "a".repeat(40),
+);
 
 /**
  * The table a `shell_environment_policy.set` override sets, read back. Each
@@ -269,19 +277,24 @@ function codexSetTable(argument) {
  * Catches Codex's shell set a value other than the one a check stage's shells
  * are handed, or set it in a string TOML refuses for a raw control character.
  */
-test("a Codex run's shell is set exactly what check.sh moved aside", () => {
-  const [flag, argument, ...rest] = codexShellArguments(checkedPod);
+test("a Codex run's shell is set exactly what it is handed", () => {
+  const [flag, argument, ...rest] = codexShellArguments(handed);
 
   assert.equal(flag, "--config");
   assert.deepEqual(rest, []);
   assert.doesNotMatch(argument, /\p{Cc}/u);
-  assert.deepEqual(codexSetTable(argument), workerImageEnvironment(checkedPod));
-  assert.equal(Object.keys(codexSetTable(argument)).length, 3);
+  assert.deepEqual(codexSetTable(argument), handed);
+  assert.deepEqual(Object.keys(codexSetTable(argument)).sort(), [
+    workerChangeBaseVariable,
+    "LD_LIBRARY_PATH",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+  ]);
 });
 
-/** Catches a Codex shell set a variable the image never set. */
-test("an image that set nothing a check moves aside sets Codex's shell nothing", () => {
-  assert.deepEqual(codexShellArguments({ PATH: "/usr/bin" }), [
+/** Catches a Codex shell set a variable it was not handed. */
+test("a Codex shell handed nothing is set nothing", () => {
+  assert.deepEqual(codexShellArguments({}), [
     "--config",
     "shell_environment_policy.set={}",
   ]);
@@ -289,9 +302,9 @@ test("an image that set nothing a check moves aside sets Codex's shell nothing",
 
 /** Catches a Codex run whose shell is prepared otherwise than by its arguments. */
 test("a Codex run's shell is prepared by arguments alone", async () => {
-  assert.deepEqual(await prepareCodexShell(checkedPod), {
+  assert.deepEqual(await prepareCodexShell(handed), {
     environment: {},
-    arguments: codexShellArguments(checkedPod),
+    arguments: codexShellArguments(handed),
   });
   assert.equal(codexAgent.prepareShell, prepareCodexShell);
 });

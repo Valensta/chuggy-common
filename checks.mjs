@@ -24,9 +24,7 @@
  * THOSE SHELLS ARE HANDED BACK WHAT THE IMAGE SET TO STEER A PROCESS. A job's
  * `check.sh` moves each such variable aside before chuggy's node starts, so
  * that none of chuggy's own processes is steered by the image; a stage's
- * shells are the project's, and run as the image set them up to. An agent's
- * shell is handed back the same, by the agent's own means, so that a check the
- * agent runs runs as the stage would run it.
+ * shells are the project's, and run as the image set them up to.
  *
  * THOSE SHELLS ARE TOLD THE COMMIT THE CHANGE STARTED FROM, in
  * `CHUG_CHANGE_BASE`, so a check can run only what the change touched. It is
@@ -34,6 +32,12 @@
  * dropped, so a shell that finds it unset runs everything rather than trusting
  * a base nobody gave this attempt. The shell runs with `-u`, so a line reads it
  * as `${CHUG_CHANGE_BASE-}`, and `"$CHUG_CHANGE_BASE"` aborts where it is unset.
+ *
+ * AN AGENT'S SHELL IS HANDED WHAT THOSE SHELLS ARE, so that a check the agent
+ * runs is handed what the stage's would be. The agent is started from what
+ * they inherit, and its shell is handed the moved values and the attempt's own
+ * change base by the agent's own means, beside what the agent itself was
+ * given to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -174,12 +178,8 @@ export function workerImageVariable(name) {
 const checkImageKeptVariables =
   workerImageSteeringVariables.map(workerImageVariable);
 
-/**
- * `environment` less every name `check.sh` keeps a moved value under, which is
- * what an agent's own process is started with: its shell is handed each value
- * back under its own name by the agent's own means.
- */
-export function workerUnkeptEnvironment(environment) {
+/** `environment` less every name `check.sh` keeps a moved value under. */
+function workerUnkeptEnvironment(environment) {
   return Object.fromEntries(
     Object.entries(environment).filter(
       ([name]) => !checkImageKeptVariables.includes(name),
@@ -201,7 +201,7 @@ export function workerInheritedEnvironment(environment) {
 }
 
 /** The image's own value of each variable `check.sh` moved aside, under its own name again. */
-export function workerImageEnvironment(environment) {
+function workerImageEnvironment(environment) {
   return Object.fromEntries(
     workerImageSteeringVariables.flatMap((name) => {
       const kept = workerImageVariable(name);
@@ -213,17 +213,32 @@ export function workerImageEnvironment(environment) {
 }
 
 /**
- * What a stage's shells are handed: the pod's inherited environment, with each
- * variable `check.sh` moved aside back under its own name in place of the one
- * it was kept under, and with `changeBase` where the attempt knows one.
+ * What an agent's own process is started from: the pod's inherited
+ * environment, less every name `check.sh` keeps a moved value under.
  */
-export function workerStageEnvironment(environment, changeBase) {
+export function workerAgentEnvironment(environment) {
+  return workerUnkeptEnvironment(workerInheritedEnvironment(environment));
+}
+
+/**
+ * What a stage's shells are handed beyond that, which an agent's shell is
+ * handed by the agent's own means: each variable `check.sh` moved aside, back
+ * under its own name, and `changeBase` where the attempt knows one.
+ */
+export function workerShellEnvironment(environment, changeBase) {
   return {
-    ...workerUnkeptEnvironment(workerInheritedEnvironment(environment)),
     ...workerImageEnvironment(environment),
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
+  };
+}
+
+/** What a stage's shells are handed. */
+export function workerStageEnvironment(environment, changeBase) {
+  return {
+    ...workerAgentEnvironment(environment),
+    ...workerShellEnvironment(environment, changeBase),
   };
 }
 
