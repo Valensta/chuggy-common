@@ -118,7 +118,16 @@ import { routeFilled } from "./wire.mjs";
  * wire. An intent is bounded as a whole and by nothing a line at a time, so a
  * session is told what bounds one and nothing about where its lines break.
  */
-const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released. A 400 names the rule the brief broke.`;
+const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`checks\` are command lines added to the first Check stage the configuration runs as commands, which initialize_draft answers as \`commandedCheckStage\`, counted from zero, so they run only in a program that reaches that stage, and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded); \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes its repository's landing, which for a newly bound repository is a pull request; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke.`;
+
+/**
+ * What a submitted command answers: the operation, and what the same call made
+ * again within one turn answers, which is that operation as it now stands.
+ */
+const chuggySubmissionDescription = `Answers the operation's id and its \`state\`; read_operation answers what it did, a refusal's \`code\` included. The same call again in the same turn is the same operation, answered as it now stands: a \`state\` other than Pending is the outcome it already settled on, not a new attempt.`;
+
+/** What a refusal ledger holds, which is what an empty one is read against. */
+const chuggyRefusalLedgerDescription = `A refusal ledger holds the lead's refusals to dispatch a released ticket and their lifts, and nothing else, so it is empty until the lead refuses one. A refused command is never in it: read_operation answers a refused release or revocation, and a refused draft write is answered by that write itself.`;
 
 /**
  * How many times the entry the runtime mirrors carries one answer's text. The
@@ -492,8 +501,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_refusals",
-    description:
-      "The refusals standing across this project, with the ticket version each names.",
+    description: `The refusals standing across this project, each a ticket whose latest ledger entry is a refusal, with the ticket version each names. ${chuggyRefusalLedgerDescription}`,
     shape: (z) => ({ limit: limit(z, agenticRefusalsAnsweredMax) }),
     call: (context, { limit: pageLimit }) =>
       read(
@@ -503,8 +511,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_ticket_refusals",
-    description:
-      "One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. `more` says the ledger holds further entries than one answer carries.",
+    description: `One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. \`more\` says the ledger holds further entries than one answer carries. ${chuggyRefusalLedgerDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(
@@ -515,7 +522,7 @@ export const chuggyProjectTools = [
   {
     name: "read_lead",
     description:
-      "This project's lead session: its state, its mailbox tail and its transcript streams.",
+      "This project's lead session: its state, its mailbox tail and its transcript streams. A project with no lead answers None, which is expected before anything is released: the selector opens a lead only when a released ticket waits on a dispatch decision, and only while the route the project places its lead on is admitted: a hosted route where hosted runs are granted, a runner route where a runner of the project is live.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "lead")),
   },
@@ -624,7 +631,7 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision.",
+      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration.",
     shape: (z) => ({ revision: identity(z) }),
     call: (context, { revision }) =>
       read(context, projectPath(context, "draftInitialization", { revision })),
@@ -698,8 +705,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "release_draft",
-    description:
-      "Submits the release of one draft. Answers an accepted operation and its id, never an outcome: read that with read_operation.",
+    description: `Submits the release of one draft. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers.`,
     shape: (z) => ({
       ticket: ticket(z),
       authoringVersion: count(z),
@@ -734,8 +740,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "revoke_ticket",
-    description:
-      "Submits the revocation of one ticket, on your owner's word only. Revoking ends the ticket for good: it cancels the work running for it and undoes nothing that already landed. It revokes no other ticket. A ticket depending on a revoked one can never start, read_ticket names those dependencies in `revokedDependencies`, and its only exit is to be revoked too. Answers an accepted operation and its id, never an outcome: read that with read_operation.",
+    description: `Submits the revocation of one ticket, on your owner's word only. Revoking ends the ticket for good: it cancels the work running for it and undoes nothing that already landed. It revokes no other ticket. A ticket depending on a revoked one can never start, read_ticket names those dependencies in \`revokedDependencies\`, and its only exit is to be revoked too. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       submit(context, { mutation: "RevokeTicket", ticket: args.ticket }),

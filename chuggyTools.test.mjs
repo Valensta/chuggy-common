@@ -946,6 +946,61 @@ test("the configuration read says where the agent that does the work is named", 
   assert.match(described("list_configurations"), /read_configuration/);
 });
 
+/**
+ * What the server does that no answer shows until it is too late to act on:
+ * that a brief's checks need a commanded Check stage, that a proposal's branch
+ * is never the default one, that the refusal ledgers hold none of a command's
+ * refusals, that a submission repeated in one turn answers the settled
+ * operation, that a project has no lead before a release, and that stages run
+ * in order. Each is said where the session reads it.
+ */
+test("the descriptions say what the server does where a session reads it", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const brief = [
+    /`commandedCheckStage`, counted from zero/,
+    /run only in a program that reaches that stage/,
+    /where it answers none a draft carrying checks is refused/,
+    /\(BriefChecksUncommanded\)/,
+    /a brief naming none takes its repository's landing/,
+    /for a newly bound repository is a pull request/,
+    /never the default branch/,
+    /\(ProposalBaseIsHead\)/,
+  ];
+  const ledger = [
+    /refusals to dispatch a released ticket/,
+    /and nothing else/,
+    /read_operation/,
+  ];
+  const said = {
+    create_draft: brief,
+    file_dependent: brief,
+    revise_draft: brief,
+    read_refusals: ledger,
+    read_ticket_refusals: ledger,
+    release_draft: [
+      /same turn is the same operation/,
+      /other than Pending/,
+      /revise_draft/,
+    ],
+    revoke_ticket: [/same turn is the same operation/, /other than Pending/],
+    read_lead: [
+      /None/,
+      /before anything is released/,
+      /a hosted route where hosted runs are granted/,
+      /a runner route where a runner of the project is live/,
+    ],
+    initialize_draft: [
+      /run in that order/,
+      /a failed stage ends evaluation/,
+      /`choices\.programStagesMax`/,
+    ],
+  };
+
+  for (const [tool, claims] of Object.entries(said))
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+});
+
 test("two releases in one turn are two operations, and one repeated is one", async () => {
   const { api, call } = toolsOf({}, () => ({ status: 202, body: "{}" }));
   const release = (ticket) =>
