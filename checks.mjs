@@ -234,7 +234,12 @@ export function workerShellEnvironment(environment, changeBase) {
   };
 }
 
-/** What a stage's shells are handed. */
+/**
+ * What a stage's shells are handed. With no `changeBase` it is what each of
+ * the image's programs the core runs itself is handed: git, and every hook a
+ * project's setup installed for it, which need the image's values as its
+ * shells do and are not to be handed the task document.
+ */
 export function workerStageEnvironment(environment, changeBase) {
   return {
     ...workerAgentEnvironment(environment),

@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 
 import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocuments";
 
+import { workerStageEnvironment } from "./checks.mjs";
+
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
 const sourceObjectHeaderBytesMax = 256;
 
@@ -134,6 +136,7 @@ async function sourceSecretCarried(directory, base, head, secrets) {
   const git = (args, input) =>
     spawn("git", ["--no-replace-objects", ...args], {
       cwd: directory,
+      env: workerStageEnvironment(process.env),
       stdio: [input, "pipe", "pipe"],
     });
   const listing = git(
@@ -189,6 +192,11 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * minted after every commit it sends, so none can carry it and it is not
  * looked for.
  *
+ * GIT IS THE IMAGE'S. Every call before the push, and every hook a project's
+ * setup installed that one of them runs, is handed what the image's own
+ * programs are, and the push is handed the credential's environment, which
+ * is that and its askpass.
+ *
  * THE PUSH ASKS FOR ITS CREDENTIAL AGAIN. `refresh` is present where the plane
  * minted the one the clone used: a minted token expires, an attempt may outlive
  * one, and the push is the last thing it does — so the credential is taken
@@ -209,16 +217,17 @@ export async function commitAndPushSource({
 }) {
   if (!Array.isArray(secrets))
     throw new Error("a push is checked against the secrets the pod holds");
-  await command("git", ["config", "user.name", "Chuggy Worker"], {
-    cwd: directory,
-  });
-  await command("git", ["config", "user.email", "worker@chuggy.invalid"], {
-    cwd: directory,
-  });
-  await command("git", ["add", "--all"], { cwd: directory });
+  const local = { cwd: directory, env: workerStageEnvironment(process.env) };
+  await command("git", ["config", "user.name", "Chuggy Worker"], local);
+  await command(
+    "git",
+    ["config", "user.email", "worker@chuggy.invalid"],
+    local,
+  );
+  await command("git", ["add", "--all"], local);
   const provisioned = (task.worker?.files ?? []).map((file) => file.path);
   if (provisioned.length > 0) {
-    await command("git", ["reset", "--", ...provisioned], { cwd: directory });
+    await command("git", ["reset", "--", ...provisioned], local);
   }
   await command(
     "git",
@@ -228,11 +237,9 @@ export async function commitAndPushSource({
       "-m",
       `ticket ${String(task.ticket)} attempt ${task.attempt}`,
     ],
-    { cwd: directory },
+    local,
   );
-  const { stdout } = await command("git", ["rev-parse", "HEAD"], {
-    cwd: directory,
-  });
+  const { stdout } = await command("git", ["rev-parse", "HEAD"], local);
   const commit = stdout.trim();
   const carried =
     secrets.length === 0

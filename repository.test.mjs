@@ -8,11 +8,15 @@ import { fileURLToPath, URL } from "node:url";
 import { promisify } from "node:util";
 
 import {
+  sessionTaskVariable,
   workerCredentialFilesSchema,
   workerRepositoriesSchema,
+  workerTaskVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import { workerImageVariable } from "./checks.mjs";
 import {
+  workerCredentialEnvironment,
   workerRepositories,
   workerRepository,
   workerRepositoryUrl,
@@ -91,6 +95,40 @@ test("a worker repository selects its own credential", () => {
   );
   assert.equal(selected.environment.GIT_ASKPASS, askpass);
   assert.equal(selected.environment.GIT_TERMINAL_PROMPT, "0");
+});
+
+/**
+ * Catches git reaching a remote with the core's own environment: without the
+ * image's value of a variable `check.sh` moved aside, with the name `check.sh`
+ * kept it under, or with a task document. A session's clone is handed the same.
+ */
+test("the askpass environment is what the image's programs are handed, and the askpass", (t) => {
+  const kept = workerImageVariable("LD_LIBRARY_PATH");
+  const pod = {
+    [kept]: "/the/image/lib",
+    [workerTaskVariable]: "the task document",
+    [sessionTaskVariable]: "the session's task document",
+    SITE_VARIABLE: "set by the site",
+  };
+  const saved = Object.keys(pod).map((name) => [name, process.env[name]]);
+  Object.assign(process.env, pod);
+  t.after(() => {
+    for (const [name, value] of saved)
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+
+  const environment = workerCredentialEnvironment("/credentials/github", "x");
+
+  assert.equal(environment.LD_LIBRARY_PATH, "/the/image/lib");
+  assert.equal(environment.SITE_VARIABLE, "set by the site");
+  for (const name of [kept, workerTaskVariable, sessionTaskVariable])
+    assert.ok(!Object.hasOwn(environment, name), `${name} reaches git`);
+  assert.equal(
+    environment.CHUG_WORKER_GIT_CREDENTIAL_FILE,
+    "/credentials/github",
+  );
+  assert.equal(environment.GIT_ASKPASS, askpass);
 });
 
 test("a worker repository refuses incomplete credential configuration", () => {

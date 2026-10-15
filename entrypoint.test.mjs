@@ -29,7 +29,13 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
-import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
+import {
+  git,
+  handedAsTheImage,
+  inCheckout,
+  recordingGit,
+  remoteRefs,
+} from "./checkout.fixture.mjs";
 import {
   workerChangeBaseVariable,
   workerCheckCommands,
@@ -2190,6 +2196,101 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
       await plane.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * A plane serving one commanded work attempt that passes, its setup line
+ * installing `hooks` as the clone's hooks and its block provisioning a file,
+ * and its input pinning `base` of `remote` as where it starts and where its
+ * change started.
+ */
+function hookedPlane(remote, base, hooks) {
+  return servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return {
+          status: 200,
+          body: workTaskAnswerSchema.parse({
+            ...fetchedAnswer,
+            worker: {
+              mode: { type: "Commands", commands: ["true"] },
+              setup: [`git config core.hooksPath '${hooks}'`],
+              files: [{ path: ".provisioned", content: "set up\n" }],
+            },
+          }),
+        };
+      case "input": {
+        const input = inputAnswer(remote, base);
+        input.body.references.push({
+          ordinal: 3,
+          kind: "ChangeBase",
+          reference: base,
+        });
+        return input;
+      }
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/**
+ * A project's setup may install hooks, as husky does on `npm ci`, and an
+ * image's git and those hooks may need a value `check.sh` moved aside. Catches
+ * any git a work attempt runs itself, from its clone to its push, or a hook
+ * one of them runs, handed the core's own environment: without that value, or
+ * with the task document, which carries the attempt's bearer.
+ */
+test("a work attempt's git, from its clone to its push, and the hooks its setup installs are handed the image's environment and no task document", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    await git("git", ["push", remote, `${base}:refs/heads/main`], {
+      cwd: directory,
+    });
+    const recording = await recordingGit(t);
+    const root = await mkdtemp(join(tmpdir(), "chuggy-attempt-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const plane = await hookedPlane(remote, base, recording.hooks);
+    t.after(() => plane.close());
+    const served = {
+      ...envelope,
+      callbackUrl: plane.url,
+      workspace: join(root, "workspace"),
+    };
+    const { task: answered } = await envelopeTask(served);
+    recording.start();
+
+    await workerAttempt(envelopeLaunch(served, answered), {
+      minted: root,
+      write: async () => undefined,
+    });
+
+    const records = await recording.records();
+    for (const [label, ...handed] of records)
+      assert.deepEqual(handed, handedAsTheImage, label);
+    const labels = records.map(([label]) => label);
+    for (const expected of [
+      "git clone",
+      "git checkout",
+      "git cat-file",
+      "git rev-parse",
+      "git status",
+      "git commit",
+      "pre-commit",
+      "git rev-list",
+      "git push",
+      "pre-push",
+    ])
+      assert.ok(labels.includes(expected), `${expected} was never recorded`);
+    assert.notEqual(await remoteRefs(remote), "");
+    assert.ok(plane.asked.some(({ route }) => route === "report"));
   });
 });
 

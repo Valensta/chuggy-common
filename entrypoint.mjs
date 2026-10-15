@@ -198,9 +198,14 @@ async function workerChangeBase(input, directory) {
   );
 }
 
+/**
+ * One of the image's programs run to its end, git or a setup line: handed what
+ * the image's own programs are where `options` names no environment of its own.
+ */
 async function command(executable, args, options = {}) {
   return executeFile(executable, args, {
     maxBuffer: 16 * 1024 * 1024,
+    env: workerStageEnvironment(process.env),
     ...options,
   });
 }
