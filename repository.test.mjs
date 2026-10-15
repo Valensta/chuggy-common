@@ -17,6 +17,7 @@ import {
   workerRepository,
   workerRepositoryUrl,
 } from "./repository.mjs";
+import { posixShells } from "./shells.fixture.mjs";
 
 const executeFile = promisify(execFile);
 const askpass = fileURLToPath(new URL("./git-askpass.sh", import.meta.url));
@@ -88,10 +89,7 @@ test("a worker repository selects its own credential", () => {
     selected.environment.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
     repositories.github.credentialUsername,
   );
-  assert.equal(
-    selected.environment.GIT_ASKPASS,
-    "/usr/local/lib/chuggy/git-askpass.sh",
-  );
+  assert.equal(selected.environment.GIT_ASKPASS, askpass);
   assert.equal(selected.environment.GIT_TERMINAL_PROMPT, "0");
 });
 
@@ -203,3 +201,47 @@ test("git askpass reads the selected repository credential", async (t) => {
   assert.equal(username.stdout, "selected-user\n");
   assert.equal(password.stdout, "selected-token\n");
 });
+
+/** The answer the askpass gives under `shell` on a PATH of nothing, the credential file holding `content`. */
+async function askpassAnswer(shell, directory, content) {
+  const credentialFile = join(directory, "credential");
+  await rm(credentialFile, { force: true });
+  if (content !== undefined) await writeFile(credentialFile, content);
+  return executeFile(
+    shell.argv[0],
+    [...shell.argv.slice(1), askpass, "Password for repository"],
+    {
+      env: {
+        PATH: join(directory, "nothing"),
+        CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
+      },
+    },
+  );
+}
+
+/**
+ * Catches an askpass that reaches for a command, which an image a job runs in
+ * need not have, or that trims more than the trailing whitespace a mounted
+ * token ends with.
+ */
+for (const shell of posixShells)
+  test(
+    `git askpass answers from its shell's builtins alone, under ${shell.name}`,
+    { skip: shell.absent },
+    async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "chuggy-askpass-"));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      for (const [content, answer] of [
+        ["token  \t\r\nsecond line\n", "token\n"],
+        ["  leading kept *? [x]  ", "  leading kept *? [x]\n"],
+        ["", "\n"],
+      ]) {
+        const { stdout } = await askpassAnswer(shell, directory, content);
+
+        assert.equal(stdout, answer, JSON.stringify(content));
+      }
+      await assert.rejects(askpassAnswer(shell, directory, undefined), {
+        code: 1,
+      });
+    },
+  );

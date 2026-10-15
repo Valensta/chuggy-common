@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
@@ -13,6 +13,7 @@ import {
   codexResult,
   prepareCodexCredential,
 } from "./codex.mjs";
+import { coreRuntime } from "./coreRuntime.mjs";
 
 const task = {
   worker: {
@@ -62,7 +63,7 @@ test("Codex configuration records the runtime version and pinned model", async (
   );
   assert.deepEqual(executed, [
     [
-      "codex",
+      coreRuntime.codex,
       ["--version"],
       { env: { CODEX_HOME: "/tmp/codex" }, maxBuffer: 4096 },
     ],
@@ -205,4 +206,21 @@ test("a mounted Codex OAuth document becomes a private writable CODEX_HOME", asy
     "refresh-token-long-enough",
   ]);
   assert.equal(await readFile(join(home, "auth.json"), "utf8"), `${auth}\n`);
+});
+
+/** Catches a Codex home outside HOME, the directory a job's check found writable. */
+test("a Codex credential's home is under HOME where none is named", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "chuggy-codex-default-"));
+  const saved = process.env.HOME;
+  process.env.HOME = home;
+  t.after(async () => {
+    if (saved === undefined) delete process.env.HOME;
+    else process.env.HOME = saved;
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const prepared = await prepareCodexCredential(JSON.stringify({ tokens: {} }));
+
+  assert.equal(dirname(prepared.environment.CODEX_HOME), home);
+  await readFile(join(prepared.environment.CODEX_HOME, "auth.json"), "utf8");
 });

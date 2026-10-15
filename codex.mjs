@@ -1,9 +1,11 @@
+import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult } from "./result.mjs";
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
-const codexHome = "/tmp/chuggy-codex-home";
 const executeFile = promisify(execFile);
 
 const reservedCodexArguments = [
@@ -75,7 +77,7 @@ export async function codexConfiguration(
   environment,
   execute = executeFile,
 ) {
-  const { stdout } = await execute("codex", ["--version"], {
+  const { stdout } = await execute(coreRuntime.codex, ["--version"], {
     env: environment,
     maxBuffer: 4096,
   });
@@ -109,7 +111,14 @@ export function codexResult(events) {
   return { output, result: agentResult(parsed, "Codex") };
 }
 
-export async function prepareCodexCredential(auth, home = codexHome) {
+/**
+ * The credential a Codex run reads, written to a Codex home of its own under
+ * the image's HOME, which is the directory a job's check has found writable.
+ */
+export async function prepareCodexCredential(
+  auth,
+  home = join(homedir(), ".chuggy-codex-home"),
+) {
   let document;
   try {
     document = JSON.parse(auth);
@@ -147,7 +156,7 @@ function codexObserved(event) {
 export const codexAgent = {
   name: "Codex",
   runtime: "Codex",
-  executable: "codex",
+  executable: coreRuntime.codex,
   credential: "codex-auth",
   invocation: codexInvocation,
   result: codexResult,

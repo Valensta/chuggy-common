@@ -33,6 +33,7 @@
     "containerBackend.mjs",
     "contractProbe.mjs",
     "control.mjs",
+    "coreRuntime.mjs",
     "engine.mjs",
     "engineArgv.mjs",
     "engineErrors.mjs",

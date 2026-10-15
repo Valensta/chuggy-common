@@ -1,3 +1,4 @@
+import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
 /**
@@ -5,9 +6,14 @@ import { agentResult, agentResultSchema } from "./result.mjs";
  * is headless, so it ends with the agent's last reply, and Claude Code kills a
  * command it moved to the background once the run ends, without the agent ever
  * seeing it finish. So no command is moved there: a long one is waited for,
- * up to the Bash tool's timeout.
+ * up to the Bash tool's timeout. Nor does it update itself: a run's Claude Code
+ * is the one its runtime ships, and an image need not set the variable that
+ * says so.
  */
-export const claudeEnvironment = { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" };
+export const claudeEnvironment = {
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+  DISABLE_AUTOUPDATER: "1",
+};
 
 const reservedClaudeArguments = [
   "-p",
@@ -72,7 +78,7 @@ export function claudeResult(events) {
 export const claudeAgent = {
   name: "Claude",
   runtime: "Claude Code",
-  executable: "claude",
+  executable: coreRuntime.claude,
   credential: "claude-code",
   invocation: claudeInvocation,
   result: claudeResult,

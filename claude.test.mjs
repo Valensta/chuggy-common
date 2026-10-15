@@ -16,6 +16,14 @@ test("a Claude job never moves a command to the background", () => {
   );
 });
 
+/** Catches a run's Claude Code replacing itself, which an image's environment no longer prevents. */
+test("a Claude run never updates its Claude Code", () => {
+  assert.equal(
+    claudeAgent.prepareCredential("token").environment.DISABLE_AUTOUPDATER,
+    "1",
+  );
+});
+
 /** The worker is parsed by the contract first, so the fixture is one a plane could serve. */
 test("a configured Claude worker composes a valid default Claude invocation", async () => {
   const configuration = JSON.parse(

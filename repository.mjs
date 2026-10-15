@@ -1,4 +1,4 @@
-const askpass = "/usr/local/lib/chuggy/git-askpass.sh";
+import { coreRuntime } from "./coreRuntime.mjs";
 
 /** @typedef {{ url?: unknown, credential?: unknown, credentialUsername?: unknown }} WorkerRepositoryConfiguration */
 
@@ -38,7 +38,7 @@ export function workerCredentialEnvironment(
     ...process.env,
     CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
     CHUG_WORKER_GIT_CREDENTIAL_USERNAME: credentialUsername,
-    GIT_ASKPASS: askpass,
+    GIT_ASKPASS: coreRuntime.askpass,
     GIT_TERMINAL_PROMPT: "0",
   };
 }
