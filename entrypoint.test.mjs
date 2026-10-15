@@ -26,6 +26,7 @@ import { git, inCheckout, remoteRefs } from "./checkout.fixture.mjs";
 import {
   workerChangeBaseVariable,
   workerCheckCommands,
+  workerImageVariable,
   workerSummaryCharsMax,
 } from "./checks.mjs";
 import { claudeAgent } from "./claude.mjs";
@@ -1233,7 +1234,8 @@ test("an agent's summary is cut to a report on a code point", async () => {
 
 /**
  * The run an agent's process leaves, the agent stood in for by a shell that
- * writes the one result event Claude Code ends with.
+ * writes the one result event Claude Code ends with, its shell prepared with
+ * nothing: Claude's own would write under this machine's HOME.
  */
 function agentRun(summary, verdict = "Pass") {
   const ended = JSON.stringify({
@@ -1248,10 +1250,55 @@ function agentRun(summary, verdict = "Pass") {
     agent: {
       ...claudeAgent,
       executable: "/bin/sh",
+      prepareShell: async () => ({ environment: {}, arguments: [] }),
       invocation: () => ["-c", 'printf "%s\\n" "$1"', "agent", ended],
     },
   });
 }
+
+/**
+ * Catches an agent started without what its shell was prepared with, or with
+ * a name `check.sh` kept the image's value under, which would reach the
+ * agent's shell beside the value itself.
+ */
+test("an agent is started with its shell as prepared, and without what check.sh kept aside", async (t) => {
+  const kept = workerImageVariable("NODE_PATH");
+  const saved = process.env[kept];
+  process.env[kept] = "/image/node_modules";
+  t.after(() => {
+    if (saved === undefined) delete process.env[kept];
+    else process.env[kept] = saved;
+  });
+  const preparedFrom = [];
+  const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s %s %s"}}\\n' "$CHUG_SUITE_SHELL" "$1" "\${${kept}-dropped}"`;
+
+  const run = await runWorkerTask({
+    task,
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async (environment) => {
+        preparedFrom.push(environment[kept]);
+        return {
+          environment: { CHUG_SUITE_SHELL: "prepared" },
+          arguments: ["argued"],
+        };
+      },
+      invocation: (_, prepared) => [
+        "-c",
+        ended,
+        "agent",
+        ...prepared.shellArguments,
+      ],
+    },
+  });
+
+  assert.equal(run.result.summary, "prepared argued dropped");
+  assert.deepEqual(preparedFrom, ["/image/node_modules"]);
+});
 
 /** Each artifact a finished run uploaded, in the order it was sent. */
 function uploadedArtifacts(calls) {

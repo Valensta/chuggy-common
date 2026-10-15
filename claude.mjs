@@ -1,3 +1,8 @@
+import { writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { workerImageEnvironment } from "./checks.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
@@ -66,6 +71,39 @@ export function claudeInvocation(task) {
   ];
 }
 
+/** `text` as one POSIX shell word, whatever quotes it holds. */
+function claudeShellWord(text) {
+  return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The lines Claude Code runs before each command of its Bash tool, in that
+ * command's own shell: each variable a job's `check.sh` moved aside, back under
+ * its own name as a check stage's shells are handed it. Claude Code's own
+ * process runs without them.
+ */
+export function claudeShellScript(environment) {
+  return Object.entries(workerImageEnvironment(environment))
+    .map(([name, value]) => `export ${name}=${claudeShellWord(value)}\n`)
+    .join("");
+}
+
+/**
+ * Those lines, written where Claude Code is told to read them by
+ * `CLAUDE_ENV_FILE`: under the image's HOME, which a job's check found this
+ * user can write.
+ */
+export async function prepareClaudeShell(
+  environment,
+  file = join(homedir(), ".chuggy-claude-shell.sh"),
+) {
+  await writeFile(file, claudeShellScript(environment), {
+    flag: "wx",
+    mode: 0o600,
+  });
+  return { environment: { CLAUDE_ENV_FILE: file }, arguments: [] };
+}
+
 export function claudeResult(events) {
   const output = events.findLast(
     (event) =>
@@ -86,6 +124,7 @@ export const claudeAgent = {
     environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
     secrets: [token],
   }),
+  prepareShell: prepareClaudeShell,
   configurationEvent: (event) =>
     event?.type === "system" && event.subtype === "init",
   resultEvent: (event) => event?.type === "result",

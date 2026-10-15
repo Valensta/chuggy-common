@@ -86,6 +86,7 @@ import {
   workerReportText,
   workerStageEnvironment,
   workerSummaryText,
+  workerUnkeptEnvironment,
 } from "./checks.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { planeCredential, workerCredentialPath } from "./planeCredential.mjs";
@@ -313,22 +314,30 @@ async function readAgentStream(context, child, argv) {
   return resultEvent;
 }
 
+/**
+ * The agent started on the task, its shell prepared to hand the project's
+ * commands what the image set to steer them, as a check stage's shells are.
+ */
 async function runAgent(context) {
+  const shell = await context.agent.prepareShell(process.env);
   const argv = context.agent.invocation(context.task, {
     resultSchema: workerTemporaryFile(agentResultSchemaName),
+    shellArguments: shell.arguments,
   });
+  const environment = {
+    ...workerUnkeptEnvironment(process.env),
+    ...context.agentEnvironment,
+    ...shell.environment,
+  };
   if (context.agent.configuration !== undefined)
     await captureConfiguration(
       context,
       argv,
-      await context.agent.configuration(context.task, {
-        ...process.env,
-        ...context.agentEnvironment,
-      }),
+      await context.agent.configuration(context.task, environment),
     );
   const child = spawn(context.agent.executable, argv, {
     cwd: context.directory,
-    env: { ...process.env, ...context.agentEnvironment },
+    env: environment,
     stdio: ["ignore", "pipe", "inherit"],
   });
   const exited = new Promise((resolve, reject) => {

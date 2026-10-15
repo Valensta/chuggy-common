@@ -1,8 +1,9 @@
 /**
  * The POSIX shells a suite runs a script of this core under: this machine's
  * `/bin/sh`, and dash and busybox's where this machine has them, since either
- * may be the `/bin/sh` of an image a job runs in. Each is named by its path,
- * so a suite that hands its script a PATH of stubs still finds it.
+ * may be the `/bin/sh` of an image a job runs in; and the shells an agent's
+ * own shell tool runs a command in. Each is named by its path, so a suite
+ * that hands its script a PATH of stubs still finds it.
  */
 
 import { accessSync, constants } from "node:fs";
@@ -24,6 +25,8 @@ function shellsFound(name) {
 
 const dash = shellsFound("dash");
 const busybox = shellsFound("busybox");
+const bash = shellsFound("bash");
+const zsh = shellsFound("zsh");
 
 /** Each shell, with the argv that runs a script under it, or a reason this machine cannot. */
 export const posixShells = [
@@ -34,4 +37,14 @@ export const posixShells = [
   busybox === undefined
     ? { name: "busybox sh", absent: "no busybox on this machine" }
     : { name: "busybox sh", argv: [busybox, "sh"] },
+];
+
+/** The shells Claude Code's Bash tool runs a command in where an image has one, with the argv that runs a script under each. */
+export const agentShells = [
+  bash === undefined
+    ? { name: "bash", absent: "no bash on this machine" }
+    : { name: "bash", argv: [bash] },
+  zsh === undefined
+    ? { name: "zsh", absent: "no zsh on this machine" }
+    : { name: "zsh", argv: [zsh] },
 ];

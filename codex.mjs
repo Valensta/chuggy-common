@@ -1,3 +1,4 @@
+import { workerImageEnvironment } from "./checks.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult } from "./result.mjs";
 import { execFile } from "node:child_process";
@@ -55,7 +56,42 @@ function configuredArguments(task) {
   return args;
 }
 
-export function codexInvocation(task, paths) {
+/**
+ * `text` as a TOML basic string, which is how a `--config` value is read. A
+ * backslash, a quote and every control character are escaped, so no character
+ * TOML refuses in one is left in it.
+ */
+function codexTomlString(text) {
+  return `"${text.replace(/[\\"\p{Cc}]/gu, (character) =>
+    character === "\\" || character === '"'
+      ? `\\${character}`
+      : `\\u${character.codePointAt(0).toString(16).padStart(4, "0")}`,
+  )}"`;
+}
+
+/**
+ * The override of Codex's `shell_environment_policy` that hands the shell Codex
+ * runs each command in what a job's `check.sh` moved aside: its `set` puts each
+ * variable back under its own name, as a check stage's shells are handed it.
+ * Codex's own process runs without them.
+ */
+export function codexShellArguments(environment) {
+  const restored = Object.entries(workerImageEnvironment(environment)).map(
+    ([name, value]) => `${name} = ${codexTomlString(value)}`,
+  );
+  return ["--config", `shell_environment_policy.set={${restored.join(", ")}}`];
+}
+
+/** What a Codex run's shell is handed, which is given by arguments alone. */
+export async function prepareCodexShell(environment) {
+  return { environment: {}, arguments: codexShellArguments(environment) };
+}
+
+/**
+ * The argv of one run. `run` names the result schema's file and the arguments
+ * the run's shell was prepared with.
+ */
+export function codexInvocation(task, run) {
   return [
     "exec",
     "--json",
@@ -66,7 +102,8 @@ export function codexInvocation(task, paths) {
     task.worker.mode.model,
     "--dangerously-bypass-approvals-and-sandbox",
     "--output-schema",
-    paths.resultSchema,
+    run.resultSchema,
+    ...run.shellArguments,
     ...configuredArguments(task),
     task.briefing.text,
   ];
@@ -161,6 +198,7 @@ export const codexAgent = {
   invocation: codexInvocation,
   result: codexResult,
   prepareCredential: prepareCodexCredential,
+  prepareShell: prepareCodexShell,
   configuration: codexConfiguration,
   configurationEvent: () => false,
   resultEvent: (event) => codexMessage(event) !== undefined,

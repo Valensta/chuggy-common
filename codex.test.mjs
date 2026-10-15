@@ -6,12 +6,15 @@ import test from "node:test";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 
+import { workerImageEnvironment, workerImageVariable } from "./checks.mjs";
 import {
   codexAgent,
   codexConfiguration,
   codexInvocation,
   codexResult,
+  codexShellArguments,
   prepareCodexCredential,
+  prepareCodexShell,
 } from "./codex.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 
@@ -27,9 +30,12 @@ const task = {
   briefing: { text: "briefing" },
 };
 
+/** What a run's argv is composed with beside the task, its shell prepared with nothing. */
+const run = { resultSchema: "/tmp/result.json", shellArguments: [] };
+
 test("a Codex invocation is ephemeral and constrained to the result schema", () => {
   assert.deepEqual(
-    codexInvocation(task, { resultSchema: "/tmp/result.json" }),
+    codexInvocation(task, { ...run, shellArguments: ["--config", "shell"] }),
     [
       "exec",
       "--json",
@@ -41,6 +47,8 @@ test("a Codex invocation is ephemeral and constrained to the result schema", () 
       "--dangerously-bypass-approvals-and-sandbox",
       "--output-schema",
       "/tmp/result.json",
+      "--config",
+      "shell",
       "briefing",
     ],
   );
@@ -87,7 +95,7 @@ test("attached values cannot evade reserved Codex short options", () => {
               mode: { ...task.worker.mode, arguments: [argument] },
             },
           },
-          { resultSchema: "/tmp/result.json" },
+          run,
         ),
       /reserves Codex argument/u,
     );
@@ -147,7 +155,7 @@ test("ticket configuration cannot replace worker-owned Codex arguments", () => {
             },
           },
         },
-        { resultSchema: "/tmp/result.json" },
+        run,
       ),
     /reserves Codex argument --output-schema=/u,
   );
@@ -166,7 +174,7 @@ test("ticket configuration cannot override the pinned Codex model through config
             },
           },
         },
-        { resultSchema: "/tmp/result.json" },
+        run,
       ),
     /reserves Codex argument --config=/u,
   );
@@ -223,4 +231,67 @@ test("a Codex credential's home is under HOME where none is named", async (t) =>
 
   assert.equal(dirname(prepared.environment.CODEX_HOME), home);
   await readFile(join(prepared.environment.CODEX_HOME, "auth.json"), "utf8");
+});
+
+/**
+ * A pod's environment as a job's `check.sh` leaves it, for an image that set
+ * three of the variables it moves aside: one plain, one empty, and one to
+ * every character a TOML basic string must escape and some it need not.
+ */
+const checkedPod = {
+  PATH: "/usr/bin",
+  [workerImageVariable("NODE_OPTIONS")]: "--max-old-space-size=4096",
+  [workerImageVariable("NODE_PATH")]: "",
+  [workerImageVariable("LD_LIBRARY_PATH")]:
+    '/image/it\'s "lib"\\\n\t\u0001\u007f\u009f\u{1F600}end',
+};
+
+/**
+ * The table a `shell_environment_policy.set` override sets, read back. Each
+ * value is a TOML basic string holding only the escapes a JSON string means
+ * the same by, so JSON reads it as TOML does; and what is read must be the
+ * whole table, so nothing in it goes unread.
+ */
+function codexSetTable(argument) {
+  const prefix = "shell_environment_policy.set={";
+  assert.ok(argument.startsWith(prefix) && argument.endsWith("}"), argument);
+  const body = argument.slice(prefix.length, -1);
+  const entries = [
+    ...body.matchAll(/([A-Z_]+) = ("(?:[^"\\]|\\.)*")(?:, |$)/gu),
+  ];
+  assert.equal(entries.map(([entry]) => entry).join(""), body);
+  return Object.fromEntries(
+    entries.map(([, name, value]) => [name, JSON.parse(value)]),
+  );
+}
+
+/**
+ * Catches Codex's shell set a value other than the one a check stage's shells
+ * are handed, or set it in a string TOML refuses for a raw control character.
+ */
+test("a Codex run's shell is set exactly what check.sh moved aside", () => {
+  const [flag, argument, ...rest] = codexShellArguments(checkedPod);
+
+  assert.equal(flag, "--config");
+  assert.deepEqual(rest, []);
+  assert.doesNotMatch(argument, /\p{Cc}/u);
+  assert.deepEqual(codexSetTable(argument), workerImageEnvironment(checkedPod));
+  assert.equal(Object.keys(codexSetTable(argument)).length, 3);
+});
+
+/** Catches a Codex shell set a variable the image never set. */
+test("an image that set nothing a check moves aside sets Codex's shell nothing", () => {
+  assert.deepEqual(codexShellArguments({ PATH: "/usr/bin" }), [
+    "--config",
+    "shell_environment_policy.set={}",
+  ]);
+});
+
+/** Catches a Codex run whose shell is prepared otherwise than by its arguments. */
+test("a Codex run's shell is prepared by arguments alone", async () => {
+  assert.deepEqual(await prepareCodexShell(checkedPod), {
+    environment: {},
+    arguments: codexShellArguments(checkedPod),
+  });
+  assert.equal(codexAgent.prepareShell, prepareCodexShell);
 });

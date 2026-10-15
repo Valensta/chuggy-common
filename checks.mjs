@@ -24,7 +24,9 @@
  * THOSE SHELLS ARE HANDED BACK WHAT THE IMAGE SET TO STEER A PROCESS. A job's
  * `check.sh` moves each such variable aside before chuggy's node starts, so
  * that none of chuggy's own processes is steered by the image; a stage's
- * shells are the project's, and run as the image set them up to.
+ * shells are the project's, and run as the image set them up to. An agent's
+ * shell is handed back the same, by the agent's own means, so that a check the
+ * agent runs runs as the stage would run it.
  *
  * THOSE SHELLS ARE TOLD THE COMMIT THE CHANGE STARTED FROM, in
  * `CHUG_CHANGE_BASE`, so a check can run only what the change touched. It is
@@ -169,8 +171,21 @@ export function workerImageVariable(name) {
 }
 
 /** Every name `check.sh` keeps a moved value under. */
-const checkImageVariables =
+const checkImageKeptVariables =
   workerImageSteeringVariables.map(workerImageVariable);
+
+/**
+ * `environment` less every name `check.sh` keeps a moved value under, which is
+ * what an agent's own process is started with: its shell is handed each value
+ * back under its own name by the agent's own means.
+ */
+export function workerUnkeptEnvironment(environment) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => !checkImageKeptVariables.includes(name),
+    ),
+  );
+}
 
 /**
  * What the pod holds, less the documents that placed it and any change base it
@@ -186,7 +201,7 @@ export function workerInheritedEnvironment(environment) {
 }
 
 /** The image's own value of each variable `check.sh` moved aside, under its own name again. */
-function checkImageEnvironment(environment) {
+export function workerImageEnvironment(environment) {
   return Object.fromEntries(
     workerImageSteeringVariables.flatMap((name) => {
       const kept = workerImageVariable(name);
@@ -203,12 +218,9 @@ function checkImageEnvironment(environment) {
  * it was kept under, and with `changeBase` where the attempt knows one.
  */
 export function workerStageEnvironment(environment, changeBase) {
-  const inherited = Object.entries(
-    workerInheritedEnvironment(environment),
-  ).filter(([name]) => !checkImageVariables.includes(name));
   return {
-    ...Object.fromEntries(inherited),
-    ...checkImageEnvironment(environment),
+    ...workerUnkeptEnvironment(workerInheritedEnvironment(environment)),
+    ...workerImageEnvironment(environment),
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
