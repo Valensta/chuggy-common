@@ -522,7 +522,7 @@ export const chuggyProjectTools = [
   {
     name: "read_lead",
     description:
-      "This project's lead session: its state, its mailbox tail and its transcript streams. A project with no lead answers None, which is expected before anything is released: the selector opens a lead only when a released ticket waits on a dispatch decision, and only while the route the project places its lead on is admitted: a hosted route where hosted runs are granted, a runner route where a runner of the project is live.",
+      "This project's lead session: its state, its mailbox tail and its transcript streams. A project with no lead answers None, and `absence.reason` says why. `Paused`: the project's selector is paused, for the project or the whole installation, so no ticket is picked up automatically; it must be resumed by someone who may, and this reason is answered ahead of the others. `NotNeeded`: no refusal stands, which is expected before anything is released, because the selector opens a lead only when a released ticket waits on a dispatch decision; release a ticket. Otherwise the last decision that needed a lead was refused it, and `absence.since` is when that refusal began. `RunnerOffline`: the project runs its lead on its runners and none is live, so the project's runner must be running. `HostedRunsNotGranted`: the project runs its lead hosted and its tenant has not granted the lead hosted runs, so an admin must grant them.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "lead")),
   },
