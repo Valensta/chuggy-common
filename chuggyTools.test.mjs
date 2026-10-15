@@ -986,10 +986,13 @@ test("the descriptions say what the server does where a session reads it", () =>
     ],
     revoke_ticket: [/same turn is the same operation/, /other than Pending/],
     read_lead: [
-      /None/,
+      /None, and `absence\.reason` says why/,
+      /`NotNeeded`: no refusal stands/,
       /before anything is released/,
-      /a hosted route where hosted runs are granted/,
-      /a runner route where a runner of the project is live/,
+      /release a ticket/,
+      /`absence\.since` is when that refusal began/,
+      /`RunnerOffline`: [^.]*, so the project's runner must be running\./,
+      /`HostedRunsNotGranted`: [^.]*, so an admin must grant them\./,
     ],
     initialize_draft: [
       /run in that order/,
