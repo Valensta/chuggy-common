@@ -472,7 +472,11 @@ const checkOwnNames = [
   "chuggy_check_workspace",
 ];
 
-/** Every name `check.sh` assigns, read from the script: each assignment and each loop's variable, comments aside. */
+/**
+ * Every name `check.sh` assigns, read from the script, comments aside: each
+ * assignment, one in a string an `eval` runs among them, each `${name:=}`, and
+ * each loop's variable.
+ */
 function checkAssignedNames() {
   const code = readFileSync(
     fileURLToPath(new URL("check.sh", import.meta.url)),
@@ -485,7 +489,8 @@ function checkAssignedNames() {
     [...code.matchAll(pattern)].map(([, name]) => name);
   return [
     ...new Set([
-      ...named(/(?:^|[\s;()])([A-Za-z_]\w*)=/gmu),
+      ...named(/(?:^|[\s;()"'])([A-Za-z_]\w*)=/gmu),
+      ...named(/\$\{([A-Za-z_]\w*):?=/gu),
       ...named(/\bfor\s+([A-Za-z_]\w*)\s+in\b/gu),
     ]),
   ].sort();
