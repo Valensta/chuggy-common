@@ -25,6 +25,7 @@
   "files": [
     "agent.mjs",
     "boundedResponse.mjs",
+    "check.sh",
     "checks.mjs",
     "chuggyApi.mjs",
     "chuggyTools.mjs",

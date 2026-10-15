@@ -82,7 +82,7 @@ import {
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
-import { workerStageEnvironment } from "./checks.mjs";
+import { workerInheritedEnvironment } from "./checks.mjs";
 import {
   chuggyToolContext,
   chuggyToolServer,
@@ -1101,7 +1101,7 @@ export function sessionEnvelopeServices(
   const mounted = envelope.providerCredentialFile;
   return {
     environment: {
-      ...workerStageEnvironment(environment),
+      ...workerInheritedEnvironment(environment),
       [workerCredentialFilesVariable]: JSON.stringify(
         mounted === undefined ? {} : { [task.credentialSlot]: mounted },
       ),

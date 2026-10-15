@@ -21,6 +21,11 @@
  * earlier: narrowing one shell and not the other leaves the document one `cp`
  * away from the commands.
  *
+ * THOSE SHELLS ARE HANDED BACK WHAT THE IMAGE SET TO STEER A PROCESS. A job's
+ * `check.sh` moves each such variable aside before chuggy's node starts, so
+ * that none of chuggy's own processes is steered by the image; a stage's
+ * shells are the project's, and run as the image set them up to.
+ *
  * THOSE SHELLS ARE TOLD THE COMMIT THE CHANGE STARTED FROM, in
  * `CHUG_CHANGE_BASE`, so a check can run only what the change touched. It is
  * set only where the attempt knows that commit, and one the pod inherited is
@@ -147,20 +152,67 @@ const checkTaskDocuments = [workerTaskVariable, sessionTaskVariable];
 export const workerChangeBaseVariable = "CHUG_CHANGE_BASE";
 
 /**
- * What the pod holds, less the document that placed it, and with `changeBase`
- * where the attempt knows one. Everything else stands, the site's own variables
- * among it.
+ * The variables an image's environment would steer chuggy's own processes by,
+ * which a job's `check.sh` moves aside before chuggy's node starts.
+ */
+export const workerImageSteeringVariables = [
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "LD_AUDIT",
+];
+
+/** The name `check.sh` keeps the image's value of one of them under. */
+export function workerImageVariable(name) {
+  return `CHUG_IMAGE_${name}`;
+}
+
+/** Every name `check.sh` keeps a moved value under. */
+const checkImageVariables =
+  workerImageSteeringVariables.map(workerImageVariable);
+
+/**
+ * What the pod holds, less the documents that placed it and any change base it
+ * inherited. Everything else stands, the site's own variables among it.
+ */
+export function workerInheritedEnvironment(environment) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) =>
+        !checkTaskDocuments.includes(name) && name !== workerChangeBaseVariable,
+    ),
+  );
+}
+
+/** The image's own value of each variable `check.sh` moved aside, under its own name again. */
+function checkImageEnvironment(environment) {
+  return Object.fromEntries(
+    workerImageSteeringVariables.flatMap((name) => {
+      const kept = workerImageVariable(name);
+      return Object.hasOwn(environment, kept)
+        ? [[name, environment[kept]]]
+        : [];
+    }),
+  );
+}
+
+/**
+ * What a stage's shells are handed: the pod's inherited environment, with each
+ * variable `check.sh` moved aside back under its own name in place of the one
+ * it was kept under, and with `changeBase` where the attempt knows one.
  */
 export function workerStageEnvironment(environment, changeBase) {
-  const kept = Object.entries(environment).filter(
-    ([name]) =>
-      !checkTaskDocuments.includes(name) && name !== workerChangeBaseVariable,
-  );
-  return Object.fromEntries(
-    changeBase === undefined
-      ? kept
-      : [...kept, [workerChangeBaseVariable, changeBase]],
-  );
+  const inherited = Object.entries(
+    workerInheritedEnvironment(environment),
+  ).filter(([name]) => !checkImageVariables.includes(name));
+  return {
+    ...Object.fromEntries(inherited),
+    ...checkImageEnvironment(environment),
+    ...(changeBase === undefined
+      ? {}
+      : { [workerChangeBaseVariable]: changeBase }),
+  };
 }
 
 /** One command's account: what ran, how it ended, and what it wrote. */

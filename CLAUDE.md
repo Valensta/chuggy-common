@@ -10,7 +10,7 @@ The worker core of chuggy: the harness a worker pod runs, and that the local com
 
 ## Layout
 
-Every module sits at the root. `package.json`'s `files` is the shipped set: the modules, `git-askpass.sh` and the build probes. Suites are `*.test.mjs` and fixtures `*.fixture.*`, and neither ships.
+Every module sits at the root. `package.json`'s `files` is the shipped set: the modules, `git-askpass.sh`, `check.sh` and the build probes. Suites are `*.test.mjs` and fixtures `*.fixture.*`, and neither ships.
 
 ## Checks
 
