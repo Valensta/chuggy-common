@@ -37,11 +37,11 @@
  * container mounts that volume read-only and runs the runtime's check of the
  * image before the core, in a workspace volume of its own that every user
  * can write, as a cluster's emptyDir is. A job whose image cannot be got,
- * started or pass that check, or whose runtime this runner cannot get, is
- * named refused rather than ended: with the image's fault where the image is
- * why, in one fixed text a fault, and with none where the runtime is. The
- * volumes go with their container. An assignment naming no runtime runs its
- * image's own entrypoint.
+ * started or pass that check is named refused rather than ended, with the
+ * image's fault in one fixed text a fault. A runtime this runner cannot get or
+ * copy is the site's failure and never the image's, so that job's placement
+ * fails as any does. The volumes go with their container. An assignment
+ * naming no runtime runs its image's own entrypoint.
  */
 
 import { randomBytes } from "node:crypto";
@@ -177,7 +177,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} ContainerEnd how a workload's container ended
  * @property {string} why in this backend's words, which a job's end carries
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
- * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job rather than ran it, which a job's end carries
+ * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
  *
  * @typedef {{settings: ContainerBackendSettings, seams: ContainerBackendSeams, placements: Map<string, Placement>, ends: Ends}} State
  *
@@ -265,13 +265,13 @@ class ImageCallFailed extends Error {
 }
 
 /**
- * Why this site will not carry a job through, which names its end refused
- * rather than failed, with the image's fault where the image is why.
+ * The fault of a job's image that stops this site carrying the job through,
+ * which names its end refused rather than failed.
  */
 class PlacementRefused extends Error {
   /**
    * @param {string} why
-   * @param {WorkerImageFault} [fault]
+   * @param {WorkerImageFault} fault
    */
   constructor(why, fault) {
     super(why);
@@ -887,20 +887,21 @@ async function imageHere(state, placement) {
 }
 
 /**
- * A failure of this runner's own work on chuggy's runtime as its refusal of
- * the job. Where a stop was why, the stop's end stands instead.
+ * A failure of this runner's own work on chuggy's runtime as the failure of
+ * the job's placement, naming what the runner could not do. Where a stop was
+ * why, the stop's end stands instead.
  *
  * @param {unknown} failure
  * @param {string} what what this runner could not do
  */
-function runtimeRefusal(failure, what) {
+function runtimeFailure(failure, what) {
   const why =
     failure instanceof Error && failure.name === "AbortError"
       ? "the assignment's deadline passed first"
       : failure instanceof Error
         ? failure.message
         : String(failure);
-  return new PlacementRefused(`${what}: ${why}`);
+  return new Error(`${what}: ${why}`);
 }
 
 /**
@@ -917,7 +918,7 @@ async function runtimeHere(state, placement, runtime) {
       await pulled(state, placement, runtime.image, "the runtime");
     }
   } catch (failure) {
-    throw runtimeRefusal(
+    throw runtimeFailure(
       failure,
       `this runner could not get chuggy's runtime ${runtime.image}`,
     );
@@ -964,7 +965,7 @@ async function runtimeFilled(state, placement, runtime) {
         `its volumes could not be filled: ${engineFailureLine(filled)}`,
       );
   } catch (failure) {
-    throw runtimeRefusal(
+    throw runtimeFailure(
       failure,
       `this runner could not copy chuggy's runtime ${runtime.image}`,
     );
@@ -1234,7 +1235,7 @@ function placementFailed(state, placement, assignment, failure) {
     end = {
       why: failure.message,
       succeeded: false,
-      refusal: failure.fault === undefined ? {} : { fault: failure.fault },
+      refusal: { fault: failure.fault },
     };
   } else {
     const why = placementFailure(placement, failure);

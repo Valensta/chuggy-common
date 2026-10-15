@@ -13,8 +13,8 @@
  * A JOB THE BACKEND REFUSED AFTER TAKING IT IS SETTLED REFUSED, not ended: its
  * text is left on its attempt, which only a live attempt takes, and its
  * assignment is then settled `Refused` on the pool's plane, naming the image's
- * fault where the backend named one, so the attempt's execution is blocked
- * rather than its run failed and retried.
+ * fault, so the attempt's execution is blocked rather than its run failed and
+ * retried.
  *
  * Nothing is held between passes. What is running is read from the backend,
  * so a restarted loop reconciles the work its predecessor placed, and a
@@ -42,10 +42,10 @@ import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
  * @property {"Job"} kind
  * @property {WorkerPoolAttempt} job
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
- * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job rather than ran it, `why` being the refusal's evidence
+ * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job for its image's fault rather than ran it, `why` being the refusal's evidence
  *
  * @typedef {object} WorkerPoolJobRefusal
- * @property {WorkerImageFault} [fault] what the job's image lacks, where that is why
+ * @property {WorkerImageFault} fault what the job's image lacks
  *
  * @typedef {object} WorkerPoolSessionEnd a session whose container ended, which only the pool holding it sees
  * @property {"Session"} kind
@@ -287,7 +287,7 @@ async function workerPoolClientRefused(client, token, ended, refusal) {
   const settled = await client.plane.settle(token, ended.job.assignment, {
     outcome: "Refused",
     evidence: workerPoolClientEvidence(ended.why),
-    ...(refusal.fault === undefined ? {} : { fault: refusal.fault }),
+    fault: refusal.fault,
   });
   if (settled === "Stale") client.tokens.invalidate(token);
   if (settled === "Settled") return "Ended";

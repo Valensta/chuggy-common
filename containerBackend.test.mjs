@@ -28,6 +28,7 @@ import { jobEnvelope } from "./job.mjs";
 
 const pool = { tenant: "vteng", project: "chuggy", pool: "shame" };
 const image = "registry.chuggy.example/worker@sha256:" + "a".repeat(64);
+const runtime = `registry.chuggy.example/runtime@sha256:${"c".repeat(64)}`;
 const startMs = 1_800_000_000_000;
 
 /** @param {Partial<import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment>} overrides */
@@ -857,6 +858,7 @@ test("what this machine cannot take is refused, naming no value of the envelope"
   const { backend, state } = await harness(t);
   const refusals = [
     [assignment({ image: undefined }), /pins no image/u],
+    [assignment({ image: undefined, runtime }), /pins no image/u],
     [
       assignment({ cpuMillis: 8001 }),
       /8001 CPU millis and this machine has 8000/u,
@@ -1172,8 +1174,6 @@ function containerBackendSettingsChecked(identity) {
   );
 }
 
-const runtime = `registry.chuggy.example/runtime@sha256:${"c".repeat(64)}`;
-
 /** The job attempt `assignment()` holds, as an end names it. */
 const heldAttempt = {
   assignment: "asg-1",
@@ -1390,7 +1390,7 @@ test("a job whose unstarted container could not be removed is left to the contai
   assert.equal(context.state.volumes.size, 0);
 });
 
-test("a runner that cannot get the runtime, or cannot copy it, refuses the job naming no fault, runs nothing and keeps no volume", async (t) => {
+test("a runner that cannot get the runtime, or cannot copy it, fails the placement as any that did not start, runs nothing and keeps no volume", async (t) => {
   /** @type {[string, (state: Awaited<ReturnType<typeof harness>>["state"]) => void, RegExp][]} */
   const cases = [
     [
@@ -1402,7 +1402,7 @@ test("a runner that cannot get the runtime, or cannot copy it, refuses the job n
             `Error response from daemon: manifest for ${runtime} not found: manifest unknown: manifest unknown`,
           );
       },
-      /^this runner could not get chuggy's runtime \S+: the runtime could not be pulled: Error response from daemon: manifest for /u,
+      /^its container was not started: this runner could not get chuggy's runtime \S+: the runtime could not be pulled: Error response from daemon: manifest for /u,
     ],
     [
       "made",
@@ -1412,7 +1412,7 @@ test("a runner that cannot get the runtime, or cannot copy it, refuses the job n
             ? failedWith("Error response from daemon: no space left on device")
             : undefined;
       },
-      /^this runner could not copy chuggy's runtime \S+: its volume \S+-runtime could not be made: .*no space left/u,
+      /^its container was not started: this runner could not copy chuggy's runtime \S+: its volume \S+-runtime could not be made: .*no space left/u,
     ],
     [
       "filled",
@@ -1423,7 +1423,7 @@ test("a runner that cannot get the runtime, or cannot copy it, refuses the job n
             127,
           );
       },
-      /^this runner could not copy chuggy's runtime \S+: its volumes could not be filled: .*\/opt\/chuggy\/bin\/node/u,
+      /^its container was not started: this runner could not copy chuggy's runtime \S+: its volumes could not be filled: .*\/opt\/chuggy\/bin\/node/u,
     ],
   ];
   for (const [what, arrange, why] of cases) {
@@ -1439,9 +1439,12 @@ test("a runner that cannot get the runtime, or cannot copy it, refuses the job n
     assert.equal(ends.length, 1, what);
     const [ended] = ends;
     assert.ok(ended.kind === "Job");
-    assert.deepEqual(ended.refusal, {}, what);
+    assert.equal(ended.refusal, undefined, what);
     assert.match(ended.why, why, what);
-    assert.match(context.log.join("\n"), /was refused: this runner could not/u);
+    assert.match(
+      context.log.join("\n"),
+      /was not started: this runner could not/u,
+    );
   }
 });
 
@@ -1559,6 +1562,25 @@ test("a stop while the runtime is copied removes the copy and names no end", asy
   assert.ok(!state.calls.some((call) => call.argv.includes("-d")));
   assert.deepEqual(await endsNamed(backend), []);
   assert.match(log.at(-1) ?? "", /was stopped before it started$/u);
+});
+
+test("a stop while a job's run is answered as an unstarted shell names no refusal", async (t) => {
+  const { backend, state, log } = await harness(t);
+  state.images.add(image);
+  state.images.add(runtime);
+  /** @type {ReturnType<typeof deferred<import("./engine.mjs").EngineAnswer>>} */
+  const run = deferred();
+  state.intercept = (call) =>
+    call.argv.includes("-d") ? run.promise : undefined;
+  await backend.place(assignment({ runtime }), "Job");
+  while (!state.calls.some((call) => call.argv.includes("-d")))
+    await setImmediate();
+  const stopping = backend.stop("asg-1");
+  run.resolve(unstartedEntrypoint("/bin/sh"));
+  assert.deepEqual(await stopping, { stopped: "Stopped" });
+  assert.ok(!log.some((line) => line.includes("was refused")), log.join("\n"));
+  assert.ok(log.some((line) => line.endsWith("was stopped before it started")));
+  assert.deepEqual(await endsNamed(backend), []);
 });
 
 test("a placement that finds the job already running keeps that container's copy and removes its own", async (t) => {

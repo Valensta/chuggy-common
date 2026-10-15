@@ -182,7 +182,7 @@ function fakeEngineState() {
      * An answer a suite gives a call in the engine's place, or nothing to
      * leave the call to the engine.
      *
-     * @type {(call: FakeCall) => EngineAnswer | undefined}
+     * @type {(call: FakeCall) => EngineAnswer | Promise<EngineAnswer> | undefined}
      */
     intercept: () => undefined,
     /**

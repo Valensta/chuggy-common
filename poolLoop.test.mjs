@@ -554,9 +554,9 @@ test("a job the backend refused is left its words, then settled Refused under th
     },
     {
       kind: "Job",
-      job: assignment("no-runtime"),
-      why: "this runner could not get chuggy's runtime",
-      refusal: {},
+      job: assignment("no-shell"),
+      why: "The image this job names has no executable /bin/sh.",
+      refusal: { fault: "ImageLacksShell" },
     },
     { kind: "Job", job: assignment("exited"), why: "its container exited" },
   ]);
@@ -573,14 +573,15 @@ test("a job the backend refused is left its words, then settled Refused under th
         fault: "ImageLacksGit",
       },
     ],
-    ["left", "no-runtime"],
+    ["left", "no-shell"],
     [
       "settle",
       "pool-token-1",
-      "no-runtime",
+      "no-shell",
       {
         outcome: "Refused",
-        evidence: "this runner could not get chuggy's runtime",
+        evidence: "The image this job names has no executable /bin/sh.",
+        fault: "ImageLacksShell",
       },
     ],
     ["end", "exited"],
