@@ -5,7 +5,11 @@
 
 import { join } from "node:path";
 
-import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnvironment";
+import {
+  mintedCredentialDirectory,
+  workerJobCommand,
+  workerRuntimeDirectory,
+} from "@chuggy/worker-contract/workerEnvironment";
 
 import {
   jobGid,
@@ -31,6 +35,12 @@ import {
  * @property {string} tokenFile
  * @property {string} network
  * @property {string} image
+ * @property {RuntimeVolumes} [runtime] the volumes of a job started through chuggy's runtime in place of its image's entrypoint; none, and the image's own entrypoint runs
+ *
+ * @typedef {object} RuntimeVolumes a job's own volumes where it starts through chuggy's runtime
+ * @property {string} volume the one holding its copy of the runtime
+ * @property {string} workspace the one its workspace is, which every user can write
+ * @property {string} fill the name of the container that fills them
  */
 
 /** The labels a workload's container carries, which is how `held` finds it again. */
@@ -38,6 +48,18 @@ export const poolLabel = "io.chuggy.pool";
 export const assignmentLabel = "io.chuggy.assignment";
 export const kindLabel = "io.chuggy.kind";
 export const deadlineLabel = "io.chuggy.deadline";
+/** The labels of a job's container started through chuggy's runtime, whose values name its `RuntimeVolumes`. */
+export const runtimeLabel = "io.chuggy.runtime";
+export const workspaceLabel = "io.chuggy.workspace";
+/** The label of each of a job's `RuntimeVolumes`, naming the container that fills them. */
+export const fillLabel = "io.chuggy.fill";
+
+/**
+ * What the container that fills a job's runtime volume runs with the
+ * runtime's own node: its workspace volume opened to every user, as a
+ * cluster's emptyDir is, since the job's user owns nothing an engine makes.
+ */
+const workspaceOpened = `require("node:fs").chmodSync(process.argv[1], 0o777)`;
 
 /** The file a pull's credential is written to, in the directory made for it. */
 export const registryAuthFile = "config.json";
@@ -130,10 +152,24 @@ export function mintedTmpfs(engine) {
  * escalation, the engine's default seccomp profile, the minted credential in
  * memory the image's user owns, and the workspace in a volume of its own.
  *
+ * A JOB GIVEN RUNTIME VOLUMES STARTS THROUGH THEM, as the cluster starts one:
+ * the runtime's mounted read-only at `workerRuntimeDirectory`, the workspace's
+ * in place of an anonymous one, and the contract's
+ * `workerJobCommand` in place of the image's entrypoint. Neither mount copies
+ * the job's image into its volume, which an engine otherwise does into an
+ * empty one, so a runtime left unfilled starts nothing of the image's own and
+ * the workspace is the empty one its job is given on a cluster. Podman's
+ * workspace mount also takes `U`, which chowns the volume to the job's user:
+ * podman gives an empty volume the owner and mode of the directory the image
+ * holds where it is mounted, which for a workspace the image's root owns
+ * would undo the fill's opening of it.
+ *
  * @param {EngineName} engine
  * @param {WorkloadContainer} workload
  */
 export function runArgv(engine, workload) {
+  const [entrypoint, ...command] = workerJobCommand;
+  const { runtime } = workload;
   return [
     "run",
     "-d",
@@ -148,6 +184,14 @@ export function runArgv(engine, workload) {
     `${kindLabel}=${workload.kind}`,
     "--label",
     `${deadlineLabel}=${String(workload.deadlineEpochSecs)}`,
+    ...(runtime === undefined
+      ? []
+      : [
+          "--label",
+          `${runtimeLabel}=${runtime.volume}`,
+          "--label",
+          `${workspaceLabel}=${runtime.workspace}`,
+        ]),
     "--env-file",
     workload.envFile,
     "--user",
@@ -170,11 +214,106 @@ export function runArgv(engine, workload) {
     "--tmpfs",
     mintedTmpfs(engine),
     "--volume",
-    jobWorkspace,
+    ...(runtime === undefined
+      ? [jobWorkspace]
+      : [
+          `${runtime.workspace}:${jobWorkspace}:${engine === "podman" ? "nocopy,U" : "nocopy"}`,
+          "--volume",
+          `${runtime.volume}:${workerRuntimeDirectory}:ro,nocopy`,
+          "--entrypoint",
+          entrypoint,
+        ]),
     "--network",
     workload.network,
     workload.image,
+    ...(runtime === undefined ? [] : command),
   ];
+}
+
+/**
+ * One of a job's `RuntimeVolumes`, labelled with the pool and the assignment
+ * it was made for and the container that fills it, so that what a runner
+ * leaves can be found and removed.
+ *
+ * @param {string} volume
+ * @param {string} pool the pool label's value
+ * @param {string} assignment
+ * @param {string} fill
+ */
+export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
+  return [
+    "volume",
+    "create",
+    "--label",
+    `${poolLabel}=${pool}`,
+    "--label",
+    `${assignmentLabel}=${assignment}`,
+    "--label",
+    `${fillLabel}=${fill}`,
+    volume,
+  ];
+}
+
+/**
+ * The container that fills a job's `RuntimeVolumes`, named by their `fill`
+ * and labelled with nothing, so no listing of a pool's containers finds it:
+ * the runtime image with the empty runtime volume mounted over its own
+ * `workerRuntimeDirectory`, which the engine fills from the image before
+ * anything runs, as it fills any empty volume mounted over a directory an
+ * image holds, and the workspace volume mounted uncopied. What it runs is
+ * the copy's own node, from the volume, so a runtime left unfilled fails the
+ * fill, and what that node does is open the workspace, which only the
+ * volume's owner may. That owner is the engine's root, so this container runs
+ * as root, with no capability, no privilege escalation and no network.
+ *
+ * @param {RuntimeVolumes} volumes
+ * @param {string} runtime the runtime image
+ */
+export function runtimeFillArgv(volumes, runtime) {
+  return [
+    "run",
+    "--rm",
+    "--pull=never",
+    "--name",
+    volumes.fill,
+    "--user",
+    "0:0",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--network",
+    "none",
+    "--volume",
+    `${volumes.volume}:${workerRuntimeDirectory}`,
+    "--volume",
+    `${volumes.workspace}:${jobWorkspace}:nocopy`,
+    "--entrypoint",
+    `${workerRuntimeDirectory}/bin/node`,
+    runtime,
+    "--eval",
+    workspaceOpened,
+    jobWorkspace,
+  ];
+}
+
+/** @param {string} volume */
+export function volumeRemoveArgv(volume) {
+  return ["volume", "rm", volume];
+}
+
+/**
+ * A pool's volumes, by name.
+ *
+ * @param {string} pool the pool label's value
+ */
+export function volumeListArgv(pool) {
+  return ["volume", "ls", "--quiet", "--filter", `label=${poolLabel}=${pool}`];
+}
+
+/** @param {readonly string[]} volumes */
+export function volumeInspectArgv(volumes) {
+  return ["volume", "inspect", ...volumes];
 }
 
 /**
@@ -220,6 +359,15 @@ export function logsArgv(container) {
  */
 export function removeArgv(container) {
   return ["rm", "-v", container];
+}
+
+/**
+ * A removal of a container whether or not it is running, which kills it first.
+ *
+ * @param {string} container
+ */
+export function forcedRemoveArgv(container) {
+  return ["rm", "--force", container];
 }
 
 /** @param {string} network */

@@ -30,16 +30,41 @@
  * its phase, `Succeeded` only for a container that exited 0. A failed
  * placement's attempt is the one it held; a container's is read back from the
  * envelope it was run with. One this pool stopped is never named.
+ *
+ * A JOB WHOSE ASSIGNMENT NAMES A RUNTIME STARTS THROUGH IT, whatever image it
+ * names, as chuggy's cluster starts one: the runtime image is got as a job's
+ * image is, a volume of the job's own is filled from it, and the job's
+ * container mounts that volume read-only and runs the runtime's check of the
+ * image before the core, in a workspace volume of its own that every user
+ * can write, as a cluster's emptyDir is. A job whose image cannot be got,
+ * started or pass that check is named refused rather than ended, with the
+ * image's fault in one fixed text a fault. A runtime this runner cannot get or
+ * copy is the site's failure and never the image's, so that job's placement
+ * fails as any does. The volumes go with the job's container, or with its
+ * placement where the job never starts in them, the container filling them
+ * first. Any a runner left, stopped mid-placement or refused a removal, are
+ * removed by a later `held`, which never takes one of a placement in flight
+ * or of a container it lists. An assignment naming no runtime runs its
+ * image's own entrypoint.
  */
 
+import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+  workerImageFaults,
+  workerImageFaultStatuses,
+  workerJobCommand,
+  workerWorkspaceVariable,
+} from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
 
 import {
   assignmentLabel,
   deadlineLabel,
+  fillLabel,
+  forcedRemoveArgv,
   imageInspectArgv,
   inspectArgv,
   killArgv,
@@ -49,12 +74,25 @@ import {
   pullArgv,
   removeArgv,
   runArgv,
+  runtimeFillArgv,
+  runtimeLabel,
+  runtimeVolumeCreateArgv,
+  volumeInspectArgv,
+  volumeListArgv,
+  volumeRemoveArgv,
+  workspaceLabel,
 } from "./engineArgv.mjs";
-import { engineFailure, engineFailureLine } from "./engineErrors.mjs";
+import {
+  engineCommandUnstarted,
+  engineFailure,
+  engineFailureLine,
+  enginePullRefused,
+} from "./engineErrors.mjs";
 import {
   jobEnvelope,
   jobEnvironmentAttempt,
   jobEnvironmentFile,
+  jobWorkspace,
 } from "./job.mjs";
 import {
   poolIdentityDigest,
@@ -66,7 +104,9 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
+ * @typedef {import("@chuggy/worker-contract/workerEnvironment").WorkerImageFault} WorkerImageFault
  * @typedef {import("./poolLoop.mjs").WorkerPoolAttempt} WorkerPoolAttempt
+ * @typedef {import("./poolLoop.mjs").WorkerPoolJobRefusal} WorkerPoolJobRefusal
  * @typedef {import("./poolLoop.mjs").WorkerPoolBackend} WorkerPoolBackend
  * @typedef {import("./poolLoop.mjs").WorkerPoolEnded} WorkerPoolEnded
  * @typedef {import("./poolLoop.mjs").WorkerPoolHeld} WorkerPoolHeld
@@ -108,7 +148,16 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {"Placing" | "Pulling" | "Starting"} phase
  * @property {number} deadlineEpochSecs
  *
- * @typedef {InFlightPlacement & {controller: AbortController, done: Promise<void>}} Placement
+ * @typedef {object} PlacementRuntime what a job placed through chuggy's runtime starts from
+ * @property {string} image the runtime image its assignment named
+ * @property {string[]} made the job's volumes made so far, which go where the job does not start in them
+ * @property {import("./engineArgv.mjs").RuntimeVolumes | undefined} volumes once both are made, and the container that fills them can have been run
+ *
+ * @typedef {InFlightPlacement & {
+ *   runtime: PlacementRuntime | undefined,
+ *   controller: AbortController,
+ *   done: Promise<void>,
+ * }} Placement
  *
  * @typedef {object} PoolContainer
  * @property {string} id
@@ -118,6 +167,8 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {string} status
  * @property {number | undefined} exitCode
  * @property {number | undefined} deadlineEpochSecs
+ * @property {string | undefined} runtimeVolume the volume holding its copy of chuggy's runtime, where it was started through one
+ * @property {string | undefined} workspaceVolume the volume its workspace is, where it was started through chuggy's runtime
  *
  * @typedef {WorkerPoolBackend & {
  *   inFlight: () => InFlightPlacement[],
@@ -133,8 +184,14 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} ContainerEnd how a workload's container ended
  * @property {string} why in this backend's words, which a job's end carries
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
+ * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
  *
- * @typedef {{settings: ContainerBackendSettings, seams: ContainerBackendSeams, placements: Map<string, Placement>, ends: Ends}} State
+ * @typedef {object} State
+ * @property {ContainerBackendSettings} settings
+ * @property {ContainerBackendSeams} seams
+ * @property {Map<string, Placement>} placements
+ * @property {Ends} ends
+ * @property {boolean} strays whether volumes of chuggy's runtime that nothing answers for may be left: from the start, since a predecessor may have left some, and after any removal of one failed
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -151,6 +208,91 @@ const endedStatuses = new Set([
 /** The ended states a container ran to an exit status in. */
 const exitedStatuses = new Set(["exited", "stopped"]);
 
+/**
+ * What this runner tells the person whose job's image it could not run, one
+ * fixed text a fault. Nothing the workload printed is ever relayed.
+ */
+export const containerImageFaultTexts = {
+  ImageUnpullable: "This runner could not pull the image this job names.",
+  ImageLacksShell:
+    "The image this job names has no executable /bin/sh, so this runner could not start chuggy's check of the image.",
+  ImageLibcUnsupported:
+    "The image this job names cannot load chuggy's runtime, which needs the image's glibc and libstdc++.",
+  ImageLacksGit: "The image this job names has no git on its PATH.",
+  ImageHomeUnwritable:
+    "The image this job names gives the job's user no HOME it can write.",
+  ImageWorkspaceUnwritable: `The image this job names gives the job's user no ${jobWorkspace} it can write.`,
+  ImageTmpUnwritable:
+    "The image this job names gives the job's user no temporary directory it can write.",
+};
+
+/**
+ * A fault's text, with the engine's own line after it where the fault is one
+ * whose cause only the engine knows: a pull and a start.
+ *
+ * @param {WorkerImageFault} fault
+ * @param {string} [said]
+ */
+export function containerImageFaultText(fault, said) {
+  const text = containerImageFaultTexts[fault];
+  return said === undefined ? text : `${text} The engine said: ${said}`;
+}
+
+/**
+ * The fault the runtime's check exits with this status for, read from the
+ * contract and never restated.
+ *
+ * @param {number} exitCode
+ * @returns {WorkerImageFault | undefined}
+ */
+function checkedImageFault(exitCode) {
+  /** @type {Readonly<Partial<Record<WorkerImageFault, number>>>} */
+  const statuses = workerImageFaultStatuses;
+  return workerImageFaults.find((fault) => statuses[fault] === exitCode);
+}
+
+/**
+ * How long after its first pull a job's image may go on failing to pull for
+ * a cause that can pass before the failure is read as the image's: the
+ * counterpart of the dwell chuggy's cluster reads a pull by,
+ * `kubernetesPullFailureDwellSecs` in chuggy's
+ * `src/adapters/kubernetes/podFaults.ts`. It is counted from that pull, so a
+ * runtime slow to pull before it takes none of it.
+ */
+export const pullFailureDwellMs = 120_000;
+
+/**
+ * An inspection or a pull of an image the engine answered as failed, kept
+ * with that answer for a caller to read why.
+ */
+class ImageCallFailed extends Error {
+  /**
+   * @param {string} message
+   * @param {EngineAnswer} answer
+   */
+  constructor(message, answer) {
+    super(message);
+    this.name = "ImageCallFailed";
+    this.answer = answer;
+  }
+}
+
+/**
+ * The fault of a job's image that stops this site carrying the job through,
+ * which names its end refused rather than failed.
+ */
+class PlacementRefused extends Error {
+  /**
+   * @param {string} why
+   * @param {WorkerImageFault} fault
+   */
+  constructor(why, fault) {
+    super(why);
+    this.name = "PlacementRefused";
+    this.fault = fault;
+  }
+}
+
 const inspectedSchema = z.array(
   z.object({
     Id: z.string(),
@@ -160,6 +302,13 @@ const inspectedSchema = z.array(
       Env: z.array(z.string()).nullish(),
     }),
     State: z.object({ Status: z.string(), ExitCode: z.number().optional() }),
+  }),
+);
+
+const inspectedVolumesSchema = z.array(
+  z.object({
+    Name: z.string(),
+    Labels: z.record(z.string(), z.string()).nullish(),
   }),
 );
 
@@ -210,6 +359,8 @@ function poolContainer(inspected) {
     status: inspected.State.Status,
     exitCode: inspected.State.ExitCode,
     deadlineEpochSecs: Number.isSafeInteger(deadline) ? deadline : undefined,
+    runtimeVolume: labels[runtimeLabel],
+    workspaceVolume: labels[workspaceLabel],
   };
 }
 
@@ -300,7 +451,134 @@ async function savedLogs(state, container) {
 }
 
 /**
- * Saves a container's logs and removes it. A container whose logs could not
+ * Removes one of a job's volumes of chuggy's runtime, answering whether it is
+ * gone. One that could not be removed is logged by name and left for a later
+ * `held` to remove.
+ *
+ * @param {State} state
+ * @param {string} owner the container it was made for
+ * @param {string} volume
+ */
+async function runtimeVolumeRemoved(state, owner, volume) {
+  const removed = await state.seams.engine.exec(volumeRemoveArgv(volume));
+  if (removed.code === 0 || engineFailure(removed) === "NoSuchVolume")
+    return true;
+  state.strays = true;
+  state.seams.log(
+    `${owner}: its volume ${volume} was not removed: ${engineFailureLine(removed)}`,
+  );
+  return false;
+}
+
+/**
+ * Removes a job's volumes of chuggy's runtime, which an engine removing the
+ * container they were mounted in keeps, as it keeps every named volume.
+ *
+ * @param {State} state
+ * @param {string} owner the container they were made for
+ * @param {(string | undefined)[]} volumes
+ */
+async function runtimeVolumesRemoved(state, owner, volumes) {
+  for (const volume of volumes)
+    if (volume !== undefined) await runtimeVolumeRemoved(state, owner, volume);
+}
+
+/**
+ * Removes the container that fills a job's volumes of chuggy's runtime,
+ * running or not, so that the volumes it holds can go; one already gone is
+ * no failure.
+ *
+ * @param {State} state
+ * @param {string} owner the container the volumes were made for
+ * @param {string} fill
+ */
+async function fillRemoved(state, owner, fill) {
+  const removed = await state.seams.engine.exec(forcedRemoveArgv(fill));
+  if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
+    state.seams.log(
+      `${owner}: the container filling its volumes, ${fill}, was not removed: ${engineFailureLine(removed)}`,
+    );
+}
+
+/**
+ * This pool's volumes as the engine describes them, or nothing where it
+ * could not, which is logged. One removed between the listing and the
+ * inspection is left out of the answer.
+ *
+ * @param {State} state
+ */
+async function poolVolumes(state) {
+  const { settings, seams } = state;
+  const listed = await seams.engine.exec(
+    volumeListArgv(poolLabelValue(settings.pool)),
+  );
+  if (listed.code !== 0) {
+    seams.log(
+      `${settings.engine} could not list this pool's volumes: ${engineFailureLine(listed)}`,
+    );
+    return undefined;
+  }
+  const names = listedIds(listed);
+  if (names.length === 0) return [];
+  const answer = await seams.engine.exec(volumeInspectArgv(names));
+  if (answer.code !== 0 && engineFailure(answer) !== "NoSuchVolume") {
+    seams.log(
+      `${settings.engine} could not inspect this pool's volumes: ${engineFailureLine(answer)}`,
+    );
+    return undefined;
+  }
+  try {
+    return inspectedVolumesSchema.parse(JSON.parse(answer.stdout));
+  } catch {
+    seams.log(
+      `${settings.engine} answered an inspection of this pool's volumes this runner cannot read`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Removes the volumes of chuggy's runtime that nothing answers for: each of
+ * an assignment `held` listed no container of and found no placement of in
+ * flight, the placements read again as each is removed, since a placement
+ * makes its volumes after it is placed. The container filling them goes
+ * first. A sweep that could not finish leaves `strays` set for the next.
+ *
+ * @param {State} state
+ * @param {ReadonlySet<string>} listed the assignments `held` found in flight or listed a container of
+ */
+async function strayVolumesRemoved(state, listed) {
+  state.strays = false;
+  const volumes = await poolVolumes(state);
+  if (volumes === undefined) {
+    state.strays = true;
+    return;
+  }
+  const fills = new Set();
+  for (const { Name: volume, Labels: labels } of volumes) {
+    const assignment = labels?.[assignmentLabel];
+    if (
+      assignment === undefined ||
+      listed.has(assignment) ||
+      state.placements.has(assignment)
+    )
+      continue;
+    const owner = containerName(state.settings.pool, assignment);
+    const fill = labels?.[fillLabel];
+    if (fill !== undefined && !fills.has(fill)) {
+      fills.add(fill);
+      await fillRemoved(state, owner, fill);
+    }
+    if (await runtimeVolumeRemoved(state, owner, volume))
+      state.seams.log(
+        `${owner}: its volume ${volume}, which nothing answered for, was removed`,
+      );
+  }
+}
+
+/**
+ * Saves a container's logs and removes it, and the volumes of chuggy's
+ * runtime it was started through with it. A container whose logs could not
  * be saved is left for the next pass to try again, rather than lost with them.
  *
  * @param {State} state
@@ -319,6 +597,11 @@ async function retired(state, container, why) {
       ? `${container.name} ${why}; logs saved to ${file}, container removed`
       : `${container.name} ${why}; logs saved to ${file}, not removed: ${engineFailureLine(removed)}`,
   );
+  if (removed.code === 0)
+    await runtimeVolumesRemoved(state, container.name, [
+      container.runtimeVolume,
+      container.workspaceVolume,
+    ]);
 }
 
 /**
@@ -336,7 +619,9 @@ function endAccounted(state, assignment) {
 
 /**
  * How a container that ended of itself ended: by an exit status where it ran
- * to one, and otherwise by the state it was left in.
+ * to one, and otherwise by the state it was left in. A container started
+ * through chuggy's runtime that exited with one of the check's statuses was
+ * stopped by its image, and is refused with that fault.
  *
  * @param {PoolContainer} container
  * @returns {ContainerEnd}
@@ -344,6 +629,16 @@ function endAccounted(state, assignment) {
 function containerEnded(container) {
   const exited =
     exitedStatuses.has(container.status) && container.exitCode !== undefined;
+  const fault =
+    exited && container.runtimeVolume !== undefined
+      ? checkedImageFault(/** @type {number} */ (container.exitCode))
+      : undefined;
+  if (fault !== undefined)
+    return {
+      why: containerImageFaultText(fault),
+      succeeded: false,
+      refusal: { fault },
+    };
   return {
     why: exited
       ? `its container exited with status ${String(container.exitCode)}`
@@ -367,9 +662,15 @@ const deadlineEnd = {
  * @returns {WorkerPoolEnded}
  */
 function workloadEnd(kind, attempt, end) {
-  return kind === "Session"
-    ? { kind, session: attempt, phase: end.succeeded ? "Succeeded" : "Failed" }
-    : { kind, job: attempt, why: end.why };
+  if (kind === "Session")
+    return {
+      kind,
+      session: attempt,
+      phase: end.succeeded ? "Succeeded" : "Failed",
+    };
+  return end.refusal === undefined
+    ? { kind, job: attempt, why: end.why }
+    : { kind, job: attempt, why: end.why, refusal: end.refusal };
 }
 
 /**
@@ -454,6 +755,11 @@ async function listedHeld(state, inspected, container, nowSecs) {
  * a `run` that failed can still have started one, and a listed container
  * answers for its own attempt.
  *
+ * While some may be left, the volumes of chuggy's runtime that nothing
+ * answers for are removed before any listed container is retired, so one
+ * that a retirement fails to remove is left to the next pass, which finds
+ * its container gone.
+ *
  * @param {State} state
  * @returns {Promise<WorkerPoolHeld[]>}
  */
@@ -471,8 +777,19 @@ async function heldAssignments(state) {
     state.ends.accounted.delete(endedAssignment(ended));
   const listed = new Set(placing);
   const nowSecs = Math.floor(state.seams.nowMs() / 1000);
-  for (const inspected of await poolContainers(state)) {
-    const container = poolContainer(inspected);
+  const containers = (await poolContainers(state)).map((inspected) => ({
+    inspected,
+    container: poolContainer(inspected),
+  }));
+  if (state.strays)
+    await strayVolumesRemoved(
+      state,
+      new Set([
+        ...placing,
+        ...containers.flatMap(({ container }) => container.assignment ?? []),
+      ]),
+    );
+  for (const { inspected, container } of containers) {
     const { assignment } = container;
     if (assignment === undefined || placing.has(assignment)) continue;
     listed.add(assignment);
@@ -512,13 +829,15 @@ async function placementRefusal(state, assignment) {
 /**
  * @param {State} state
  * @param {string} image
+ * @param {string} named how a failure names the image: `its image` for the job's own
  */
-async function imagePresent(state, image) {
+async function imagePresent(state, image, named) {
   const answer = await state.seams.engine.exec(imageInspectArgv(image));
   if (answer.code === 0) return true;
   if (engineFailure(answer) === "NotFound") return false;
-  throw new Error(
-    `its image could not be inspected: ${engineFailureLine(answer)}`,
+  throw new ImageCallFailed(
+    `${named} could not be inspected: ${engineFailureLine(answer)}`,
+    answer,
   );
 }
 
@@ -526,11 +845,11 @@ async function imagePresent(state, image) {
  * One pull, under the credential given or under none.
  *
  * @param {State} state
- * @param {Placement} placement
+ * @param {string} image
  * @param {import("./registryAuth.mjs").RegistryCredential | undefined} credential
  * @param {AbortSignal} signal
  */
-function pullAttempt(state, placement, credential, signal) {
+function pullAttempt(state, image, credential, signal) {
   const { settings, seams } = state;
   return withRegistryAuth(
     settings.runtimeDir,
@@ -539,7 +858,7 @@ function pullAttempt(state, placement, credential, signal) {
     (directory) => {
       const pull = pullArgv(
         settings.engine,
-        placement.image,
+        image,
         directory,
         settings.dockerHost,
       );
@@ -552,15 +871,16 @@ function pullAttempt(state, placement, credential, signal) {
 }
 
 /**
- * What a pull runs under: a signal a stop or the assignment's deadline aborts.
+ * What a call made for a placement runs under: a signal a stop or the
+ * assignment's deadline aborts.
  *
  * @param {State} state
  * @param {Placement} placement
+ * @param {string} late what the placement had not done by its deadline, where it is already past
  */
-function pullSignal(state, placement) {
+function placementSignal(state, placement, late) {
   const remainingMs = placement.deadlineEpochSecs * 1000 - state.seams.nowMs();
-  if (remainingMs <= 0)
-    throw new Error("its image was not pulled by the assignment's deadline");
+  if (remainingMs <= 0) throw new Error(`${late} by the assignment's deadline`);
   return globalThis.AbortSignal.any([
     placement.controller.signal,
     globalThis.AbortSignal.timeout(remainingMs),
@@ -576,20 +896,24 @@ function pullSignal(state, placement) {
  *
  * @param {State} state
  * @param {Placement} placement
+ * @param {string} image
+ * @param {string} named how a failure names the image: `its image` for the job's own
  */
-async function pulled(state, placement) {
+async function pulled(state, placement, image, named) {
   const { settings, seams } = state;
-  const host = imageRegistryHost(placement.image);
+  const host = imageRegistryHost(image);
+  const late = `${named} was not pulled`;
   if (host !== settings.registryHost) {
-    const signal = pullSignal(state, placement);
-    const answer = await pullAttempt(state, placement, undefined, signal);
+    const signal = placementSignal(state, placement, late);
+    const answer = await pullAttempt(state, image, undefined, signal);
     if (answer.code === 0) return;
-    throw new Error(
-      `its image could not be pulled under no credential, as every image not of the pool's registry is: ${engineFailureLine(answer)}`,
+    throw new ImageCallFailed(
+      `${named} could not be pulled under no credential, as every image not of the pool's registry is: ${engineFailureLine(answer)}`,
+      answer,
     );
   }
   for (;;) {
-    const signal = pullSignal(state, placement);
+    const signal = placementSignal(state, placement, late);
     const acquired = await seams.tokens.acquire();
     if (acquired.acquired === "Denied")
       throw new Error(
@@ -597,11 +921,12 @@ async function pulled(state, placement) {
       );
     if (acquired.acquired === "Token") {
       const credential = { host, token: acquired.token };
-      const answer = await pullAttempt(state, placement, credential, signal);
+      const answer = await pullAttempt(state, image, credential, signal);
       if (answer.code === 0) return;
       if (engineFailure(answer) !== "Unauthorized")
-        throw new Error(
-          `its image could not be pulled: ${engineFailureLine(answer)}`,
+        throw new ImageCallFailed(
+          `${named} could not be pulled: ${engineFailureLine(answer)}`,
+          answer,
         );
       seams.tokens.invalidate(acquired.token);
       seams.log(
@@ -612,6 +937,186 @@ async function pulled(state, placement) {
         `${placement.name}: no token to pull with yet: ${acquired.evidence}`,
       );
     await seams.sleep(settings.pullRetryMs, signal);
+  }
+}
+
+/**
+ * A failure to get a job's image as the image's fault, where it is one.
+ *
+ * @param {ImageCallFailed} failure
+ */
+function unpullable(failure) {
+  return new PlacementRefused(
+    containerImageFaultText(
+      "ImageUnpullable",
+      engineFailureLine(failure.answer),
+    ),
+    "ImageUnpullable",
+  );
+}
+
+/**
+ * A job's image pulled where its job starts through chuggy's runtime, where
+ * a pull that fails is the image's fault: at once where the registry refused
+ * the image or the reference names none, and otherwise, since any other cause
+ * can pass, only once it has gone on failing until `pullFailureDwellMs` after
+ * the first pull. An engine that could not be reached, a pool with no
+ * token to pull with and the deadline are this runner's, never the image's.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ */
+async function jobImagePulled(state, placement) {
+  const { settings, seams } = state;
+  const firstPullMs = seams.nowMs();
+  for (;;) {
+    try {
+      await pulled(state, placement, placement.image, "its image");
+      return;
+    } catch (failure) {
+      if (
+        !(failure instanceof ImageCallFailed) ||
+        engineFailure(failure.answer) === "Unreachable"
+      )
+        throw failure;
+      if (
+        enginePullRefused(failure.answer) ||
+        seams.nowMs() - firstPullMs >= pullFailureDwellMs
+      )
+        throw unpullable(failure);
+      seams.log(
+        `${placement.name}: its image could not be pulled yet, and is pulled again: ${engineFailureLine(failure.answer)}`,
+      );
+      await seams.sleep(
+        settings.pullRetryMs,
+        placementSignal(state, placement, "its image was not pulled"),
+      );
+    }
+  }
+}
+
+/**
+ * A job's image here where its job starts through chuggy's runtime: an
+ * inspection the engine refused because the reference names no image is the
+ * image's fault as a pull's would be, and any other is this runner's.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ */
+async function jobImageHere(state, placement) {
+  let present;
+  try {
+    present = await imagePresent(state, placement.image, "its image");
+  } catch (failure) {
+    if (failure instanceof ImageCallFailed && enginePullRefused(failure.answer))
+      throw unpullable(failure);
+    throw failure;
+  }
+  if (present) return;
+  placement.phase = "Pulling";
+  await jobImagePulled(state, placement);
+}
+
+/**
+ * A job's image here where its job starts through its own entrypoint.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ */
+async function imageHere(state, placement) {
+  if (await imagePresent(state, placement.image, "its image")) return;
+  placement.phase = "Pulling";
+  await pulled(state, placement, placement.image, "its image");
+}
+
+/**
+ * A failure of this runner's own work on chuggy's runtime as the failure of
+ * the job's placement, naming what the runner could not do. Where a stop was
+ * why, the stop's end stands instead.
+ *
+ * @param {unknown} failure
+ * @param {string} what what this runner could not do
+ */
+function runtimeFailure(failure, what) {
+  const why =
+    failure instanceof Error && failure.name === "AbortError"
+      ? "the assignment's deadline passed first"
+      : failure instanceof Error
+        ? failure.message
+        : String(failure);
+  return new Error(`${what}: ${why}`);
+}
+
+/**
+ * Chuggy's runtime image here, pulled as any image is where it is not.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {PlacementRuntime} runtime
+ */
+async function runtimeHere(state, placement, runtime) {
+  try {
+    if (!(await imagePresent(state, runtime.image, "the runtime"))) {
+      placement.phase = "Pulling";
+      await pulled(state, placement, runtime.image, "the runtime");
+    }
+  } catch (failure) {
+    throw runtimeFailure(
+      failure,
+      `this runner could not get chuggy's runtime ${runtime.image}`,
+    );
+  }
+}
+
+/**
+ * The job's own volumes of chuggy's runtime, made for this placement alone so
+ * that none a predecessor left half filled is taken for its own: its copy of
+ * the runtime, filled from the runtime image, and its workspace, opened.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {PlacementRuntime} runtime
+ */
+async function runtimeFilled(state, placement, runtime) {
+  const { settings, seams } = state;
+  const stem = `${placement.name}-${randomBytes(4).toString("hex")}`;
+  const volumes = {
+    volume: `${stem}-runtime`,
+    workspace: `${stem}-workspace`,
+    fill: `${stem}-fill`,
+  };
+  try {
+    for (const volume of [volumes.volume, volumes.workspace]) {
+      const created = await seams.engine.exec(
+        runtimeVolumeCreateArgv(
+          volume,
+          poolLabelValue(settings.pool),
+          placement.assignment,
+          volumes.fill,
+        ),
+      );
+      if (created.code !== 0)
+        throw new Error(
+          `its volume ${volume} could not be made: ${engineFailureLine(created)}`,
+        );
+      runtime.made.push(volume);
+    }
+    runtime.volumes = volumes;
+    const filled = await seams.engine.exec(
+      runtimeFillArgv(volumes, runtime.image),
+      {
+        signal: placementSignal(state, placement, "the runtime was not copied"),
+      },
+    );
+    if (filled.code !== 0)
+      throw new Error(
+        `its volumes could not be filled: ${engineFailureLine(filled)}`,
+      );
+  } catch (failure) {
+    throw runtimeFailure(
+      failure,
+      `this runner could not copy chuggy's runtime ${runtime.image}`,
+    );
   }
 }
 
@@ -629,9 +1134,40 @@ async function containerAssignment(state, name) {
 }
 
 /**
+ * The environment a workload's env file carries beside its envelope: the
+ * runner's, and for a job started through chuggy's runtime the workspace its
+ * check is to find writable, which is the one its envelope names.
+ *
+ * @param {ContainerBackendSettings} settings
+ * @param {Placement} placement
+ */
+function workloadEnvironment(settings, placement) {
+  return placement.runtime === undefined
+    ? settings.environment
+    : { ...settings.environment, [workerWorkspaceVariable]: jobWorkspace };
+}
+
+/**
+ * Removes a container whose run failed before its command started, so the
+ * failed placement's end is the one named.
+ *
+ * @param {State} state
+ * @param {string} name
+ */
+async function unstartedRemoved(state, name) {
+  const removed = await state.seams.engine.exec(removeArgv(name));
+  if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
+    state.seams.log(
+      `${name} did not start and was not removed: ${engineFailureLine(removed)}`,
+    );
+}
+
+/**
  * Runs the container, the envelope reaching it through an env file only its
  * owner can read, which is removed once `run` has answered. A container of
- * this name already carrying this assignment is a repeated placement.
+ * this name already carrying this assignment is a repeated placement. A job
+ * started through chuggy's runtime whose image's shell could not be started
+ * is refused with that fault, its unstarted container removed.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -650,7 +1186,7 @@ async function started(state, placement, assignment, envelope) {
     const envFile = join(directory, "env");
     await writeFile(
       envFile,
-      jobEnvironmentFile(envelope, settings.environment),
+      jobEnvironmentFile(envelope, workloadEnvironment(settings, placement)),
       {
         mode: 0o600,
         flag: "wx",
@@ -669,6 +1205,7 @@ async function started(state, placement, assignment, envelope) {
         tokenFile: settings.tokenFile,
         network: settings.network,
         image: placement.image,
+        runtime: placement.runtime?.volumes,
       }),
     );
   } finally {
@@ -680,26 +1217,57 @@ async function started(state, placement, assignment, envelope) {
     (await containerAssignment(state, placement.name)) === placement.assignment
   )
     return "was already running";
+  if (
+    placement.runtime !== undefined &&
+    engineCommandUnstarted(answer, workerJobCommand[0])
+  ) {
+    await unstartedRemoved(state, placement.name);
+    throw new PlacementRefused(
+      containerImageFaultText("ImageLacksShell", engineFailureLine(answer)),
+      "ImageLacksShell",
+    );
+  }
   throw new Error(
     `its container could not be run: ${engineFailureLine(answer)}`,
   );
 }
 
 /**
+ * Gets what a placement starts from and starts it: chuggy's runtime first
+ * where the job starts through one, then the job's image, then the job's
+ * volumes of the runtime. Those are removed where the job did not start in
+ * them, as where a predecessor's container was found already running the job,
+ * and where it failed the container filling them goes first: a stop or the
+ * deadline ends only the engine's CLI, and leaves that container holding them.
+ *
  * @param {State} state
  * @param {Placement} placement
  * @param {WorkerPoolAssignment} assignment
  * @param {string} envelope
  */
 async function placementRun(state, placement, assignment, envelope) {
-  if (!(await imagePresent(state, placement.image))) {
-    placement.phase = "Pulling";
-    await pulled(state, placement);
+  const { runtime } = placement;
+  let outcome;
+  try {
+    if (runtime === undefined) await imageHere(state, placement);
+    else {
+      await runtimeHere(state, placement, runtime);
+      await jobImageHere(state, placement);
+    }
+    placement.controller.signal.throwIfAborted();
+    placement.phase = "Starting";
+    if (runtime !== undefined) await runtimeFilled(state, placement, runtime);
+    outcome = await started(state, placement, assignment, envelope);
+  } catch (failure) {
+    if (runtime?.volumes !== undefined)
+      await fillRemoved(state, placement.name, runtime.volumes.fill);
+    if (runtime !== undefined)
+      await runtimeVolumesRemoved(state, placement.name, runtime.made);
+    throw failure;
   }
-  placement.controller.signal.throwIfAborted();
-  placement.phase = "Starting";
-  const outcome = await started(state, placement, assignment, envelope);
   state.seams.log(`${placement.name} ${outcome}`);
+  if (outcome === "was already running" && runtime !== undefined)
+    await runtimeVolumesRemoved(state, placement.name, runtime.made);
 }
 
 /**
@@ -758,6 +1326,7 @@ async function placed(state, assignment, kind) {
       evidence: /** @type {Error} */ (failure).message,
     };
   }
+  const placedMs = seams.nowMs();
   /** @type {Placement} */
   const placement = {
     assignment: assignment.assignment,
@@ -766,8 +1335,12 @@ async function placed(state, assignment, kind) {
     image: /** @type {string} */ (assignment.image),
     phase: "Placing",
     deadlineEpochSecs:
-      Math.floor(seams.nowMs() / 1000) +
+      Math.floor(placedMs / 1000) +
       Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    runtime:
+      kind === "Job" && assignment.runtime !== undefined
+        ? { image: assignment.runtime, made: [], volumes: undefined }
+        : undefined,
     controller: new globalThis.AbortController(),
     done: Promise.resolve(),
   };
@@ -803,8 +1376,23 @@ function placementForgotten(state, placement) {
  */
 function placementFailed(state, placement, assignment, failure) {
   placementForgotten(state, placement);
-  const why = placementFailure(placement, failure);
-  state.seams.log(`${placement.name} ${why}`);
+  /** @type {ContainerEnd} */
+  let end;
+  if (
+    failure instanceof PlacementRefused &&
+    !placement.controller.signal.aborted
+  ) {
+    state.seams.log(`${placement.name} was refused: ${failure.message}`);
+    end = {
+      why: failure.message,
+      succeeded: false,
+      refusal: { fault: failure.fault },
+    };
+  } else {
+    const why = placementFailure(placement, failure);
+    state.seams.log(`${placement.name} ${why}`);
+    end = { why: `its container ${why}`, succeeded: false };
+  }
   if (endAccounted(state, placement.assignment))
     state.ends.pending.push(
       workloadEnd(
@@ -814,7 +1402,7 @@ function placementFailed(state, placement, assignment, failure) {
           callbackUrl: assignment.callbackUrl,
           bearer: assignment.bearer,
         },
-        { why: `its container ${why}`, succeeded: false },
+        end,
       ),
     );
 }
@@ -904,6 +1492,7 @@ export function containerBackend(settings, seams) {
     seams,
     placements: new Map(),
     ends: { pending: [], ready: [], accounted: new Set() },
+    strays: true,
   };
   return {
     place: (assignment, kind) => placed(state, assignment, kind),

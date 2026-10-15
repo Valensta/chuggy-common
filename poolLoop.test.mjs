@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  assignmentOutcomeSchema,
+  workerPoolEvidenceCharsMax,
+} from "@chuggy/worker-contract/workerPool";
+
 import { workerPoolClientPass, workerPoolClientRun } from "./poolLoop.mjs";
 
 const settings = { concurrencyMax: 1, outageBackoffMs: 1, passesMax: 1 };
@@ -507,6 +512,118 @@ test("a workload that ended unreported has its attempt ended, each one once, cou
     refused: 0,
     ended: 1,
   });
+});
+
+/**
+ * A pool whose backend names `workloads` ended, recording in order what the
+ * job plane is asked and what the pool plane is told, which answers `settled`.
+ */
+function refusing(workloads, settled = "Settled") {
+  const asked = [];
+  const source = counting();
+  const running = client({
+    tokens: source.tokens,
+    backend: { ...idle, ended: async () => workloads },
+    jobs: {
+      end: async (workload) => {
+        asked.push(["end", workload.job.assignment]);
+        return "Ended";
+      },
+      left: async (workload) => {
+        asked.push(["left", workload.job.assignment]);
+      },
+    },
+    plane: {
+      ...quiet,
+      settle: async (token, named, outcome) => {
+        asked.push(["settle", token, named, outcome]);
+        return settled;
+      },
+    },
+  });
+  return { asked, source, running };
+}
+
+test("a job the backend refused is left its words, then settled Refused under the pass's token with its fault, and counted once the plane takes it", async () => {
+  const { asked, running } = refusing([
+    {
+      kind: "Job",
+      job: assignment("no-git"),
+      why: "The image this job names has no git on its PATH.",
+      refusal: { fault: "ImageLacksGit" },
+    },
+    {
+      kind: "Job",
+      job: assignment("no-shell"),
+      why: "The image this job names has no executable /bin/sh.",
+      refusal: { fault: "ImageLacksShell" },
+    },
+    { kind: "Job", job: assignment("exited"), why: "its container exited" },
+  ]);
+  const passed = await workerPoolClientPass(running);
+  assert.deepEqual(asked, [
+    ["left", "no-git"],
+    [
+      "settle",
+      "pool-token-1",
+      "no-git",
+      {
+        outcome: "Refused",
+        evidence: "The image this job names has no git on its PATH.",
+        fault: "ImageLacksGit",
+      },
+    ],
+    ["left", "no-shell"],
+    [
+      "settle",
+      "pool-token-1",
+      "no-shell",
+      {
+        outcome: "Refused",
+        evidence: "The image this job names has no executable /bin/sh.",
+        fault: "ImageLacksShell",
+      },
+    ],
+    ["end", "exited"],
+  ]);
+  assert.equal(passed.passed === "Reconciled" && passed.ended, 3);
+});
+
+test("a refusal's evidence is cut, by whole characters, to what a settlement carries", async () => {
+  const { asked, running } = refusing([
+    {
+      kind: "Job",
+      job: assignment("long"),
+      why: "\u{1F433}".repeat(workerPoolEvidenceCharsMax),
+      refusal: { fault: "ImageUnpullable" },
+    },
+  ]);
+  await workerPoolClientPass(running);
+  const [, , , outcome] = asked[1];
+  assert.equal(outcome.evidence.length, workerPoolEvidenceCharsMax);
+  assert.ok(assignmentOutcomeSchema.safeParse(outcome).success);
+  assert.ok(outcome.evidence.isWellFormed());
+});
+
+test("a refusal settled under a stale token invalidates it, and one the plane did not take is not counted", async () => {
+  const refused = [
+    {
+      kind: "Job",
+      job: assignment("refused"),
+      why: "refused",
+      refusal: { fault: "ImageLacksShell" },
+    },
+  ];
+  for (const settled of ["Stale", "Lost", "Denied", "Unavailable"]) {
+    const { source, running } = refusing(refused, settled);
+    const passed = await workerPoolClientPass(running);
+    assert.equal(passed.passed === "Reconciled" && passed.ended, 0, settled);
+    assert.deepEqual(
+      source.invalidated,
+      settled === "Stale" ? ["pool-token-1"] : [],
+      settled,
+    );
+  }
 });
 
 test("an ended workload found by this pass's read is ended before the poll waits", async () => {

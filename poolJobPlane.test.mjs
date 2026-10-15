@@ -10,6 +10,7 @@ import {
   checkedPoolJobPlaneClientSettings,
   poolJobEndedText,
   poolJobPlaneClient,
+  poolJobRefusedText,
 } from "./poolJobPlane.mjs";
 
 const settings = { timeoutMs: 1_000 };
@@ -126,6 +127,46 @@ test("the reason is one printable line, scrubbed of the bearer and no longer tha
   });
 
   assert.match(text, /^Worker exited before reporting: exited holding /u);
+  assert.ok(!text.includes(bearer));
+  assert.ok(!text.includes("\u001b"));
+  assert.equal(text.indexOf("\n"), text.length - 1);
+  assert.equal(text.length, resultReportCharsMax + 1);
+});
+
+test("a refused job's attempt is left the refusal's own words under its bearer, and is not ended, whatever the plane answers", async () => {
+  const refused = {
+    ...ended,
+    why: "The image this job names has no git on its PATH.",
+    refusal: { fault: "ImageLacksGit" },
+  };
+  for (const left of [204, 409, 503]) {
+    const plane = jobPlane(204, left);
+    assert.equal(
+      await poolJobPlaneClient(settings, plane.fetch).left(refused),
+      undefined,
+    );
+    assert.deepEqual(
+      plane.asked.map(({ route, path }) => [route, path]),
+      [["artifact", "/v1/artifacts/.chuggy/worker-error.txt"]],
+    );
+    assert.equal(
+      Buffer.from(plane.asked[0].body).toString("utf8"),
+      "The image this job names has no git on its PATH.\n",
+    );
+    assert.deepEqual(plane.authorized, [`Bearer ${bearer}`]);
+  }
+  await poolJobPlaneClient(settings, async () => {
+    throw new TypeError("fetch failed");
+  }).left(refused);
+});
+
+test("a refusal's words are one printable line, scrubbed of the bearer and no longer than a report", () => {
+  const text = poolJobRefusedText({
+    ...ended,
+    why: `refused\nholding ${bearer}\u001b[31m ${"x".repeat(resultReportCharsMax)}`,
+  });
+
+  assert.match(text, /^refused holding /u);
   assert.ok(!text.includes(bearer));
   assert.ok(!text.includes("\u001b"));
   assert.equal(text.indexOf("\n"), text.length - 1);
