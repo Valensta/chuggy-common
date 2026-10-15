@@ -77,6 +77,9 @@ writable "$HOME" ||
 workspace="${CHUG_WORKER_WORKSPACE:-/workspace}"
 writable "$workspace" ||
 	fault 84 "the workspace, $workspace, is not a directory this user can write"
+temporary="${TMPDIR:-/tmp}"
+writable "$temporary" ||
+	fault 85 "the temporary directory, $temporary, is not a directory this user can write"
 
 if [ "$start" = no ]; then
 	printf 'chuggy: this image can run a job\n'

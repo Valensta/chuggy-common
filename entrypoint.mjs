@@ -107,7 +107,7 @@ import { agentResultSchema } from "./result.mjs";
 import { answeredWith, rosterLabel, routePath } from "./wire.mjs";
 
 const executeFile = promisify(execFile);
-const agentResultSchemaFile = "/tmp/chuggy-agent-result-schema.json";
+const agentResultSchemaName = "chuggy-agent-result-schema.json";
 const agentDiagnosticPath = ".chuggy/agent-result.json";
 /** Where an agent's summary is kept as it was written: the path chuggy reads its `work-summary` output from. */
 const agentSummaryPath = ".chuggy/outputs/summary.md";
@@ -315,7 +315,7 @@ async function readAgentStream(context, child, argv) {
 
 async function runAgent(context) {
   const argv = context.agent.invocation(context.task, {
-    resultSchema: agentResultSchemaFile,
+    resultSchema: workerTemporaryFile(agentResultSchemaName),
   });
   if (context.agent.configuration !== undefined)
     await captureConfiguration(
@@ -597,14 +597,24 @@ function scrubbed(text) {
   return activeScrub === undefined ? text : activeScrub(text);
 }
 
+/**
+ * Where a job keeps a file of its own: the temporary directory, named as the
+ * job's `check.sh` names the one it found this user can write.
+ */
+export function workerTemporaryFile(name, environment = process.env) {
+  return join(environment.TMPDIR || "/tmp", name);
+}
+
 /** What the task must grant before it runs, and what an agent-run task needs on disk. */
 async function admitWorkerTask(task, agent) {
   if (agent !== undefined) {
     if (!task.authority.credentials.includes(agent.credential))
       throw new Error(`worker authority does not grant ${agent.credential}`);
-    await writeFile(agentResultSchemaFile, JSON.stringify(agentResultSchema), {
-      flag: "wx",
-    });
+    await writeFile(
+      workerTemporaryFile(agentResultSchemaName),
+      JSON.stringify(agentResultSchema),
+      { flag: "wx" },
+    );
   }
   if (!task.authority.network || task.authority.filesystem !== workspaceWrite)
     throw new Error(

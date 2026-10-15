@@ -1,9 +1,9 @@
 /**
  * `check.sh` run as a job container runs it, against a runtime tree whose stub
  * binaries fail as a real image makes chuggy's fail: the loader's own words
- * and statuses, an interpreter the image does not have, no git, and a HOME and
- * a workspace this user cannot write. Every case runs under each shell an
- * image's `/bin/sh` may be.
+ * and statuses, an interpreter the image does not have, no git, and a HOME, a
+ * workspace and a temporary directory this user cannot write. Every case runs
+ * under each shell an image's `/bin/sh` may be.
  *
  * THE NODE A PASSING TREE STARTS THE CORE WITH IS THIS SUITE'S OWN, on a stub
  * core that reports what it was started with. That is how what the check
@@ -47,6 +47,7 @@ const faultStatuses = {
   ImageLacksGit: 82,
   ImageHomeUnwritable: 83,
   ImageWorkspaceUnwritable: 84,
+  ImageTmpUnwritable: 85,
 };
 
 /** What the check exits with where the fault is not the image's: its own usage, and a runtime that is not whole. */
@@ -92,8 +93,8 @@ async function checkExecutable(path, text) {
 }
 
 /**
- * A runtime tree as a site mounts it, with the image's PATH, HOME and
- * workspace beside it. `node` is this suite's own unless a stub is named;
+ * A runtime tree as a site mounts it, with the image's PATH, HOME, workspace
+ * and temporary directory beside it. `node` is this suite's own unless a stub is named;
  * `claude` and `git` answer unless a stub is named, and are absent where named
  * `null`.
  */
@@ -109,11 +110,13 @@ async function checkTree(t, binaries = {}) {
     path: join(root, "path"),
     home: join(root, "home"),
     workspace: join(root, "workspace"),
+    temporary: join(root, "temporary"),
   };
   for (const directory of [join(runtime, "bin"), core, tree.path])
     await mkdir(directory, { recursive: true });
   await mkdir(tree.home);
   await mkdir(tree.workspace);
+  await mkdir(tree.temporary);
   const here = (name) => fileURLToPath(new URL(name, import.meta.url));
   await copyFile(here("check.sh"), tree.check);
   await copyFile(here("coreRuntime.mjs"), join(core, "coreRuntime.mjs"));
@@ -134,7 +137,8 @@ async function checkTree(t, binaries = {}) {
 
 /**
  * The check run under `shell` as a job container runs it, in an environment
- * of the tree's PATH, HOME and workspace and `environment` over them, where a
+ * of the tree's PATH, HOME, workspace and temporary directory and
+ * `environment` over them, where a
  * variable named `undefined` is unset.
  */
 function checked(shell, tree, environment = {}, args = []) {
@@ -272,6 +276,19 @@ const imageFaults = [
     line: (tree) => unwritable("the workspace", tree.workspace),
   },
   {
+    name: "a temporary directory that does not exist",
+    environment: (tree) => ({ TMPDIR: join(tree.root, "absent") }),
+    fault: "ImageTmpUnwritable",
+    line: (tree) =>
+      unwritable("the temporary directory", join(tree.root, "absent")),
+  },
+  {
+    name: "a temporary directory this user cannot write",
+    readOnly: "temporary",
+    fault: "ImageTmpUnwritable",
+    line: (tree) => unwritable("the temporary directory", tree.temporary),
+  },
+  {
     name: "an image lacking everything, named by its node",
     binaries: {
       node: stub.interpreterAbsent,
@@ -281,6 +298,7 @@ const imageFaults = [
     environment: (tree) => ({
       HOME: undefined,
       CHUG_WORKER_WORKSPACE: join(tree.root, "absent"),
+      TMPDIR: join(tree.root, "absent"),
     }),
     fault: "ImageLibcUnsupported",
     line: () =>
@@ -295,6 +313,15 @@ const imageFaults = [
     }),
     fault: "ImageLacksGit",
     line: () => "chuggy: this image has no git on PATH",
+  },
+  {
+    name: "an image lacking a workspace and a temporary directory, named by its workspace",
+    environment: (tree) => ({
+      CHUG_WORKER_WORKSPACE: join(tree.root, "absent"),
+      TMPDIR: join(tree.root, "absent"),
+    }),
+    fault: "ImageWorkspaceUnwritable",
+    line: (tree) => unwritable("the workspace", join(tree.root, "absent")),
   },
   {
     name: "an image with git that lacks a HOME and a workspace, named by its HOME",
@@ -361,6 +388,7 @@ function checkBase(tree) {
     PATH: tree.path,
     HOME: tree.home,
     CHUG_WORKER_WORKSPACE: tree.workspace,
+    TMPDIR: tree.temporary,
   };
 }
 
@@ -469,6 +497,21 @@ const checkCases = [
       else {
         assert.equal(ran.status, faultStatuses.ImageWorkspaceUnwritable);
         assert.equal(ran.line, unwritable("the workspace", "/workspace"));
+      }
+    },
+  },
+  {
+    name: "an unnamed or empty TMPDIR names /tmp",
+    run: async (t, shell) => {
+      const tree = await checkTree(t);
+      for (const TMPDIR of [undefined, ""]) {
+        const ran = checked(shell, tree, { TMPDIR }, ["check"]);
+
+        if (checkWritable("/tmp")) assert.equal(ran.status, 0, ran.stderr);
+        else {
+          assert.equal(ran.status, faultStatuses.ImageTmpUnwritable);
+          assert.equal(ran.line, unwritable("the temporary directory", "/tmp"));
+        }
       }
     },
   },

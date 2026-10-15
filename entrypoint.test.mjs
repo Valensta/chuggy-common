@@ -42,6 +42,7 @@ import {
   workerMintedWritable,
   workerMode,
   workerRun,
+  workerTemporaryFile,
   workerWorkspace,
 } from "./entrypoint.mjs";
 import {
@@ -51,6 +52,7 @@ import {
 } from "./envelope.fixture.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { planeFetch, planes } from "./plane.fixture.mjs";
+import { agentResultSchema } from "./result.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
 import { facts } from "./sessionHarness.fixture.mjs";
@@ -264,6 +266,48 @@ test("a commanded work task is admitted with no agent credential mounted", async
     credentialFilesMissing,
     "a commanded work task asked for something an agent's credential answers",
   );
+});
+
+/**
+ * Catches the core writing a file of its own outside the temporary directory
+ * the image names, which is the only one its check found it can write.
+ */
+test("an agent's task keeps its result schema in the image's temporary directory", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  const ran = await launched({
+    TMPDIR: temporary,
+    [workerTaskVariable]: JSON.stringify({
+      taskKind: "Work",
+      worker: { mode: { type: "SingleAgent", agent: "Claude" } },
+      authority: {
+        network: true,
+        filesystem: "WriteWorkspace",
+        credentials: [claudeAgent.credential],
+      },
+    }),
+  });
+
+  assert.match(ran.stderr, credentialFilesMissing);
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(
+        join(temporary, "chuggy-agent-result-schema.json"),
+        "utf8",
+      ),
+    ),
+    agentResultSchema,
+  );
+});
+
+/** Where a job keeps its own files is the temporary directory as `check.sh` names it. */
+test("an unnamed or empty TMPDIR keeps a job's files in /tmp", () => {
+  assert.equal(
+    workerTemporaryFile("kept", { TMPDIR: "/image/temporary" }),
+    "/image/temporary/kept",
+  );
+  for (const environment of [{}, { TMPDIR: "" }])
+    assert.equal(workerTemporaryFile("kept", environment), "/tmp/kept");
 });
 
 /** Both halves of what a commanded work task must be granted before it runs. */
