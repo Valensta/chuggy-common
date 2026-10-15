@@ -7,11 +7,8 @@ import { claudeAgent } from "./claude.mjs";
 import { codexAgent } from "./codex.mjs";
 import { coreRuntime, coreRuntimePaths } from "./coreRuntime.mjs";
 
-/**
- * Catches a derivation that finds the runtime's agents and loses the ones
- * chuggy's worker image installs, which is every pod running today's image.
- */
-test("a core where chuggy's worker image copies it finds the agents npm installed beside it", () => {
+/** Catches a derivation that names the runtime's root rather than reading its own. */
+test("a core in a tree rooted elsewhere finds the agents in that tree's bin", () => {
   assert.deepEqual(
     coreRuntimePaths("file:///usr/local/lib/chuggy/coreRuntime.mjs"),
     {

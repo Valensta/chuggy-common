@@ -2,7 +2,9 @@
  * The job plane as a pool reaches it, for one thing: ending the attempt of a
  * workload that ended without its harness reporting, under that assignment's
  * own bearer, as a crashed harness ends its own. The attempt then ends when
- * its workload did rather than when its lease runs out.
+ * its workload did rather than when its lease runs out. A job the pool
+ * refused is not ended here but only left its text, since its refusal is the
+ * pool plane's to settle.
  *
  * Each call is made once and nothing here retries it, because an attempt the
  * plane did not hear about is still ended by its lease. One that already
@@ -46,6 +48,16 @@ export function poolJobEndedText({ job, why }) {
     `Worker exited before reporting: ${why}`,
     credentialScrub([job.bearer]),
   )}\n`;
+}
+
+/**
+ * The error text a refused job leaves: the backend's reason alone, since its
+ * workload may never have started, scrubbed as an ended workload's is.
+ *
+ * @param {WorkerPoolJobEnd} ended
+ */
+export function poolJobRefusedText({ job, why }) {
+  return `${workerReportText(why, credentialScrub([job.bearer]))}\n`;
 }
 
 /**
@@ -99,15 +111,15 @@ export function poolEndAnswer(status) {
 }
 
 /**
- * The error text first, since only a live attempt takes it, and its answer
- * unread: the end is what matters, and is asked for either way.
+ * Leaves an attempt its error text, the answer unread: what follows is asked
+ * for either way.
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
  * @param {WorkerPoolJobEnd} ended
- * @returns {Promise<WorkerPoolEndAnswer>}
+ * @param {string} text
  */
-async function poolJobPlaneEnded(settings, fetcher, ended) {
+async function poolJobErrorLeft(settings, fetcher, ended, text) {
   try {
     await poolAttemptStatus(
       settings,
@@ -117,12 +129,25 @@ async function poolJobPlaneEnded(settings, fetcher, ended) {
       {
         method: workerPlaneRoutes.artifact.method,
         contentType: workerPlaneBytesMediaType,
-        body: Buffer.from(poolJobEndedText(ended)),
+        body: Buffer.from(text),
       },
     );
   } catch {
-    // The end below is asked for regardless.
+    // What follows is asked for regardless.
   }
+}
+
+/**
+ * The error text first, since only a live attempt takes it: the end is what
+ * matters, and is asked for either way.
+ *
+ * @param {PoolJobPlaneClientSettings} settings
+ * @param {typeof fetch} fetcher
+ * @param {WorkerPoolJobEnd} ended
+ * @returns {Promise<WorkerPoolEndAnswer>}
+ */
+async function poolJobPlaneEnded(settings, fetcher, ended) {
+  await poolJobErrorLeft(settings, fetcher, ended, poolJobEndedText(ended));
   try {
     return poolEndAnswer(
       await poolAttemptStatus(
@@ -149,5 +174,9 @@ async function poolJobPlaneEnded(settings, fetcher, ended) {
  */
 export function poolJobPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolJobPlaneClientSettings(input);
-  return { end: (ended) => poolJobPlaneEnded(settings, fetcher, ended) };
+  return {
+    end: (ended) => poolJobPlaneEnded(settings, fetcher, ended),
+    left: (ended) =>
+      poolJobErrorLeft(settings, fetcher, ended, poolJobRefusedText(ended)),
+  };
 }

@@ -38,6 +38,69 @@ export function engineFailure(answer) {
   return "Other";
 }
 
+/**
+ * The words a failed pull says when its registry refused the image for good,
+ * or when no image could be named by the reference: it is not there, it is
+ * not this puller's to have, or the reference is not one. A refusal word is
+ * read only standing as a word, between spaces or the stderr's ends with at
+ * most a punctuation mark after it, since a host or a repository the
+ * reference names can spell one inside itself.
+ */
+const pullRefusalWords = [
+  "not found",
+  "manifest unknown",
+  "unauthorized",
+  "authentication required",
+  "no basic auth credentials",
+  "denied",
+  "forbidden",
+  "invalid reference format",
+];
+
+const pullRefusal = new RegExp(
+  `(?:^|\\s)(?:${pullRefusalWords.join("|")})[,.;:]?(?:\\s|$)`,
+  "iu",
+);
+
+/**
+ * Whether a pull or an inspection of an image the engine answered as failed
+ * was refused in a way no second try changes. An engine that could not be
+ * reached refused nothing, whatever its words.
+ *
+ * @param {EngineAnswer} answer
+ */
+export function enginePullRefused(answer) {
+  return (
+    engineFailure(answer) !== "Unreachable" && pullRefusal.test(answer.stderr)
+  );
+}
+
+/**
+ * The statuses both engines' `run` answers with when the container's own
+ * command could not be invoked or found, which are not the one it answers a
+ * failure of the engine's own with.
+ */
+const unstartedStatuses = new Set([126, 127]);
+
+/**
+ * Whether a `run` failed because the container's runtime could not execute
+ * `command`, which runc's error of its lookup names quoted after `exec:` and
+ * crun's names between backquotes, whether the file is absent, not
+ * executable or not a file. Both engines also answer the same statuses for
+ * any start failure whose cause reads as a missing file or a refused
+ * permission, so the status alone names no command.
+ *
+ * @param {EngineAnswer} answer
+ * @param {string} command an absolute path
+ */
+export function engineCommandUnstarted(answer, command) {
+  return (
+    unstartedStatuses.has(answer.code) &&
+    (answer.stderr.includes(`exec: ${JSON.stringify(command)}: `) ||
+      answer.stderr.includes(`\`${command}\``))
+  );
+}
+
 /** A daemon's error can quote a whole request, which a log line does not need. */
 const failureLineCharsMax = 300;
 

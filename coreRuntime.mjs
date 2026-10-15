@@ -3,15 +3,14 @@
  * sit rather than off PATH.
  *
  * THE CORE SITS IN `lib/chuggy/` OF A TREE WHOSE `bin/` HOLDS THE AGENTS. That
- * is chuggy's runtime tree, and it is also chuggy's worker image, where the
- * core is copied into npm's global `lib/` and the agents are installed into
- * the `bin/` beside it; so one derivation finds both.
+ * is chuggy's runtime tree, which chuggy's own images carry and a job of any
+ * other image mounts, and the derivation names no tree's root, so a core
+ * copied into any such tree finds that tree's agents.
  *
- * THAT `bin/` IS NEVER PUT ON PATH. In the runtime it holds chuggy's own node,
- * which would then be the node a project's checks and its agent's shell run.
+ * THAT `bin/` IS NEVER PUT ON PATH. It holds chuggy's own node, which would
+ * then be the node a project's checks and its agent's shell run.
  *
- * THE TREE'S `share/` HOLDS THE CA BUNDLE CODEX IS GIVEN, where the tree ships
- * one: chuggy's runtime does, and the worker image's npm tree does not.
+ * THE TREE'S `share/` HOLDS THE CA BUNDLE CODEX IS GIVEN.
  */
 
 import { dirname, join, resolve } from "node:path";

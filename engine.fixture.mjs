@@ -1,7 +1,8 @@
 /**
  * A container engine held in memory, answering the runner's argv with the
  * words docker 28 prints. A pull waits on whatever the suite hands it, so a
- * suite decides how long one takes and how it ends.
+ * suite decides how long one takes and how it ends, and so does a `run --rm`,
+ * which is how chuggy's runtime is copied into a volume.
  */
 
 import { readFileSync, writeSync } from "node:fs";
@@ -19,6 +20,13 @@ import { dirname } from "node:path";
  * @property {string} image
  * @property {string[]} [env] each `NAME=value`, as an inspection lists them
  * @property {number} [exitCode]
+ * @property {string[]} [volumes] each `--volume` it was run with
+ * @property {string[]} [command] what it was run with after its image
+ * @property {string} [entrypoint]
+ *
+ * @typedef {object} FakeVolume
+ * @property {Record<string, string>} labels
+ * @property {string} [filledFrom] the image a `run --rm` filled it from
  *
  * @typedef {object} FakeCall
  * @property {string[]} argv
@@ -69,6 +77,54 @@ function flagValues(argv, flag) {
   );
 }
 
+/**
+ * The flags of `run` that take no value of their own.
+ */
+const runSwitches = new Set(["-d", "--rm"]);
+
+/**
+ * A `run`'s image and what follows it, read past its flags as the engine
+ * reads them.
+ *
+ * @param {string[]} argv
+ */
+function runImage(argv) {
+  let index = 1;
+  while (index < argv.length && argv[index].startsWith("-"))
+    index += runSwitches.has(argv[index]) || argv[index].includes("=") ? 1 : 2;
+  return { image: argv[index] ?? "", command: argv.slice(index + 1) };
+}
+
+/**
+ * The named volumes among `--volume` values, by name, or only those an engine
+ * copies an image into.
+ *
+ * @param {string[]} mounts
+ */
+function namedVolumes(mounts, copied = false) {
+  return mounts.flatMap((volume) => {
+    const [name, , options = ""] = volume.split(":");
+    return volume.includes(":") &&
+      !name.startsWith("/") &&
+      !(copied && options.split(",").includes("nocopy"))
+      ? [name]
+      : [];
+  });
+}
+
+/**
+ * What docker 28 prints of a `run` whose entrypoint is not in its image, and
+ * the status its CLI answers it with.
+ *
+ * @param {string} entrypoint
+ */
+export function unstartedEntrypoint(entrypoint) {
+  return failed(
+    `docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: exec: "${entrypoint}": stat ${entrypoint}: no such file or directory: unknown`,
+    127,
+  );
+}
+
 /** @param {AbortSignal | undefined} signal */
 function aborted(signal) {
   return new Promise((_resolve, reject) => {
@@ -86,6 +142,15 @@ function fakeEngineState() {
     containers: new Map(),
     images: new Set(),
     networks: new Set(),
+    /** @type {Map<string, FakeVolume>} */
+    volumes: new Map(),
+    /**
+     * The images with no `/bin/sh`, whose container a `run` through it
+     * creates and never starts.
+     *
+     * @type {Set<string>}
+     */
+    shellless: new Set(),
     /** @type {FakeCall[]} */
     calls: [],
     unreachable: false,
@@ -114,6 +179,13 @@ function fakeEngineState() {
     contextHost: "unix:///var/run/docker.sock",
     nextId: 1,
     /**
+     * An answer a suite gives a call in the engine's place, or nothing to
+     * leave the call to the engine.
+     *
+     * @type {(call: FakeCall) => EngineAnswer | undefined}
+     */
+    intercept: () => undefined,
+    /**
      * How a pull ends; the default finds the image.
      *
      * @type {(image: string, call: FakeCall) => EngineAnswer | Promise<EngineAnswer>}
@@ -121,6 +193,20 @@ function fakeEngineState() {
     pull: (image) => {
       state.images.add(image);
       return answered();
+    },
+    /**
+     * How a `run --rm` that fills a volume ends; the default copies the image
+     * into each volume it mounts but uncopied, as an engine copies into an
+     * empty one.
+     *
+     * @type {(image: string, volumes: string[], call: FakeCall) => EngineAnswer | Promise<EngineAnswer>}
+     */
+    fill: (image, volumes) => {
+      for (const name of volumes) {
+        const volume = state.volumes.get(name);
+        if (volume !== undefined) volume.filledFrom = image;
+      }
+      return answered("v24.0.0\n");
     },
   };
   return state;
@@ -145,6 +231,18 @@ function found(state, reference) {
  */
 function run(state, call) {
   const { argv } = call;
+  const { image, command } = runImage(argv);
+  if (argv.includes("--rm"))
+    return state.images.has(image)
+      ? state.fill(
+          image,
+          namedVolumes(flagValues(argv, "--volume"), true),
+          call,
+        )
+      : failed(
+          `docker: Error response from daemon: No such image: ${image}`,
+          125,
+        );
   const [name] = flagValues(argv, "--name");
   call.envFile = readFileSync(flagValues(argv, "--env-file")[0], "utf8");
   const existing = state.containers.get(name);
@@ -160,20 +258,26 @@ function run(state, call) {
     }),
   );
   const id = `c${String(state.nextId++).padStart(63, "0")}`;
-  const image = argv.at(-1) ?? "";
   const env = [
     imagePath,
     ...call.envFile.split("\n").filter((line) => line.length > 0),
   ];
+  const [entrypoint] = flagValues(argv, "--entrypoint");
+  const unstarted = entrypoint === "/bin/sh" && state.shellless.has(image);
   state.containers.set(name, {
     id,
     name,
     labels,
-    status: "running",
+    status: unstarted ? "created" : "running",
     image,
     env,
-    exitCode: 0,
+    exitCode: unstarted ? 127 : 0,
+    volumes: flagValues(argv, "--volume"),
+    command,
+    entrypoint,
   });
+  if (unstarted)
+    return { ...unstartedEntrypoint(entrypoint), stdout: `${id}\n` };
   if (state.runInterrupted)
     return { code: -1, stdout: "", stderr: "", failed: "Interrupted" };
   return answered(`${id}\n`);
@@ -268,6 +372,38 @@ function networked(state, network, verb) {
 }
 
 /**
+ * `volume create`, which answers a name already made as made, and `volume rm`,
+ * which refuses one a container mounts.
+ *
+ * @param {FakeEngineState} state
+ * @param {FakeCall} call
+ */
+function volumed(state, call) {
+  const { argv } = call;
+  const name = argv.at(-1) ?? "";
+  if (argv[1] === "create") {
+    if (!state.volumes.has(name))
+      state.volumes.set(name, {
+        labels: Object.fromEntries(
+          flagValues(argv, "--label").map((label) => label.split("=")),
+        ),
+      });
+    return answered(`${name}\n`);
+  }
+  if (!state.volumes.has(name))
+    return failed(`Error response from daemon: get ${name}: no such volume`);
+  const user = [...state.containers.values()].find((container) =>
+    namedVolumes(container.volumes ?? []).includes(name),
+  );
+  if (user !== undefined)
+    return failed(
+      `Error response from daemon: remove ${name}: volume is in use - [${user.id}]`,
+    );
+  state.volumes.delete(name);
+  return answered(`${name}\n`);
+}
+
+/**
  * @param {FakeEngineState} state
  * @param {FakeCall} call
  * @returns {EngineAnswer | Promise<EngineAnswer>}
@@ -276,6 +412,8 @@ function answer(state, call) {
   const [verb, second] = call.argv;
   const last = call.argv.at(-1) ?? "";
   if (state.unreachable) return failed(unreachable);
+  const intercepted = state.intercept(call);
+  if (intercepted !== undefined) return intercepted;
   if (verb === "image")
     return state.images.has(last)
       ? answered("sha256:1\n")
@@ -314,6 +452,7 @@ function answer(state, call) {
       state.containers.delete(container.name);
     });
   if (verb === "network") return networked(state, last, second);
+  if (verb === "volume") return volumed(state, call);
   return failed(`unknown command: ${call.argv.join(" ")}`);
 }
 

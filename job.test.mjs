@@ -2,9 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  workerTaskVariable,
+  workerWorkspaceVariable,
+} from "@chuggy/worker-contract/workerEnvironment";
+
+import {
   jobEnvelope,
   jobEnvironmentAttempt,
   jobEnvironmentFile,
+  reservedJobVariables,
 } from "./job.mjs";
 
 const assignment = {
@@ -94,4 +100,16 @@ test("variables carrying no envelope the contract reads hold no attempt", () => 
       undefined,
       String(variables),
     );
+});
+
+/** Catches a variable the runner sets in a job left for a runner's environment to name, and so shadow. */
+test("each variable a job is handed by the runner or its core is reserved", () => {
+  assert.deepEqual(
+    reservedJobVariables.toSorted(),
+    [
+      workerTaskVariable,
+      "CLAUDE_CODE_OAUTH_TOKEN",
+      workerWorkspaceVariable,
+    ].toSorted(),
+  );
 });

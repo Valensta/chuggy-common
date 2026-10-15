@@ -1,12 +1,19 @@
 /**
- * Every stderr below is what docker 28.1 or podman 5.8 printed for the failure
- * it is filed under, copied from a run of each against a daemon, and a local
- * registry that challenged for credentials.
+ * Every stderr in `printed`, and each a pull test lists as refused, is what
+ * docker 28.1 or podman 5.8 printed for the failure it is filed under, copied
+ * from a run of each against a daemon, and a local registry that challenged
+ * for credentials. The rest are built on what those engines print, and crun's
+ * on the formats of its own source.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { engineFailure, engineFailureLine } from "./engineErrors.mjs";
+import {
+  engineCommandUnstarted,
+  engineFailure,
+  engineFailureLine,
+  enginePullRefused,
+} from "./engineErrors.mjs";
 
 const digest = `sha256:${"0".repeat(64)}`;
 
@@ -85,4 +92,77 @@ test("the line logged is the first naming an error, bounded", () => {
     engineFailureLine({ code: 7, stdout: "", stderr: "" }),
     "exit 7",
   );
+});
+
+/** A failed pull's answer, as the engine gives it. */
+const pullAnswer = (/** @type {string} */ stderr) => ({
+  code: 1,
+  stdout: "",
+  stderr: `${stderr}\n`,
+});
+
+test("a pull the registry refused the image to, or whose reference names none, is refused for good, and one that can pass is not", () => {
+  const refused = [
+    ...printed.Unauthorized,
+    "Error response from daemon: manifest for busybox:chuggy-c6-probe-absent not found: manifest unknown: manifest unknown",
+    printed.NotFound[3],
+    "Error response from daemon: pull access denied for kasofsk/chuggy-c6-probe-absent, repository does not exist or may require 'docker login': denied: requested access to the resource is denied",
+    ...printed.Other,
+    "invalid reference format: repository name (Case) must be lowercase",
+  ];
+  const passing = [
+    'Error response from daemon: Get "https://nosuch.invalid/v2/": dial tcp: lookup nosuch.invalid on 127.0.0.53:53: no such host',
+    'Error response from daemon: Get "http://localhost:5999/v2/": dial tcp 127.0.0.1:5999: connect: connection refused',
+    'Error response from daemon: Get "https://denied.example/v2/": dial tcp: lookup denied.example on 127.0.0.53:53: no such host',
+    'Error response from daemon: Get "https://registry.forbidden/v2/": dial tcp: lookup registry.forbidden on 127.0.0.53:53: no such host',
+    'Error response from daemon: Get "https://registry.example/v2/forbidden/manifests/1": net/http: TLS handshake timeout',
+  ];
+  for (const stderr of refused)
+    assert.ok(enginePullRefused(pullAnswer(stderr)), stderr);
+  for (const stderr of [...passing, ...printed.Unreachable])
+    assert.ok(!enginePullRefused(pullAnswer(stderr)), stderr);
+  assert.ok(
+    !enginePullRefused({
+      ...pullAnswer(printed.Unauthorized[0]),
+      code: -1,
+      failed: "Interrupted",
+    }),
+  );
+});
+
+test("a run whose command could not be started is read so only where the engine names that command", () => {
+  const runc = (/** @type {string} */ cause) =>
+    `docker: Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error during container init: ${cause}: unknown`;
+  const crun = (/** @type {string} */ cause) =>
+    `Error: crun: ${cause}: OCI runtime attempted to invoke a command that was not found`;
+  /** @type {[number, string][]} */
+  const unstarted = [
+    [127, runc('exec: "/bin/sh": stat /bin/sh: no such file or directory')],
+    [126, runc('exec: "/bin/sh": permission denied')],
+    [127, crun("executable file `/bin/sh` not found")],
+    [126, crun("the path `/bin/sh` exists but it is not executable")],
+  ];
+  /** @type {[number, string][]} */
+  const otherwise = [
+    [
+      127,
+      runc(
+        'error mounting "/opt/chuggy" to rootfs at "/opt/chuggy": no such file or directory',
+      ),
+    ],
+    [127, runc('exec: "/bin/bash": stat /bin/bash: no such file or directory')],
+    [126, crun("executable file `/bin/shell` not found")],
+    [125, runc('exec: "/bin/sh": stat /bin/sh: no such file or directory')],
+    [1, crun("executable file `/bin/sh` not found")],
+  ];
+  for (const [code, stderr] of unstarted)
+    assert.ok(
+      engineCommandUnstarted({ code, stdout: "", stderr }, "/bin/sh"),
+      stderr,
+    );
+  for (const [code, stderr] of otherwise)
+    assert.ok(
+      !engineCommandUnstarted({ code, stdout: "", stderr }, "/bin/sh"),
+      `${String(code)} ${stderr}`,
+    );
 });

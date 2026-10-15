@@ -8,7 +8,10 @@
  * schema.
  */
 
-import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
+import {
+  workerTaskVariable,
+  workerWorkspaceVariable,
+} from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
 /**
@@ -34,12 +37,15 @@ export const jobProviderCredentialFile =
   "/var/run/chuggy/credentials/claude-code";
 
 /**
- * The variables a workload's environment may not name: the envelope, and the
- * one the core sets from the mounted token, which a value here would shadow.
+ * The variables a workload's environment may not name: the envelope, the one
+ * the core sets from the mounted token, which a value here would shadow, and
+ * the workspace a job started through chuggy's runtime is checked at, which a
+ * value here would move off the one its envelope names.
  */
 export const reservedJobVariables = [
   workerTaskVariable,
   "CLAUDE_CODE_OAUTH_TOKEN",
+  workerWorkspaceVariable,
 ];
 
 /**

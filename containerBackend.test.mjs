@@ -8,11 +8,22 @@ import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 
 import {
+  workerImageFaults,
+  workerImageFaultStatuses,
+} from "@chuggy/worker-contract/workerEnvironment";
+
+import {
   checkedContainerBackendSettings,
   containerBackend,
+  containerImageFaultTexts,
   containerName,
+  pullFailureDwellMs,
 } from "./containerBackend.mjs";
-import { deferred, fakeEngine } from "./engine.fixture.mjs";
+import {
+  deferred,
+  fakeEngine,
+  unstartedEntrypoint,
+} from "./engine.fixture.mjs";
 import { jobEnvelope } from "./job.mjs";
 
 const pool = { tenant: "vteng", project: "chuggy", pool: "shame" };
@@ -1160,3 +1171,436 @@ function containerBackendSettingsChecked(identity) {
     }),
   );
 }
+
+const runtime = `registry.chuggy.example/runtime@sha256:${"c".repeat(64)}`;
+
+/** The job attempt `assignment()` holds, as an end names it. */
+const heldAttempt = {
+  assignment: "asg-1",
+  callbackUrl: "https://chuggy.example/worker",
+  bearer: "attempt-bearer-secret",
+};
+
+/** @param {string} stderr */
+const failedWith = (stderr, code = 1) => ({
+  code,
+  stdout: "",
+  stderr: `${stderr}\n`,
+});
+
+/**
+ * A job placed through chuggy's runtime, each image already here, run until
+ * its container is started or its placement has failed.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>} context
+ */
+async function placedThroughRuntime({ backend, state }) {
+  state.images.add(image);
+  state.images.add(runtime);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  return state.containers.get(containerName(pool, "asg-1"));
+}
+
+/**
+ * What the pool names once `held` has read every end.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>["backend"]} backend
+ */
+async function endsNamed(backend) {
+  await backend.held();
+  return backend.ended();
+}
+
+test("a job given a runtime starts through its own copy of it, mounted read-only, with the runtime's check as its command", async (t) => {
+  const context = await harness(t);
+  const { state } = context;
+  state.pull = (pulled) => {
+    state.images.add(pulled);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await context.backend.place(assignment({ runtime }), "Job");
+  await context.backend.settled();
+  const pulls = state.calls.filter((call) => call.argv[0] === "pull");
+  assert.deepEqual(
+    pulls.map((call) => call.argv.at(-1)),
+    [runtime, image],
+  );
+  const [volume, workspace, ...others] = state.volumes.keys();
+  assert.deepEqual(others, []);
+  const stem = `${containerName(pool, "asg-1")}-[0-9a-f]+`;
+  assert.match(volume, new RegExp(`^${stem}-runtime$`, "u"));
+  assert.match(workspace, new RegExp(`^${stem}-workspace$`, "u"));
+  const labels = {
+    "io.chuggy.pool": "vteng/chuggy/shame",
+    "io.chuggy.assignment": "asg-1",
+  };
+  assert.deepEqual(state.volumes.get(volume), { labels, filledFrom: runtime });
+  assert.deepEqual(state.volumes.get(workspace), { labels });
+  const container = state.containers.get(containerName(pool, "asg-1"));
+  assert.equal(container?.labels["io.chuggy.runtime"], volume);
+  assert.equal(container?.labels["io.chuggy.workspace"], workspace);
+  assert.ok(container?.volumes?.includes(`${volume}:/opt/chuggy:ro,nocopy`));
+  assert.ok(container?.volumes?.includes(`${workspace}:/workspace:nocopy`));
+  assert.equal(container?.entrypoint, "/bin/sh");
+  assert.deepEqual(container?.command, ["/opt/chuggy/check.sh"]);
+  const run = state.calls.find((call) => call.argv.includes("-d"));
+  assert.match(run?.envFile ?? "", /^CHUG_WORKER_WORKSPACE=\/workspace$/mu);
+  assert.deepEqual(await context.backend.held(), heldJobs("asg-1"));
+});
+
+test("a runtime job's workspace variable is the workspace its envelope names, whatever the runner's environment says", async (t) => {
+  const { backend, state } = await harness(t, {
+    environment: { CHUG_WORKER_WORKSPACE: "/elsewhere" },
+  });
+  state.images.add(image);
+  state.images.add(runtime);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  const run = state.calls.find((call) => call.argv.includes("-d"));
+  assert.deepEqual(
+    (run?.envFile ?? "")
+      .split("\n")
+      .filter((line) => line.startsWith("CHUG_WORKER_WORKSPACE=")),
+    ["CHUG_WORKER_WORKSPACE=/workspace"],
+  );
+});
+
+test("a job given no runtime, and a session whatever it is given, runs its image's own entrypoint with nothing of a runtime", async (t) => {
+  const { backend, state } = await harness(t);
+  state.images.add(image);
+  state.images.add(runtime);
+  await backend.place(assignment(), "Job");
+  await backend.place(assignment({ assignment: "asg-2", runtime }), "Session");
+  await backend.settled();
+  assert.deepEqual(verbs(state).sort(), ["image", "image", "run", "run"]);
+  assert.equal(state.volumes.size, 0);
+  for (const container of state.containers.values()) {
+    assert.equal(container.entrypoint, undefined);
+    assert.deepEqual(container.command, []);
+    assert.equal(container.labels["io.chuggy.runtime"], undefined);
+  }
+  for (const call of state.calls.filter(({ argv }) => argv[0] === "run"))
+    assert.doesNotMatch(call.envFile ?? "", /CHUG_WORKER_WORKSPACE/u);
+});
+
+test("every fault of the contract has its text, and each the runtime's check exits with refuses the job with it, its volume removed with its container", async (t) => {
+  assert.deepEqual(
+    Object.keys(containerImageFaultTexts).sort(),
+    [...workerImageFaults].sort(),
+  );
+  for (const [fault, status] of Object.entries(workerImageFaultStatuses)) {
+    const context = await harness(t);
+    const container = await placedThroughRuntime(context);
+    assert.ok(container !== undefined);
+    container.status = "exited";
+    container.exitCode = status;
+    assert.deepEqual(await endsNamed(context.backend), [
+      {
+        kind: "Job",
+        job: heldAttempt,
+        why: containerImageFaultTexts[
+          /** @type {keyof typeof containerImageFaultTexts} */ (fault)
+        ],
+        refusal: { fault },
+      },
+    ]);
+    assert.equal(context.state.containers.size, 0);
+    assert.equal(context.state.volumes.size, 0, fault);
+  }
+});
+
+test("a job started through a runtime that exited otherwise, or one started without that exited with a check's status, ended as any job does", async (t) => {
+  const through = await harness(t);
+  const container = await placedThroughRuntime(through);
+  assert.ok(container !== undefined);
+  container.status = "exited";
+  container.exitCode = 1;
+  assert.deepEqual(await endsNamed(through.backend), [
+    {
+      kind: "Job",
+      job: heldAttempt,
+      why: "its container exited with status 1",
+    },
+  ]);
+  assert.equal(through.state.volumes.size, 0);
+
+  const without = await harness(t);
+  without.state.images.add(image);
+  await without.backend.place(assignment(), "Job");
+  await without.backend.settled();
+  const [plain] = without.state.containers.values();
+  plain.status = "exited";
+  plain.exitCode = workerImageFaultStatuses.ImageLacksGit;
+  assert.deepEqual(await endsNamed(without.backend), [
+    {
+      kind: "Job",
+      job: heldAttempt,
+      why: `its container exited with status ${String(workerImageFaultStatuses.ImageLacksGit)}`,
+    },
+  ]);
+});
+
+test("a job whose image has no shell to start the runtime's check is refused ImageLacksShell, its container and volume removed", async (t) => {
+  const context = await harness(t);
+  context.state.shellless.add(image);
+  assert.equal(await placedThroughRuntime(context), undefined);
+  assert.equal(context.state.volumes.size, 0);
+  const said = unstartedEntrypoint("/bin/sh").stderr.trim();
+  assert.deepEqual(await endsNamed(context.backend), [
+    {
+      kind: "Job",
+      job: heldAttempt,
+      why: `${containerImageFaultTexts.ImageLacksShell} The engine said: ${said}`,
+      refusal: { fault: "ImageLacksShell" },
+    },
+  ]);
+});
+
+test("a run that answers as an unstarted shell does is no fault of a job given no runtime", async (t) => {
+  const { backend, state } = await harness(t);
+  state.images.add(image);
+  state.intercept = (call) =>
+    call.argv[0] === "run" ? unstartedEntrypoint("/bin/sh") : undefined;
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  const [ended] = await endsNamed(backend);
+  assert.equal(ended?.kind === "Job" && ended.refusal, undefined);
+  assert.match(
+    ended?.kind === "Job" ? ended.why : "",
+    /^its container was not started: its container could not be run: /u,
+  );
+});
+
+test("a job whose unstarted container could not be removed is left to the container's own end", async (t) => {
+  const context = await harness(t);
+  context.state.shellless.add(image);
+  context.state.intercept = (call) =>
+    call.argv[0] === "rm"
+      ? failedWith(
+          "Error response from daemon: removal of container is already in progress",
+        )
+      : undefined;
+  const container = await placedThroughRuntime(context);
+  assert.equal(container?.status, "created");
+  context.state.intercept = () => undefined;
+  assert.deepEqual(await endsNamed(context.backend), [
+    { kind: "Job", job: heldAttempt, why: "its container was left created" },
+  ]);
+  assert.equal(context.state.volumes.size, 0);
+});
+
+test("a runner that cannot get the runtime, or cannot copy it, refuses the job naming no fault, runs nothing and keeps no volume", async (t) => {
+  /** @type {[string, (state: Awaited<ReturnType<typeof harness>>["state"]) => void, RegExp][]} */
+  const cases = [
+    [
+      "pulled",
+      (state) => {
+        state.images.delete(runtime);
+        state.pull = () =>
+          failedWith(
+            `Error response from daemon: manifest for ${runtime} not found: manifest unknown: manifest unknown`,
+          );
+      },
+      /^this runner could not get chuggy's runtime \S+: the runtime could not be pulled: Error response from daemon: manifest for /u,
+    ],
+    [
+      "made",
+      (state) => {
+        state.intercept = (call) =>
+          call.argv[0] === "volume" && call.argv[1] === "create"
+            ? failedWith("Error response from daemon: no space left on device")
+            : undefined;
+      },
+      /^this runner could not copy chuggy's runtime \S+: its volume \S+-runtime could not be made: .*no space left/u,
+    ],
+    [
+      "filled",
+      (state) => {
+        state.fill = () =>
+          failedWith(
+            'docker: Error response from daemon: failed to create task for container: exec: "/opt/chuggy/bin/node": stat /opt/chuggy/bin/node: no such file or directory: unknown',
+            127,
+          );
+      },
+      /^this runner could not copy chuggy's runtime \S+: its volumes could not be filled: .*\/opt\/chuggy\/bin\/node/u,
+    ],
+  ];
+  for (const [what, arrange, why] of cases) {
+    const context = await harness(t);
+    context.state.images.add(image);
+    context.state.images.add(runtime);
+    arrange(context.state);
+    await context.backend.place(assignment({ runtime }), "Job");
+    await context.backend.settled();
+    assert.equal(context.state.containers.size, 0, what);
+    assert.equal(context.state.volumes.size, 0, what);
+    const ends = await endsNamed(context.backend);
+    assert.equal(ends.length, 1, what);
+    const [ended] = ends;
+    assert.ok(ended.kind === "Job");
+    assert.deepEqual(ended.refusal, {}, what);
+    assert.match(ended.why, why, what);
+    assert.match(context.log.join("\n"), /was refused: this runner could not/u);
+  }
+});
+
+test("a job's image the registry refused through a runtime is refused ImageUnpullable at once", async (t) => {
+  const { backend, state } = await harness(t);
+  state.images.add(runtime);
+  const said = `Error response from daemon: manifest for ${image} not found: manifest unknown: manifest unknown`;
+  state.pull = () => failedWith(said);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.equal(verbs(state).filter((verb) => verb === "pull").length, 1);
+  assert.deepEqual(await endsNamed(backend), [
+    {
+      kind: "Job",
+      job: heldAttempt,
+      why: `${containerImageFaultTexts.ImageUnpullable} The engine said: ${said}`,
+      refusal: { fault: "ImageUnpullable" },
+    },
+  ]);
+  assert.ok(!verbs(state).includes("volume"));
+});
+
+test("a job's image whose reference names none through a runtime is refused ImageUnpullable at its inspection, and one whose inspection failed otherwise fails as any placement does", async (t) => {
+  /** @type {[string, Record<string, unknown> | undefined][]} */
+  const cases = [
+    [
+      "Error response from daemon: invalid reference format: repository name (Upper) must be lowercase",
+      { fault: "ImageUnpullable" },
+    ],
+    ["Error response from daemon: i/o timeout", undefined],
+  ];
+  for (const [said, refusal] of cases) {
+    const { backend, state } = await harness(t);
+    state.images.add(runtime);
+    state.intercept = (call) =>
+      call.argv[0] === "image" && call.argv.at(-1) === image
+        ? failedWith(said)
+        : undefined;
+    await backend.place(assignment({ runtime }), "Job");
+    await backend.settled();
+    assert.ok(!verbs(state).includes("pull"), said);
+    const [ended] = await endsNamed(backend);
+    assert.ok(ended?.kind === "Job");
+    assert.deepEqual(ended.refusal, refusal, said);
+    assert.ok(ended.why.endsWith(said), ended.why);
+  }
+});
+
+test("a job's image whose pull can still pass is pulled again through a runtime, until it is here or the dwell since its placement has passed", async (t) => {
+  const said =
+    'Error response from daemon: Get "https://registry.chuggy.example/v2/": dial tcp: lookup registry.chuggy.example on 127.0.0.53:53: no such host';
+  const failing = await harness(t);
+  failing.state.images.add(runtime);
+  failing.state.pull = () => failedWith(said);
+  await failing.backend.place(assignment({ runtime }), "Job");
+  await failing.backend.settled();
+  assert.equal(failing.clock.nowMs - startMs, pullFailureDwellMs);
+  assert.equal(
+    verbs(failing.state).filter((verb) => verb === "pull").length,
+    pullFailureDwellMs / failing.settings.pullRetryMs + 1,
+  );
+  const [ended] = await endsNamed(failing.backend);
+  assert.ok(ended?.kind === "Job");
+  assert.deepEqual(ended.refusal, { fault: "ImageUnpullable" });
+
+  const passing = await harness(t);
+  passing.state.images.add(runtime);
+  let pulls = 0;
+  passing.state.pull = (pulled) => {
+    pulls += 1;
+    if (pulls < 3) return failedWith(said);
+    passing.state.images.add(pulled);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await passing.backend.place(assignment({ runtime }), "Job");
+  await passing.backend.settled();
+  assert.deepEqual(await passing.backend.held(), heldJobs("asg-1"));
+  assert.match(
+    passing.log.join("\n"),
+    /its image could not be pulled yet, and is pulled again: .*no such host/u,
+  );
+});
+
+test("a job's image whose engine could not be reached through a runtime fails as any placement does", async (t) => {
+  const { backend, state } = await harness(t);
+  state.images.add(runtime);
+  state.pull = () => ({
+    code: -1,
+    stdout: "",
+    stderr: "",
+    failed: /** @type {const} */ ("Interrupted"),
+  });
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  const [ended] = await endsNamed(backend);
+  assert.ok(ended?.kind === "Job");
+  assert.equal(ended.refusal, undefined);
+  assert.match(
+    ended.why,
+    /^its container was not started: its image could not be pulled/u,
+  );
+});
+
+test("a stop while the runtime is copied removes the copy and names no end", async (t) => {
+  const { backend, state, log } = await harness(t);
+  state.images.add(image);
+  state.images.add(runtime);
+  state.fill = () => new Promise(() => undefined);
+  await backend.place(assignment({ runtime }), "Job");
+  await setImmediate();
+  assert.equal(state.volumes.size, 2);
+  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  await backend.settled();
+  assert.equal(state.volumes.size, 0);
+  assert.ok(!state.calls.some((call) => call.argv.includes("-d")));
+  assert.deepEqual(await endsNamed(backend), []);
+  assert.match(log.at(-1) ?? "", /was stopped before it started$/u);
+});
+
+test("a placement that finds the job already running keeps that container's copy and removes its own", async (t) => {
+  const context = await harness(t);
+  const first = await placedThroughRuntime(context);
+  const kept = [
+    first?.labels["io.chuggy.runtime"],
+    first?.labels["io.chuggy.workspace"],
+  ];
+  await context.backend.place(assignment({ runtime }), "Job");
+  await context.backend.settled();
+  assert.match(context.log.at(-1) ?? "", /was already running$/u);
+  assert.deepEqual([...context.state.volumes.keys()], kept);
+  assert.equal(
+    context.state.calls.filter(
+      (call) => call.argv[0] === "volume" && call.argv[1] === "create",
+    ).length,
+    4,
+  );
+});
+
+test("each runtime volume the engine would not remove is logged by name, and the others are removed", async (t) => {
+  const context = await harness(t);
+  const container = await placedThroughRuntime(context);
+  assert.ok(container !== undefined);
+  container.status = "exited";
+  container.exitCode = 0;
+  const volume = container.labels["io.chuggy.runtime"];
+  const workspace = container.labels["io.chuggy.workspace"];
+  context.state.intercept = (call) =>
+    call.argv[0] === "volume" && call.argv.at(-1) === volume
+      ? failedWith(
+          "Error response from daemon: remove: device or resource busy",
+        )
+      : undefined;
+  await endsNamed(context.backend);
+  assert.ok(
+    context.log.some((line) =>
+      line.includes(`its volume ${volume} was not removed: `),
+    ),
+    context.log.join("\n"),
+  );
+  assert.deepEqual([...context.state.volumes.keys()], [volume]);
+  assert.ok(!context.state.volumes.has(workspace));
+});

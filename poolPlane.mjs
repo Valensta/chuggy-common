@@ -214,9 +214,11 @@ async function poolPlanePolled(
  * @param {AssignmentOutcome} outcome
  */
 function poolPlaneOutcomeBody(outcome) {
-  return outcome.outcome === "Refused"
-    ? JSON.stringify({ evidence: outcome.evidence })
-    : "{}";
+  if (outcome.outcome !== "Refused") return "{}";
+  const { evidence, fault } = outcome;
+  return JSON.stringify(
+    fault === undefined ? { evidence } : { evidence, fault },
+  );
 }
 
 /**

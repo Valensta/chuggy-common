@@ -10,17 +10,26 @@
  * room nor a job a session's, and a pool that names no session ceiling asks
  * for none. Each kind's end is reported to its own plane.
  *
+ * A JOB THE BACKEND REFUSED AFTER TAKING IT IS SETTLED REFUSED, not ended: its
+ * text is left on its attempt, which only a live attempt takes, and its
+ * assignment is then settled `Refused` on the pool's plane, naming the image's
+ * fault where the backend named one, so the attempt's execution is blocked
+ * rather than its run failed and retried.
+ *
  * Nothing is held between passes. What is running is read from the backend,
  * so a restarted loop reconciles the work its predecessor placed, and a
  * settlement is never retried because the next poll's `held` renews the lease.
  * A denial ends the run; an outage backs off and comes back.
  */
 
+import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
+
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolSessionAssignment} WorkerPoolSessionAssignment
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
  * @typedef {import("@chuggy/worker-contract/sessionPlane").SessionContainerEnd} SessionContainerEnd
+ * @typedef {import("@chuggy/worker-contract/workerEnvironment").WorkerImageFault} WorkerImageFault
  *
  * @typedef {"Job" | "Session"} WorkerPoolWorkloadKind
  * @typedef {{assignment: string, kind: WorkerPoolWorkloadKind}} WorkerPoolHeld
@@ -33,6 +42,10 @@
  * @property {"Job"} kind
  * @property {WorkerPoolAttempt} job
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
+ * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job rather than ran it, `why` being the refusal's evidence
+ *
+ * @typedef {object} WorkerPoolJobRefusal
+ * @property {WorkerImageFault} [fault] what the job's image lacks, where that is why
  *
  * @typedef {object} WorkerPoolSessionEnd a session whose container ended, which only the pool holding it sees
  * @property {"Session"} kind
@@ -61,6 +74,7 @@
  *
  * @typedef {object} WorkerPoolJobPlane `Refused` is an attempt no longer live, whose own report stands
  * @property {(ended: WorkerPoolJobEnd) => Promise<WorkerPoolEndAnswer>} end
+ * @property {(ended: WorkerPoolJobEnd) => Promise<void>} left leaves a refused job's text on its attempt, answering nothing, since the refusal is settled either way
  *
  * @typedef {object} WorkerPoolSessionPlane `Refused` is a session attempt no longer live, or one the plane refused to end
  * @property {(ended: WorkerPoolSessionEnd) => Promise<WorkerPoolEndAnswer>} end
@@ -244,14 +258,54 @@ async function workerPoolClientStopped(client, stop) {
 }
 
 /**
+ * A refusal's evidence, cut to what a settlement carries.
+ *
+ * @param {string} why
+ */
+function workerPoolClientEvidence(why) {
+  let evidence = "";
+  for (const point of why) {
+    if (evidence.length + point.length > workerPoolEvidenceCharsMax) break;
+    evidence += point;
+  }
+  return evidence;
+}
+
+/**
+ * Settles a job the backend refused: its text left first, then the refusal,
+ * under the pass's token. A refusal the plane did not take is left to the
+ * attempt's lease, as an end is.
+ *
  * @param {WorkerPoolClient} client
+ * @param {string} token
+ * @param {WorkerPoolJobEnd} ended
+ * @param {WorkerPoolJobRefusal} refusal
+ * @returns {Promise<WorkerPoolEndAnswer>}
+ */
+async function workerPoolClientRefused(client, token, ended, refusal) {
+  await client.jobs.left(ended);
+  const settled = await client.plane.settle(token, ended.job.assignment, {
+    outcome: "Refused",
+    evidence: workerPoolClientEvidence(ended.why),
+    ...(refusal.fault === undefined ? {} : { fault: refusal.fault }),
+  });
+  if (settled === "Stale") client.tokens.invalidate(token);
+  if (settled === "Settled") return "Ended";
+  return settled === "Lost" || settled === "Denied" ? "Refused" : "Unavailable";
+}
+
+/**
+ * @param {WorkerPoolClient} client
+ * @param {string} token
  * @param {WorkerPoolEnded} workload
  * @returns {Promise<WorkerPoolEndAnswer>}
  */
-function workerPoolClientEnd(client, workload) {
+function workerPoolClientEnd(client, token, workload) {
   switch (workload.kind) {
     case "Job":
-      return client.jobs.end(workload);
+      return workload.refusal === undefined
+        ? client.jobs.end(workload)
+        : workerPoolClientRefused(client, token, workload, workload.refusal);
     case "Session":
       return client.sessions.end(workload);
     default:
@@ -263,15 +317,17 @@ function workerPoolClientEnd(client, workload) {
 
 /**
  * Ends each attempt whose workload ended unreported, each on its own kind's
- * plane, counting the ends the plane took. One it did not take is left to its
- * lease.
+ * plane, and settles each job refused, counting the ends the planes took. One
+ * not taken is left to its lease.
  *
  * @param {WorkerPoolClient} client
+ * @param {string} token
  */
-async function workerPoolClientEnded(client) {
+async function workerPoolClientEnded(client, token) {
   let ended = 0;
   for (const workload of await client.backend.ended())
-    if ((await workerPoolClientEnd(client, workload)) === "Ended") ended += 1;
+    if ((await workerPoolClientEnd(client, token, workload)) === "Ended")
+      ended += 1;
   return ended;
 }
 
@@ -340,7 +396,7 @@ export async function workerPoolClientPass(client) {
   const minted = await workerPoolClientToken(client);
   if (!("token" in minted)) return minted;
   const held = await workerPoolClientHeld(client);
-  const ended = await workerPoolClientEnded(client);
+  const ended = await workerPoolClientEnded(client, minted.token);
   const polled = await client.plane.poll(
     minted.token,
     held.map(({ assignment }) => assignment),
