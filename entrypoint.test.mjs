@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -52,7 +59,7 @@ import {
   poolHeldSessionAnswer,
 } from "./envelope.fixture.mjs";
 import { keepWorkerLease } from "./lease.mjs";
-import { planeFetch, planes } from "./plane.fixture.mjs";
+import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { agentResultSchema } from "./result.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
@@ -857,6 +864,21 @@ async function workspaceNaming(references) {
   return workspace;
 }
 
+/** Catches a workspace that drops the images its bundle pins, or names some where it pins none. */
+test("a workspace carries the images its bundle pins, and none where it pins none", async () => {
+  const pinning = await workspaceNaming(() => [
+    briefImage.reference,
+    { ordinal: 4, kind: "ProjectArtifact", reference: "image/gif:two" },
+  ]);
+  const pinningNone = await workspaceNaming(() => []);
+
+  assert.deepEqual(pinning.images, [
+    briefImage.reference,
+    { ordinal: 4, kind: "ProjectArtifact", reference: "image/gif:two" },
+  ]);
+  assert.ok(!Object.hasOwn(pinningNone, "images"));
+});
+
 test("a bundle naming two bases is refused rather than either taken", async () => {
   await assert.rejects(
     workspaceNaming((base) => [
@@ -1350,6 +1372,109 @@ test("an agent's shell is handed no change base where the attempt knows none", a
 
   assert.equal(preparedWith.length, 1);
   assert.ok(!Object.hasOwn(preparedWith[0], workerChangeBaseVariable));
+});
+
+/** An image as a brief carries it: its bytes, and the reference its bundle pins it under. */
+const briefImage = {
+  bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7]),
+  reference: {
+    ordinal: 3,
+    kind: "ProjectArtifact",
+    reference: "image/png:one",
+  },
+};
+
+/**
+ * A stand-in agent ending its run with a failing verdict, so a work attempt it
+ * runs pushes nothing, and every task it was started on.
+ */
+function briefedAgent() {
+  const started = [];
+  const ended = JSON.stringify({
+    type: "result",
+    structured_output: { verdict: "Fail", summary: "ended" },
+  });
+  return {
+    started,
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async () => ({ environment: {}, arguments: [] }),
+      invocation: (begun) => {
+        started.push(begun);
+        return ["-c", 'printf "%s\\n" "$1"', "agent", ended];
+      },
+    },
+  };
+}
+
+/** The file a briefing names for `identity`, from the section its images end it with. */
+function briefedFile(text, identity) {
+  const line = text
+    .split("\n")
+    .find((candidate) => candidate.startsWith(`- ${identity}: `));
+  return line?.slice(`- ${identity}: `.length);
+}
+
+/**
+ * Catches an agent started on a briefing that names images it cannot read:
+ * none read before it starts, read without the attempt's bearer, kept outside
+ * the temporary directory, or its briefing not told where.
+ */
+test("an agent is started on its briefing told where each image was read to", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  podHolds(t, { TMPDIR: temporary });
+  const read = [];
+  const plane = planeFetch(planes.job, (route, request) => {
+    read.push(request.path);
+    return { status: 200, body: briefImage.bytes };
+  });
+  const { started, agent } = briefedAgent();
+  const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
+
+  await runWorkerTask({
+    task: briefed,
+    bearer: "the attempt's bearer",
+    images: [briefImage.reference],
+    request: overPlane(workerRequest, async (url, init) => {
+      assert.equal(init.headers.authorization, "Bearer the attempt's bearer");
+      return plane.fetch(url, init);
+    }),
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent,
+  });
+
+  assert.deepEqual(read, ["/v1/input/artifacts/image/png:one"]);
+  const [{ briefing }] = started;
+  assert.ok(briefing.text.startsWith("## Your role\nWork.\n\n"));
+  const file = briefedFile(briefing.text, "image/png:one");
+  assert.equal(dirname(dirname(file)), temporary);
+  assert.match(file, /\/chuggy-ticket-images-[^/]+\/1\.png$/u);
+  assert.deepEqual(await readFile(file), briefImage.bytes);
+});
+
+/** Catches a briefing changed, or a directory made, where the bundle pins no image. */
+test("an agent whose bundle pins no image is started on its briefing as written", async (t) => {
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  podHolds(t, { TMPDIR: temporary });
+  const { started, agent } = briefedAgent();
+  const briefed = { ...task, briefing: { text: "## Your role\nWork." } };
+
+  await runWorkerTask({
+    task: briefed,
+    bearer: "the attempt's bearer",
+    directory: process.cwd(),
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent,
+  });
+
+  assert.equal(started[0], briefed);
+  assert.deepEqual(await readdir(temporary), []);
 });
 
 /** Each artifact a finished run uploaded, in the order it was sent. */
@@ -2065,6 +2190,110 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
       await plane.close();
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+/** A plane serving one attempt `answer` as its task, an input bundle pinning `briefImage`, and that image. */
+function imagePlane(answer, remote, base) {
+  return servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return answer;
+      case "input": {
+        const input = inputAnswer(remote, base);
+        input.body.references.push(briefImage.reference);
+        return input;
+      }
+      case "inputArtifact":
+        return { status: 200, body: briefImage.bytes };
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "runTurns":
+        return { status: 200, body: { turnsRecorded: 0 } };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+}
+
+/**
+ * One attempt from an envelope over `plane`, in a temporary directory of its
+ * own, its agent `agent` and its credential mounted.
+ */
+async function imageAttempt(t, plane, directory, agent) {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-attempt-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const temporary = join(root, "temporary");
+  await mkdir(temporary);
+  podHolds(t, { TMPDIR: temporary });
+  const providerCredentialFile = join(root, "claude-code");
+  await writeFile(providerCredentialFile, `${secret}\n`);
+  const served = {
+    ...envelope,
+    callbackUrl: plane.url,
+    providerCredentialFile,
+  };
+  const { task: answered } = await envelopeTask(served);
+  await workerAttempt(envelopeLaunch(served, answered), {
+    minted: root,
+    write: async () => undefined,
+    clone: async () => directory,
+    ...(agent === undefined ? {} : { agent }),
+  });
+  return temporary;
+}
+
+/**
+ * Catches an attempt that starts its agent without reading the images its
+ * bundle pins, or reads them without its own bearer: the wiring from the
+ * workspace to the agent's run.
+ */
+test("an agent's attempt reads the images its bundle pins with its bearer before the agent starts", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const plane = await imagePlane(
+      {
+        status: 200,
+        body: workTaskAnswerSchema.parse({
+          ...fetchedAnswer,
+          authority: {
+            ...fetchedAnswer.authority,
+            credentials: ["forge", claudeAgent.credential],
+          },
+        }),
+      },
+      remote,
+      base,
+    );
+    t.after(() => plane.close());
+    const { started, agent } = briefedAgent();
+
+    const temporary = await imageAttempt(t, plane, directory, agent);
+
+    const reads = plane.asked.filter(({ route }) => route === "inputArtifact");
+    assert.deepEqual(reads, [
+      { route: "inputArtifact", authorization: `Bearer ${envelope.bearer}` },
+    ]);
+    const file = briefedFile(started[0].briefing.text, "image/png:one");
+    assert.equal(dirname(dirname(file)), temporary);
+    assert.deepEqual(await readFile(file), briefImage.bytes);
+  });
+});
+
+/** Catches a check stage reading images nothing in it is briefed with. */
+test("a commanded attempt never reads the images its bundle pins", async (t) => {
+  await inCheckout(async ({ remote, directory, base }) => {
+    const plane = await imagePlane(commandedTask(["true"]), remote, base);
+    t.after(() => plane.close());
+
+    await imageAttempt(t, plane, directory);
+
+    assert.ok(plane.asked.some(({ route }) => route === "report"));
+    assert.ok(!plane.asked.some(({ route }) => route === "inputArtifact"));
   });
 });
 

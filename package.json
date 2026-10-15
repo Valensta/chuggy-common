@@ -69,6 +69,7 @@
     "sessionTransport.mjs",
     "snapshot.mjs",
     "source.mjs",
+    "ticketImages.mjs",
     "toolListing.mjs",
     "toolProbe.mjs",
     "transcriptPage.mjs",
