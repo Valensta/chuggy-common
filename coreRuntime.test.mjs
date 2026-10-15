@@ -18,6 +18,7 @@ test("a core where chuggy's worker image copies it finds the agents npm installe
       askpass: "/usr/local/lib/chuggy/git-askpass.sh",
       claude: "/usr/local/bin/claude",
       codex: "/usr/local/bin/codex",
+      certificates: "/usr/local/share/ca-certificates.crt",
     },
   );
 });
@@ -30,6 +31,7 @@ test("a core in chuggy's runtime finds the agents in the runtime's own bin", () 
       askpass: "/opt/chuggy/lib/chuggy/git-askpass.sh",
       claude: "/opt/chuggy/bin/claude",
       codex: "/opt/chuggy/bin/codex",
+      certificates: "/opt/chuggy/share/ca-certificates.crt",
     },
   );
 });
@@ -47,4 +49,9 @@ test("this core's askpass is the one shipped beside its modules", async () => {
 test("each agent is spawned by its path in the runtime", () => {
   assert.equal(claudeAgent.executable, coreRuntime.claude);
   assert.equal(codexAgent.executable, coreRuntime.codex);
+});
+
+/** Catches the runtime's CA bundle handed to Claude Code, which verifies its API against its own roots. */
+test("Claude Code is given no CA bundle", () => {
+  assert.equal(claudeAgent.prepareEnvironment, undefined);
 });

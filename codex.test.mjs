@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL, URL } from "node:url";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 
@@ -18,6 +26,7 @@ import {
   codexResult,
   codexShellArguments,
   prepareCodexCredential,
+  prepareCodexEnvironment,
   prepareCodexShell,
 } from "./codex.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
@@ -343,4 +352,76 @@ test("a Codex run's shell is prepared by arguments alone", async () => {
     arguments: codexShellArguments(handed),
   });
   assert.equal(codexAgent.prepareShell, prepareCodexShell);
+});
+
+/** A CA bundle written under a directory of its own, removed when `t` ends. */
+async function shippedBundle(t) {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-codex-ca-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bundle = join(directory, "ca-certificates.crt");
+  await writeFile(bundle, "-----BEGIN CERTIFICATE-----\n");
+  return bundle;
+}
+
+/** Catches Codex left without the runtime's bundle in an image that names none. */
+test("a Codex run is given the bundle its runtime ships where its environment names none", async (t) => {
+  const bundle = await shippedBundle(t);
+
+  assert.deepEqual(
+    await prepareCodexEnvironment({ PATH: "/usr/bin", HOME: "/home" }, bundle),
+    { CODEX_CA_CERTIFICATE: bundle },
+  );
+});
+
+/** Catches a bundle an image names for its own CA replaced by the runtime's. */
+test("a Codex run keeps the bundle its environment names", async (t) => {
+  const bundle = await shippedBundle(t);
+
+  for (const name of ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"])
+    assert.deepEqual(
+      await prepareCodexEnvironment({ [name]: "/image/ca.pem" }, bundle),
+      {},
+      name,
+    );
+});
+
+/** Catches Codex pointed at a bundle that is not there, which it refuses to start a client on. */
+test("a Codex run is given no bundle where its runtime ships none", async (t) => {
+  const bundle = await shippedBundle(t);
+
+  assert.deepEqual(
+    await prepareCodexEnvironment({}, join(dirname(bundle), "absent.crt")),
+    {},
+  );
+});
+
+/**
+ * Catches a Codex run given a bundle other than the one in the tree its core
+ * sits in: the module and the derivation it imports, copied into a tree as a
+ * runtime holds them, beside that tree's bundle. The result reader it also
+ * imports is stood in for, since it reaches packages the tree does not hold.
+ */
+test("a Codex run is given the bundle in its own core's tree", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-codex-tree-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const core = join(root, "lib", "chuggy");
+  await mkdir(core, { recursive: true });
+  await mkdir(join(root, "share"));
+  for (const name of ["codex.mjs", "coreRuntime.mjs"])
+    await copyFile(
+      fileURLToPath(new URL(name, import.meta.url)),
+      join(core, name),
+    );
+  await writeFile(
+    join(core, "result.mjs"),
+    "export const agentResult = () => undefined;\n",
+  );
+  const bundle = join(root, "share", "ca-certificates.crt");
+  await writeFile(bundle, "-----BEGIN CERTIFICATE-----\n");
+  const copied = await import(pathToFileURL(join(core, "codex.mjs")).href);
+
+  assert.deepEqual(await copied.codexAgent.prepareEnvironment({}), {
+    CODEX_CA_CERTIFICATE: bundle,
+  });
+  assert.equal(codexAgent.prepareEnvironment, prepareCodexEnvironment);
 });

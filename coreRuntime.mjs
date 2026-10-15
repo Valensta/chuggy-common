@@ -9,19 +9,23 @@
  *
  * THAT `bin/` IS NEVER PUT ON PATH. In the runtime it holds chuggy's own node,
  * which would then be the node a project's checks and its agent's shell run.
+ *
+ * THE TREE'S `share/` HOLDS THE CA BUNDLE CODEX IS GIVEN, where the tree ships
+ * one: chuggy's runtime does, and the worker image's npm tree does not.
  */
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The askpass and the agents' binaries of a core whose module is at `moduleUrl`. */
+/** The askpass, the agents' binaries and the CA bundle of a core whose module is at `moduleUrl`. */
 export function coreRuntimePaths(moduleUrl) {
   const core = dirname(fileURLToPath(moduleUrl));
-  const bin = resolve(core, "..", "..", "bin");
+  const tree = resolve(core, "..", "..");
   return {
     askpass: join(core, "git-askpass.sh"),
-    claude: join(bin, "claude"),
-    codex: join(bin, "codex"),
+    claude: join(tree, "bin", "claude"),
+    codex: join(tree, "bin", "codex"),
+    certificates: join(tree, "share", "ca-certificates.crt"),
   };
 }
 

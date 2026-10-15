@@ -1380,6 +1380,44 @@ test("an agent's shell is handed no change base where the attempt knows none", a
   assert.ok(!Object.hasOwn(preparedWith[0], workerChangeBaseVariable));
 });
 
+/**
+ * Catches an agent's process started without what the agent adds to its
+ * environment, or the agent asked what to add on less than the whole of it:
+ * the pod's, its credential's and its shell's.
+ */
+test("an agent's process is started with what the agent adds to the whole of its environment", async (t) => {
+  podHolds(t, { CHUG_SUITE_POD: "pod" });
+  const preparedWith = [];
+  const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s"}}\\n' "$CHUG_SUITE_ADDED"`;
+
+  const run = await runWorkerTask({
+    task,
+    directory: process.cwd(),
+    agentEnvironment: { CHUG_SUITE_CREDENTIAL: "credential" },
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async () => ({
+        environment: { CHUG_SUITE_SHELL: "shell" },
+        arguments: [],
+      }),
+      prepareEnvironment: async (environment) => {
+        preparedWith.push(environment);
+        return { CHUG_SUITE_ADDED: "added" };
+      },
+      invocation: () => ["-c", ended],
+    },
+  });
+
+  assert.equal(run.result.summary, "added");
+  assert.equal(preparedWith.length, 1);
+  assert.equal(preparedWith[0].CHUG_SUITE_POD, "pod");
+  assert.equal(preparedWith[0].CHUG_SUITE_CREDENTIAL, "credential");
+  assert.equal(preparedWith[0].CHUG_SUITE_SHELL, "shell");
+  assert.ok(!Object.hasOwn(process.env, "CHUG_SUITE_ADDED"));
+});
+
 /** An image as a brief carries it: its bytes, and the reference its bundle pins it under. */
 const briefImage = {
   bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7]),
