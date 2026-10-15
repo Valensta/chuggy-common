@@ -2,12 +2,14 @@
  * The images a ticket's brief carries, read for its agent before the agent
  * starts.
  *
- * THE BEARER STAYS IN THIS PROCESS. The plane serves a brief's image only to
+ * THE AGENT IS NOT HANDED THE BEARER. The plane serves a brief's image only to
  * the attempt's own bearer, and the agent's shell runs the project's code, so
- * the agent is never handed the bearer to read an image with. Each image its
- * input bundle pins is read here instead, held to the digest the bundle pinned
- * it under, and written to a file of its own; the agent's briefing is told
- * which file holds which image.
+ * the agent's environment carries no bearer and its briefing names nowhere one
+ * is kept. Nothing here keeps the bearer from a process of this user's that
+ * goes looking for it. Each image its input bundle pins is read here instead,
+ * held to the digest the bundle pinned it under, and written to a file of its
+ * own, so the agent opens a file where it would otherwise need an HTTP client;
+ * its briefing is told which file holds which image.
  *
  * A FILE IS NAMED FOR WHAT ITS BYTES ARE, so an agent's reader of images takes
  * it for one. The identity the plane names an image by is opaque here, so the
@@ -127,7 +129,7 @@ export function ticketImagesBriefed(task, images) {
   if (images.length === 0) return task;
   const section = [
     "## Images for this ticket, as files",
-    "Each image this briefing names is already read into a file, since this run holds no bearer to read it from the plane with; open the file instead.",
+    "Each image this briefing names is already read into a file, since this run is not handed the bearer to read it from the plane with; open the file instead.",
     ...images.map(({ identity, file }) => `- ${identity}: ${file}`),
   ].join("\n");
   return {

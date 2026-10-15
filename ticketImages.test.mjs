@@ -234,7 +234,7 @@ test("a briefing ends naming the file each image was read into", () => {
           "Work.",
           "",
           "## Images for this ticket, as files",
-          "Each image this briefing names is already read into a file, since this run holds no bearer to read it from the plane with; open the file instead.",
+          "Each image this briefing names is already read into a file, since this run is not handed the bearer to read it from the plane with; open the file instead.",
           "- image/png:one: /tmp/images/1.png",
           "- image/gif:two: /tmp/images/2.gif",
         ].join("\n"),
