@@ -13,7 +13,7 @@
  *
  * A GIT TOO OLD TO READ THAT CONFIGURATION IS WARNED OF, once, on this
  * process's stderr: every read is then absent, and nothing else would say so.
- * The job runs on as it would have without reads.
+ * The job runs on without them.
  *
  * ONLY ANOTHER REPOSITORY IS ASKED FOR HERE. The plane answers the job's own
  * repository with the job's own credential, a work attempt's push among it, so
@@ -66,7 +66,7 @@ const projectReadsCloneSuffix = ".git";
 /** The schemes a forge is reached by, over which git's credential protocol is the same. */
 const projectReadsSchemes = ["https:", "http:"];
 
-/** The first git release, as its major and minor, that reads configuration entries from its environment. */
+/** The first git release, as its major and minor, that reads `GIT_CONFIG_COUNT`'s entries from its environment. */
 const projectReadsGitFirst = [2, 31];
 
 /** That release as a person reads it. */
@@ -89,7 +89,7 @@ export function projectReadsGitTooOld(printed) {
 
 /** The warning a job whose git is `version` is given. */
 export function projectReadsGitWarning(version) {
-  return `this image's git ${version} reads no configuration from its environment, so the project's other repositories and ssh submodule URLs are not available to it; use an image with git ${projectReadsGitFirstText} or later`;
+  return `this image's git ${version} predates GIT_CONFIG_COUNT, so the project's other repositories and ssh submodule URLs are not available to it; use an image with git ${projectReadsGitFirstText} or later`;
 }
 
 /** Warns, by `warn`, where the git `gitVersion` answers for is too old to read the configuration; nothing where it cannot be asked. */
