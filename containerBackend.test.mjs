@@ -925,7 +925,8 @@ test("a job's deadline is the assignment's capped at the runner's, and a session
 });
 
 /**
- * The argv a `run` was made with and the envelope its env file carried.
+ * The argv a `run` was made with, its env file's text and the envelope that
+ * text carried.
  *
  * @param {ReturnType<typeof fakeEngine>["state"]} state
  * @param {string} assignmentId
@@ -936,9 +937,11 @@ function ranWith(state, assignmentId) {
       call.argv[0] === "run" &&
       call.argv.includes(`io.chuggy.assignment=${assignmentId}`),
   );
-  const [task] = (run?.envFile ?? "").split("\n");
+  const envFile = run?.envFile ?? "";
+  const [task] = envFile.split("\n");
   return {
     argv: run?.argv ?? [],
+    envFile,
     envelope: JSON.parse(task.replace(/^CHUG_WORKER_TASK=/u, "")),
   };
 }
@@ -976,6 +979,111 @@ test("a session's container is run as a job's is, labelled a session, its envelo
     timeoutSecsMax: 3600,
   });
   assert.equal(job.envelope.timeoutSecsMax, 7200);
+});
+
+/**
+ * A run's argv without its env file's path, which is its placement's own.
+ *
+ * @param {string[]} argv
+ */
+const envFileUnnamed = (argv) =>
+  argv.filter((_, index) => argv[index - 1] !== "--env-file");
+
+/**
+ * Checks that a backend whose runner hands its jobs this machine's engine
+ * through `socket` runs a job as one handed none is run, with the socket's
+ * mount and then `group` after its token file's mount and `variables` after
+ * its environment, and runs a session exactly as one is run handed none.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {"docker" | "podman"} engine
+ * @param {import("./engineArgv.mjs").EngineSocket} socket
+ * @param {string[]} group
+ * @param {string} variables the env file's lines after the runner's environment
+ */
+async function assertJobsHandedEngineSocket(
+  t,
+  engine,
+  socket,
+  group,
+  variables,
+) {
+  const without = await harness(t, { engine });
+  const handed = await harness(t, {
+    engine,
+    tokenFile: without.settings.tokenFile,
+    engineSocket: socket,
+  });
+  for (const { backend, state } of [without, handed]) {
+    state.images.add(image);
+    await backend.place(assignment(), "Job");
+    await backend.place(assignment({ assignment: "ses-1" }), "Session");
+    await backend.settled();
+  }
+  const job = ranWith(without.state, "asg-1");
+  const tmpfs = job.argv.indexOf("--tmpfs");
+  const handedJob = ranWith(handed.state, "asg-1");
+  assert.deepEqual(
+    envFileUnnamed(handedJob.argv),
+    envFileUnnamed([
+      ...job.argv.slice(0, tmpfs),
+      "--mount",
+      `type=bind,source=${socket.path},target=/var/run/docker.sock,readonly`,
+      ...group,
+      ...job.argv.slice(tmpfs),
+    ]),
+  );
+  assert.equal(handedJob.envFile, `${job.envFile}${variables}`);
+  const session = ranWith(without.state, "ses-1");
+  const handedSession = ranWith(handed.state, "ses-1");
+  assert.deepEqual(
+    envFileUnnamed(handedSession.argv),
+    envFileUnnamed(session.argv),
+  );
+  assert.equal(handedSession.envFile, session.envFile);
+}
+
+test("a docker job is handed the engine's socket read-only, the socket's group, and where the socket is in its container and on this machine, and a session is handed none of it", async (t) => {
+  await assertJobsHandedEngineSocket(
+    t,
+    "docker",
+    { path: "/var/run/docker.sock", gid: 125 },
+    ["--group-add", "125"],
+    "DOCKER_HOST=unix:///var/run/docker.sock\nTESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock\n",
+  );
+});
+
+test("a podman job is handed the engine's socket read-only with no group, where the socket is in its container and on this machine, and where what it starts is reached, and a session is handed none of it", async (t) => {
+  await assertJobsHandedEngineSocket(
+    t,
+    "podman",
+    { path: "/run/user/1000/podman/podman.sock", gid: 1000 },
+    [],
+    "DOCKER_HOST=unix:///var/run/docker.sock\nTESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/run/user/1000/podman/podman.sock\nTESTCONTAINERS_HOST_OVERRIDE=host.containers.internal\n",
+  );
+});
+
+test("a job's variables of the engine are the backend's, whatever the runner's environment says", async (t) => {
+  const { backend, state } = await harness(t, {
+    environment: {
+      DOCKER_HOST: "tcp://elsewhere:2375",
+      TESTCONTAINERS_HOST_OVERRIDE: "elsewhere",
+    },
+    engineSocket: { path: "/run/user/1000/podman/podman.sock", gid: 1000 },
+  });
+  state.images.add(image);
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.deepEqual(
+    ranWith(state, "asg-1")
+      .envFile.split("\n")
+      .filter((line) => /^(DOCKER|TESTCONTAINERS)_/u.test(line)),
+    [
+      "DOCKER_HOST=unix:///var/run/docker.sock",
+      "TESTCONTAINERS_HOST_OVERRIDE=host.containers.internal",
+      "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/run/user/1000/podman/podman.sock",
+    ],
+  );
 });
 
 test("held and ended name each workload by the kind it was placed as, and a container labelled with none as a job", async (t) => {

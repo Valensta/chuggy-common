@@ -5,7 +5,8 @@
  * through the envelope and learns there which kind it runs. The envelope is
  * checked against the contract's own schema, so no workload starts with one
  * its core would refuse, and is read back from a container under the same
- * schema.
+ * schema. A job its runner hands this machine's container engine is also
+ * given the engine's socket, and told where it is.
  */
 
 import {
@@ -35,6 +36,44 @@ export const jobWorkspace = "/workspace";
 /** Where the Claude token file is mounted, read-only. */
 export const jobProviderCredentialFile =
   "/var/run/chuggy/credentials/claude-code";
+
+/**
+ * Where a job handed this machine's container engine finds its socket, which
+ * is where docker's clients and testcontainers look for one.
+ */
+export const jobEngineSocket = "/var/run/docker.sock";
+
+/**
+ * What a job handed this machine's container engine is told of it: the
+ * socket docker's clients reach it at, and for testcontainers the socket's
+ * path on this machine, which the reaper container it starts beside the job
+ * mounts the socket from. A port podman publishes is reached from a job only
+ * at `host.containers.internal`, so on podman testcontainers is told to reach
+ * what it starts there.
+ *
+ * @param {import("./engineArgv.mjs").EngineName} engine
+ * @param {string} socketPath the socket's path on this machine
+ * @returns {Record<string, string>}
+ */
+export function jobEngineSocketEnvironment(engine, socketPath) {
+  return {
+    DOCKER_HOST: `unix://${jobEngineSocket}`,
+    TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: socketPath,
+    ...(engine === "podman"
+      ? { TESTCONTAINERS_HOST_OVERRIDE: "host.containers.internal" }
+      : {}),
+  };
+}
+
+/**
+ * The variables `jobEngineSocketEnvironment` sets on either engine, which a
+ * workload's environment may not name while its runner hands jobs the engine.
+ */
+export const jobEngineSocketVariables = [
+  "DOCKER_HOST",
+  "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE",
+  "TESTCONTAINERS_HOST_OVERRIDE",
+];
 
 /**
  * The variables a workload's environment may not name: the envelope, the one

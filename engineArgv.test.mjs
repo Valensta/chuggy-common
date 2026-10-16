@@ -7,6 +7,7 @@ import {
   forcedRemoveArgv,
   imageInspectArgv,
   podmanRemoteArgv,
+  podmanSocketArgv,
   podmanVersionArgv,
   inspectArgv,
   killArgv,
@@ -98,6 +99,52 @@ test("podman runs a job as the image's user, mapped onto the one running podman"
     "/var/run/chuggy/minted:rw,nosuid,nodev,noexec,size=1m,mode=0700,U",
     ...runTail,
   ]);
+});
+
+/**
+ * Checks that a job handed this machine's engine through `socket` is run as
+ * one handed none, and as one whose `engineSocket` is unset, with the socket
+ * mounted read-only after the token file's mount and then `group`.
+ *
+ * @param {import("./engineArgv.mjs").EngineName} engine
+ * @param {import("./engineArgv.mjs").EngineSocket} socket
+ * @param {string[]} group
+ */
+function assertHandedEngineSocket(engine, socket, group) {
+  const plain = runArgv(engine, job);
+  assert.deepEqual(runArgv(engine, { ...job, engineSocket: undefined }), plain);
+  const tmpfs = plain.indexOf("--tmpfs");
+  assert.deepEqual(runArgv(engine, { ...job, engineSocket: socket }), [
+    ...plain.slice(0, tmpfs),
+    "--mount",
+    `type=bind,source=${socket.path},target=/var/run/docker.sock,readonly`,
+    ...group,
+    ...plain.slice(tmpfs),
+  ]);
+}
+
+test("docker mounts a job's engine socket read-only where docker's clients look, and adds the job to the socket's group", () => {
+  assertHandedEngineSocket(
+    "docker",
+    { path: "/var/run/docker.sock", gid: 125 },
+    ["--group-add", "125"],
+  );
+});
+
+test("docker adds a job to no group for a socket of root's group", () => {
+  assertHandedEngineSocket(
+    "docker",
+    { path: "/var/run/docker.sock", gid: 0 },
+    [],
+  );
+});
+
+test("podman mounts a job's engine socket read-only where docker's clients look, and adds the job to no group, since keep-id makes the job's user the socket's owner", () => {
+  assertHandedEngineSocket(
+    "podman",
+    { path: "/run/user/1000/podman/podman.sock", gid: 1000 },
+    [],
+  );
 });
 
 const runtime = `registry.chuggy.example/runtime@sha256:${"b".repeat(64)}`;
@@ -274,6 +321,7 @@ test("every other call is handed to either engine as this argv", () => {
       dockerContextArgv(),
       podmanVersionArgv(),
       podmanRemoteArgv(),
+      podmanSocketArgv(),
     ],
     [
       ["image", "inspect", "--format", "{{.Id}}", image],
@@ -305,6 +353,11 @@ test("every other call is handed to either engine as this argv", () => {
       ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"],
       ["version", "--format", "{{.Client.Version}}"],
       ["info", "--format", "{{.Host.ServiceIsRemote}}"],
+      [
+        "info",
+        "--format",
+        "{{.Host.RemoteSocket.Path}} {{.Host.RemoteSocket.Exists}}",
+      ],
     ],
   );
 });
