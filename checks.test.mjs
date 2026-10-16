@@ -377,8 +377,36 @@ test("an attempt's git entries follow the pod's own, which are named again", () 
     GIT_CONFIG_VALUE_1: attemptGit[0][1],
     GIT_CONFIG_KEY_2: attemptGit[1][0],
     GIT_CONFIG_VALUE_2: attemptGit[1][1],
+    CARGO_NET_GIT_FETCH_WITH_CLI: "true",
   });
   assert.deepEqual(workerGitEnvironment(pod, []), {});
+});
+
+/**
+ * Catches Cargo left to fetch a git dependency through libgit2, which reads
+ * none of the attempt's git configuration, so a dependency on another
+ * repository the project binds is fetched with no credential; and the pod's
+ * own say on it overridden.
+ */
+test("Cargo fetches through git where the attempt configures it, unless the pod says otherwise", () => {
+  assert.equal(
+    workerStageEnvironment({ PATH: "/bin" }, { git: attemptGit })
+      .CARGO_NET_GIT_FETCH_WITH_CLI,
+    "true",
+  );
+  assert.equal(
+    workerStageEnvironment(
+      { PATH: "/bin", CARGO_NET_GIT_FETCH_WITH_CLI: "false" },
+      { git: attemptGit },
+    ).CARGO_NET_GIT_FETCH_WITH_CLI,
+    "false",
+  );
+  assert.ok(
+    !Object.hasOwn(
+      workerStageEnvironment({ PATH: "/bin" }),
+      "CARGO_NET_GIT_FETCH_WITH_CLI",
+    ),
+  );
 });
 
 /**

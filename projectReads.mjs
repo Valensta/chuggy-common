@@ -11,13 +11,20 @@
  * nothing git runs holds the bearer. A job whose repository is named by no
  * HTTP URL has no forge, and configures nothing.
  *
+ * A GIT TOO OLD TO READ THAT CONFIGURATION IS WARNED OF, once, on this
+ * process's stderr: every read is then absent, and nothing else would say so.
+ * The job runs on as it would have without reads.
+ *
  * ONLY ANOTHER REPOSITORY IS ASKED FOR HERE. The plane answers the job's own
  * repository with the job's own credential, a work attempt's push among it, so
  * that name is never asked for: git reaches the job's own repository with the
  * askpass its clone and its push present, and with nothing anywhere else. Any
  * other the plane mints a read where the project binds it and nothing where it
- * does not, and nothing is answered nothing: git goes on to whatever else it
- * holds, and the launcher's mount is never presented to another repository.
+ * does not, and where it mints nothing the cache client answers git nothing:
+ * git goes on to whatever else it holds, and outside the push the attempt
+ * hands it nothing more. A hook the push runs holds the push's askpass, so a
+ * git it runs can present the job's own credential to another repository, as
+ * any hook's git could before reads were served.
  *
  * A REPOSITORY IS ASKED FOR BY ITS CLONE URL, which is what a binding is named
  * by: the forge's origin, the path git names, and `.git` where that path ends
@@ -58,6 +65,45 @@ const projectReadsCloneSuffix = ".git";
 
 /** The schemes a forge is reached by, over which git's credential protocol is the same. */
 const projectReadsSchemes = ["https:", "http:"];
+
+/** The first git release, as its major and minor, that reads configuration entries from its environment. */
+const projectReadsGitFirst = [2, 31];
+
+/** That release as a person reads it. */
+const projectReadsGitFirstText = projectReadsGitFirst.join(".");
+
+/**
+ * The version `git --version` printed, where it names one older than
+ * `projectReadsGitFirst`; nothing where it is that release or later, or names
+ * no version that can be read.
+ */
+export function projectReadsGitTooOld(printed) {
+  const match = /^git version ((\d+)\.(\d+)\S*)/u.exec(printed.trim());
+  if (match === null) return undefined;
+  const [major, minor] = [Number(match[2]), Number(match[3])];
+  const [firstMajor, firstMinor] = projectReadsGitFirst;
+  return major < firstMajor || (major === firstMajor && minor < firstMinor)
+    ? match[1]
+    : undefined;
+}
+
+/** The warning a job whose git is `version` is given. */
+export function projectReadsGitWarning(version) {
+  return `this image's git ${version} reads no configuration from its environment, so the project's other repositories and ssh submodule URLs are not available to it; use an image with git ${projectReadsGitFirstText} or later`;
+}
+
+/** Warns, by `warn`, where the git `gitVersion` answers for is too old to read the configuration; nothing where it cannot be asked. */
+async function projectReadsGitChecked(gitVersion, warn) {
+  const asked = gitVersion();
+  let printed;
+  try {
+    printed = await asked;
+  } catch {
+    return;
+  }
+  const version = projectReadsGitTooOld(printed);
+  if (version !== undefined) warn(projectReadsGitWarning(version));
+}
 
 /**
  * The forge `repositoryId` is bound at, its origin and its host name, or
@@ -178,7 +224,8 @@ function projectReadsListening(server, socket) {
  * The reads served under `directory` for a job whose own repository is
  * `repositoryId`, and `git`, the entries that send every git the attempt runs
  * to them. `mint(repository)` is the plane's answer for another repository,
- * nothing where it mints none; `keep` holds each password answered, once.
+ * nothing where it mints none; `keep` holds each password answered, once;
+ * `gitVersion` answers what the job's git prints for `git --version`.
  * `close` drops every client and removes the socket.
  */
 export async function projectReadsServed({
@@ -186,10 +233,12 @@ export async function projectReadsServed({
   directory,
   mint,
   keep,
+  gitVersion,
   warn = (text) => process.stderr.write(`${text}\n`),
 }) {
   const forge = projectReadsForge(repositoryId);
   if (forge === undefined) return { git: [], close: async () => undefined };
+  await projectReadsGitChecked(gitVersion, warn);
   const held = new Set();
   const read = {
     forge,

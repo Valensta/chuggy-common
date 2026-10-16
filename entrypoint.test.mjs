@@ -2457,9 +2457,14 @@ test("a plane that stops minting mid-attempt fails it rather than pushing with a
   await assert.rejects(resolved.refresh(), /mints no credential to push with/u);
 });
 
-/** The repositories a project binds on the suite's forge: the job's own, one its own names as a submodule, and one the project does not bind. */
+/**
+ * The repositories a project binds on the suite's forge: the job's own, one
+ * its own names as a submodule, and one the project does not bind. The job's
+ * own is named with the word git's username prompt begins with, which the
+ * askpass must not read a password prompt naming it as.
+ */
 const projectRepositories = {
-  own: "org/own.git",
+  own: "org/UsernameTools.git",
   lib: "org/lib.git",
   unbound: "org/unbound.git",
 };

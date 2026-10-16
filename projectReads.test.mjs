@@ -17,6 +17,8 @@ import {
   projectReadsConfiguration,
   projectReadsFields,
   projectReadsForge,
+  projectReadsGitTooOld,
+  projectReadsGitWarning,
   projectReadsRepository,
   projectReadsServed,
 } from "./projectReads.mjs";
@@ -118,9 +120,15 @@ async function filled(git, url) {
 
 /**
  * The reads served for `own` until `t` ends, `answer(repository)` the plane's,
- * and every repository the plane was asked for and every password kept.
+ * and every repository the plane was asked for and every password kept. The
+ * job's git prints `printed` for its version, or fails where that is nothing.
  */
-async function served(t, answer, warn = () => undefined) {
+async function served(
+  t,
+  answer,
+  warn = () => undefined,
+  printed = "git version 2.51.0\n",
+) {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-reads-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const asked = [];
@@ -133,11 +141,66 @@ async function served(t, answer, warn = () => undefined) {
       return answer(repository, asked.length);
     },
     keep: (password) => kept.push(password),
+    gitVersion: async () => {
+      if (printed === undefined) throw new Error("git does not run");
+      return printed;
+    },
     warn,
   });
   t.after(() => reads.close());
   return { ...reads, directory, asked, kept };
 }
+
+/**
+ * Catches a git before the configuration it is handed left unnamed, or one
+ * that reads it named, by what `git --version` prints in the builds images
+ * carry.
+ */
+test("a git is too old for its configuration by the version it prints", () => {
+  for (const [printed, tooOld] of [
+    ["git version 2.30.2\n", "2.30.2"],
+    ["git version 1.8.3.1\n", "1.8.3.1"],
+    ["git version 2.31.0\n", undefined],
+    ["git version 2.39.5 (Apple Git-154)\n", undefined],
+    ["git version 2.47.1.windows.1\n", undefined],
+    ["git version 3.0.0\n", undefined],
+    ["git version unreadable\n", undefined],
+  ])
+    assert.equal(projectReadsGitTooOld(printed), tooOld, printed);
+});
+
+/**
+ * Catches a job whose git reads none of its configuration, and so none of
+ * its project's other repositories, said nothing of; said more than once; or
+ * a git that reads it warned of.
+ */
+test("a job's git too old for its configuration is warned of once, and one that reads it is not", async (t) => {
+  const warned = [];
+  const old = await served(
+    t,
+    () => read,
+    (text) => warned.push(text),
+    "git version 2.30.2\n",
+  );
+  await filled(old.git, lib);
+
+  assert.deepEqual(warned, [projectReadsGitWarning("2.30.2")]);
+  assert.match(
+    warned[0],
+    /git 2\.30\.2 .*use an image with git 2\.31 or later$/u,
+  );
+  for (const printed of ["git version 2.31.0\n", undefined]) {
+    const silent = [];
+    await served(
+      t,
+      () => read,
+      (text) => silent.push(text),
+      printed,
+    );
+
+    assert.deepEqual(silent, [], String(printed));
+  }
+});
 
 /**
  * Catches git told no path, which names no repository the plane can mint

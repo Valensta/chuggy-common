@@ -339,6 +339,7 @@ test("a Codex run's shell is set exactly what it is handed", () => {
   assert.doesNotMatch(argument, /\p{Cc}/u);
   assert.deepEqual(codexSetTable(argument), handed);
   assert.deepEqual(Object.keys(codexSetTable(argument)).sort(), [
+    "CARGO_NET_GIT_FETCH_WITH_CLI",
     workerChangeBaseVariable,
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_KEY_0",

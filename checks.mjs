@@ -38,13 +38,15 @@
  * the pod holds. The pod's own entries are named again beside the attempt's,
  * because an agent that filters its shell's environment by name, as Codex
  * drops any name holding `KEY`, would leave git a count whose keys are gone,
- * which git refuses.
+ * which git refuses. Cargo is told to fetch a git dependency through git,
+ * which reads those entries, rather than through libgit2, which does not; a
+ * value the pod already holds for that variable is left to stand.
  *
  * AN AGENT'S SHELL IS HANDED WHAT THOSE SHELLS ARE, so that a check the agent
  * runs is handed what the stage's would be. The agent is started from what
- * they inherit, and its shell is handed the moved values and the attempt's own
- * change base by the agent's own means, beside what the agent itself was
- * given to run with.
+ * they inherit, and its shell is handed the moved values, the attempt's own
+ * change base and its git configuration by the agent's own means, beside what
+ * the agent itself was given to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -230,6 +232,9 @@ export function workerAgentEnvironment(environment) {
 /** The variable git reads how many configuration entries the environment holds from. */
 const workerGitCountVariable = "GIT_CONFIG_COUNT";
 
+/** The variable that has Cargo fetch a git dependency through git rather than libgit2. */
+const workerCargoGitVariable = "CARGO_NET_GIT_FETCH_WITH_CLI";
+
 /** The variables git reads the key and the value of entry `index` from. */
 function workerGitEntryVariables(index) {
   return [
@@ -248,8 +253,9 @@ function workerGitCount(environment) {
 
 /**
  * `git`, each `[key, value]` an entry git reads, appended to the entries
- * `environment` already hands git, every one of those named again. Nothing
- * where `git` names no entry.
+ * `environment` already hands git, every one of those named again; and Cargo
+ * told to fetch through git, where `environment` does not already say how.
+ * Nothing where `git` names no entry.
  */
 export function workerGitEnvironment(environment, git) {
   if (git.length === 0) return {};
@@ -272,6 +278,9 @@ export function workerGitEnvironment(environment, git) {
     [workerGitCountVariable, String(standing + git.length)],
     ...kept,
     ...added,
+    ...(Object.hasOwn(environment, workerCargoGitVariable)
+      ? []
+      : [[workerCargoGitVariable, "true"]]),
   ]);
 }
 

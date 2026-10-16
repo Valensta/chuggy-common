@@ -890,7 +890,8 @@ export async function workerMintedWritable(directory) {
 /**
  * The reads every git this attempt runs makes of the other repositories its
  * project binds, served under `minted` and asked of the plane under the
- * attempt's bearer, each password held among the attempt's secrets.
+ * attempt's bearer, each password held among the attempt's secrets; the
+ * image's git, run as its programs are, is asked its version.
  */
 function workerProjectReads({
   task,
@@ -912,6 +913,7 @@ function workerProjectReads({
         request,
       }),
     keep: (value) => keepSecret({ kind: workerSecretKinds.read, value }),
+    gitVersion: async () => (await command("git", ["--version"])).stdout,
   });
 }
 
