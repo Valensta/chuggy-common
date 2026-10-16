@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import {
+  chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -42,7 +45,7 @@ import {
   workerImageVariable,
   workerSummaryCharsMax,
 } from "./checks.mjs";
-import { claudeAgent } from "./claude.mjs";
+import { claudeAgent, prepareClaudeShell } from "./claude.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
   envelopeLaunch,
@@ -64,6 +67,7 @@ import {
   fetchedAnswer,
   poolHeldSessionAnswer,
 } from "./envelope.fixture.mjs";
+import { forgeGitIsolated, forgeServed } from "./gitForge.fixture.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { agentResultSchema } from "./result.mjs";
@@ -178,14 +182,17 @@ test("exactly one task document is what a pod may be launched with", () => {
   );
 });
 
+/** The directory this suite and the core it holds to are in. */
+const here = dirname(fileURLToPath(import.meta.url));
+
 /**
  * One pod launched as the image launches it, which is the only way into the
  * environment `main` reads: it is not exported, and nothing imports it.
  * `minted`, where given, is the directory it finds in place of the contract's
- * minted credential directory, which no machine a suite runs on mounts.
+ * minted credential directory, which no machine a suite runs on mounts; and
+ * `core` the directory its modules are run from.
  */
-function launched(environment, minted) {
-  const here = dirname(fileURLToPath(import.meta.url));
+function launched(environment, minted, core = here) {
   const redirected =
     minted === undefined
       ? []
@@ -196,7 +203,7 @@ function launched(environment, minted) {
   return new Promise((resolve) => {
     const child = spawn(
       process.execPath,
-      [...redirected, join(here, "entrypoint.mjs")],
+      [...redirected, join(core, "entrypoint.mjs")],
       {
         env: {
           PATH: process.env["PATH"] ?? "",
@@ -2448,4 +2455,400 @@ test("a plane that stops minting mid-attempt fails it rather than pushing with a
   const resolved = await workerCredential(asked);
 
   await assert.rejects(resolved.refresh(), /mints no credential to push with/u);
+});
+
+/** The repositories a project binds on the suite's forge: the job's own, one its own names as a submodule, and one the project does not bind. */
+const projectRepositories = {
+  own: "org/own.git",
+  lib: "org/lib.git",
+  unbound: "org/unbound.git",
+};
+
+/** The credential the plane mints the job's own repository. */
+const ownCredential = {
+  username: "x-access-token",
+  password: "ghs_ownWrite0123456789abcdefghijklmnop",
+};
+
+/**
+ * A forge holding a project's repositories: its own names the library as a
+ * submodule at the forge's ssh address, and the one the project does not
+ * bind accepts the job's own credential, so a fallback to it would succeed.
+ */
+async function projectForge(t) {
+  const forge = await forgeServed(t, Object.values(projectRepositories));
+  const libHead = await forge.seed(projectRepositories.lib, {
+    "lib.txt": "the library\n",
+  });
+  await forge.seed(projectRepositories.unbound, { "x.txt": "unbound\n" });
+  const base = await forge.seed(
+    projectRepositories.own,
+    {
+      "README.md": "# own\n",
+      ".gitmodules": `[submodule "lib"]\n\tpath = lib\n\turl = git@127.0.0.1:${projectRepositories.lib}\n`,
+    },
+    { lib: libHead },
+  );
+  forge.accept(projectRepositories.own, ownCredential.password);
+  forge.accept(projectRepositories.unbound, ownCredential.password);
+  return { forge, base };
+}
+
+/**
+ * A plane serving `answer` as one attempt's task, its input the forge's own
+ * repository at `base`. It mints the job's own credential where the pod names
+ * no repository; a fresh read of the library at every ask naming it, which
+ * from then on is the only one the forge accepts for it; and nothing for any
+ * other. `reads` is every read it minted, in order.
+ */
+async function readsPlane(forge, answer, base) {
+  const reads = [];
+  const expiresAtMs = 1_900_000_000_000;
+  const plane = await servedPlane((route, request) => {
+    switch (route) {
+      case "task":
+        return answer;
+      case "input":
+        return inputAnswer(forge.url(projectRepositories.own), base);
+      case "credential": {
+        const named = request.body?.repository;
+        if (named === undefined)
+          return { status: 200, body: { ...ownCredential, expiresAtMs } };
+        if (named !== forge.url(projectRepositories.lib))
+          return { status: 404, body: { reason: "NotMinted" } };
+        const password = `ghs_readOfLib${String(reads.length).padStart(24, "0")}`;
+        reads.push(password);
+        forge.accept(projectRepositories.lib, password);
+        return {
+          status: 200,
+          body: { username: "x-access-token", password, expiresAtMs },
+        };
+      }
+      case "runTurns":
+        return { status: 200, body: { turnsRecorded: 0 } };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+  return { ...plane, reads };
+}
+
+/** Every repository a credential request named, the job's own named by nothing. */
+function credentialAsks(plane) {
+  return plane.requests
+    .filter(({ route }) => route === "credential")
+    .map(({ body }) => body?.repository);
+}
+
+/** The passwords each repository on the forge was presented. */
+function presentedTo(forge, name) {
+  return forge.presented
+    .filter(({ repository }) => repository === name)
+    .map(({ password }) => password);
+}
+
+/**
+ * A copy of the shipped set under `root`, its askpass executable as an image
+ * installs it, reading the packages it imports from this checkout.
+ */
+async function shippedCore(root) {
+  const core = join(root, "core");
+  await mkdir(core);
+  const { files } = JSON.parse(
+    await readFile(join(here, "package.json"), "utf8"),
+  );
+  for (const file of [...files, "package.json"])
+    await copyFile(join(here, file), join(core, file));
+  await chmod(join(core, "git-askpass.sh"), 0o555);
+  await symlink(join(here, "node_modules"), join(core, "node_modules"));
+  return core;
+}
+
+/** A directory of the suite's own until `t` ends. */
+async function suiteDirectory(t, prefix) {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+/** Hooks under `hooks` that read `lib` from the commit and the push they run in, each writing what it read under `dumps`. */
+async function libReadingHooks(hooks, dumps, lib) {
+  await mkdir(hooks);
+  for (const hook of ["pre-commit", "pre-push"]) {
+    await writeFile(
+      join(hooks, hook),
+      `#!/bin/sh\ngit ls-remote --exit-code '${lib}' main > '${dumps}/${hook}'\n`,
+    );
+    await chmod(join(hooks, hook), 0o755);
+  }
+}
+
+/**
+ * The commanded work task a launched attempt reads its project's repositories
+ * in: a setup line cloning the library, checks updating its own submodules and
+ * failing to read the repository the project does not bind, and the hooks
+ * under `hooks` installed. Its setup line and its checks each write their
+ * environment under `dumps`.
+ */
+function libReadingTask(forge, dumps, hooks) {
+  const lib = forge.url(projectRepositories.lib);
+  return {
+    status: 200,
+    body: workTaskAnswerSchema.parse({
+      ...fetchedAnswer,
+      worker: {
+        mode: {
+          type: "Commands",
+          commands: [
+            "git submodule update --init --recursive",
+            "test -f lib/lib.txt",
+            `! git ls-remote '${forge.url(projectRepositories.unbound)}'`,
+            `env > '${dumps}/check.env'`,
+          ],
+        },
+        setup: [
+          `git clone --quiet '${lib}' '${dumps}/lib-by-setup'`,
+          `env > '${dumps}/setup.env'`,
+          `git config core.hooksPath '${hooks}'`,
+        ],
+        files: [],
+      },
+    }),
+  };
+}
+
+/**
+ * Catches a read kept and presented again after the plane minted another; any
+ * credential presented to a repository the plane minted nothing for, or the
+ * job's own presented anywhere but its own; and the plane asked for the job's
+ * own by name.
+ */
+function assertReadsOnly(forge, plane) {
+  assert.ok(plane.reads.length >= 2, "the library was never minted again");
+  assert.deepEqual(
+    [...new Set(presentedTo(forge, projectRepositories.lib))],
+    plane.reads,
+  );
+  assert.deepEqual(
+    [...new Set(presentedTo(forge, projectRepositories.own))],
+    [ownCredential.password],
+  );
+  assert.deepEqual(presentedTo(forge, projectRepositories.unbound), []);
+  const asks = credentialAsks(plane);
+  assert.ok(!asks.includes(forge.url(projectRepositories.own)));
+  assert.ok(asks.includes(forge.url(projectRepositories.unbound)));
+  assert.equal(asks.filter((named) => named === undefined).length, 2);
+}
+
+/**
+ * A work attempt launched as a pool launches its pod reads its project's other
+ * repositories from a setup line, from its checks, a submodule written at the
+ * forge's ssh address among them, and from the hooks its commit and its push
+ * run; and pushes its own as it did before. Catches a git the attempt runs
+ * that cannot reach a repository its project binds, what `assertReadsOnly`
+ * catches, and the bearer reaching a setup line's or a check's environment.
+ */
+test("a launched work attempt reads every repository its project binds and pushes only its own", async (t) => {
+  const { forge, base } = await projectForge(t);
+  const root = await suiteDirectory(t, "chuggy-reads-attempt-");
+  const dumps = join(root, "dumps");
+  const hooks = join(root, "hooks");
+  await mkdir(dumps);
+  await libReadingHooks(hooks, dumps, forge.url(projectRepositories.lib));
+  const plane = await readsPlane(
+    forge,
+    libReadingTask(forge, dumps, hooks),
+    base,
+  );
+  t.after(() => plane.close());
+  const served = {
+    ...envelope,
+    callbackUrl: plane.url,
+    workspace: join(root, "workspace"),
+  };
+
+  const ran = await launched(
+    {
+      [workerTaskVariable]: JSON.stringify(served),
+      HOME: root,
+      ...forgeGitIsolated,
+    },
+    root,
+    await shippedCore(root),
+  );
+
+  assert.equal(ran.code, 0, ran.stderr);
+  assert.equal(
+    await readFile(join(dumps, "lib-by-setup", "lib.txt"), "utf8"),
+    "the library\n",
+  );
+  for (const hook of ["pre-commit", "pre-push"])
+    assert.match(
+      await readFile(join(dumps, hook), "utf8"),
+      /^[0-9a-f]{40}\trefs\/heads\/main$/mu,
+      hook,
+    );
+  assert.match(
+    await remoteRefs(forge.bare(projectRepositories.own)),
+    new RegExp(`\t${ticketBranch(fetchedAnswer)}$`, "mu"),
+  );
+  assertReadsOnly(forge, plane);
+  for (const dump of ["setup.env", "check.env"]) {
+    const text = await readFile(join(dumps, dump), "utf8");
+    assert.ok(!text.includes(served.bearer), `${dump} holds the bearer`);
+    assert.match(text, /^GIT_CONFIG_COUNT=5$/mu, dump);
+  }
+});
+
+/**
+ * Catches a read the attempt was minted for another repository left out of
+ * what its push is checked for: a check that writes one into the work has it
+ * committed, and the push refuses it by kind, never printing it.
+ */
+test("a work attempt whose commit carries a read of another repository pushes nothing", async (t) => {
+  podHolds(t, forgeGitIsolated);
+  const { forge, base } = await projectForge(t);
+  const root = await suiteDirectory(t, "chuggy-reads-leak-");
+  const lib = forge.url(projectRepositories.lib);
+  const plane = await readsPlane(
+    forge,
+    commandedTask([
+      `printf 'url=%s\\n\\n' '${lib}' | git credential fill | sed -n 's/^password=//p' > leaked`,
+    ]),
+    base,
+  );
+  t.after(() => plane.close());
+  const workspace = await ownCheckout(forge, root);
+  const served = { ...envelope, callbackUrl: plane.url };
+  const { task: answered } = await envelopeTask(served);
+
+  const failed = await workerAttempt(envelopeLaunch(served, answered), {
+    minted: root,
+    write: async () => undefined,
+    clone: async () => workspace,
+  }).then(
+    () => new Error("pushed"),
+    (error) => error,
+  );
+
+  assert.equal(plane.reads.length, 1);
+  assert.equal(
+    (await readFile(join(workspace, "leaked"), "utf8")).trim(),
+    plane.reads[0],
+  );
+  assert.match(
+    failed.message,
+    /^commit [0-9a-f]{40} carries a read the plane minted for another repository in a file, so the attempt pushes nothing$/u,
+  );
+  assert.ok(!failed.message.includes(plane.reads[0]));
+  assert.doesNotMatch(
+    await remoteRefs(forge.bare(projectRepositories.own)),
+    /ticket/u,
+  );
+  assert.ok(!plane.asked.some(({ route }) => route === "report"));
+});
+
+/**
+ * A stand-in for Claude Code under `root` whose one command clones the library
+ * and fails to read the repository the project does not bind, in a shell that
+ * first sources what Claude Code's Bash tool does. It writes its process's
+ * environment and its shell's under `root`, and `outcome` where both reads
+ * went as they should, and fails, so nothing is pushed.
+ */
+function libReadingAgent(root, forge) {
+  const script = [
+    `env > "$3/agent.env"`,
+    `. "$CLAUDE_ENV_FILE"`,
+    `env > "$3/shell.env"`,
+    `git clone --quiet "$1" "$3/lib-by-agent" && ! git ls-remote "$2" 2>/dev/null && echo read > "$3/outcome"`,
+    `printf '{"type":"result","structured_output":{"verdict":"Fail","summary":"read"}}\\n'`,
+  ].join("\n");
+  return {
+    ...claudeAgent,
+    executable: "/bin/sh",
+    prepareShell: (handed) =>
+      prepareClaudeShell(handed, join(root, "claude-shell.sh")),
+    invocation: () => [
+      "-c",
+      script,
+      "agent",
+      forge.url(projectRepositories.lib),
+      forge.url(projectRepositories.unbound),
+      root,
+    ],
+  };
+}
+
+/** A checkout of the forge's own repository under `root`, which an in-process attempt's clone stands in with. */
+async function ownCheckout(forge, root) {
+  const workspace = join(root, "workspace");
+  await git("git", [
+    "clone",
+    "--quiet",
+    forge.bare(projectRepositories.own),
+    workspace,
+  ]);
+  return workspace;
+}
+
+/**
+ * An agent's shell reaches the project's other repositories as a check's
+ * does, through what Claude Code's Bash tool sources before each command.
+ * Catches an agent's git left without the attempt's configuration, or the
+ * agent's process or its shell holding the bearer.
+ */
+test("an agent's shell reads another repository its project binds, and holds no bearer", async (t) => {
+  const { forge, base } = await projectForge(t);
+  const root = await suiteDirectory(t, "chuggy-reads-agent-");
+  const temporary = join(root, "temporary");
+  await mkdir(temporary);
+  const providerCredentialFile = join(root, "claude-code");
+  await writeFile(providerCredentialFile, `${secret}\n`);
+  const plane = await readsPlane(
+    forge,
+    {
+      status: 200,
+      body: workTaskAnswerSchema.parse({
+        ...fetchedAnswer,
+        authority: {
+          ...fetchedAnswer.authority,
+          credentials: ["forge", claudeAgent.credential],
+        },
+      }),
+    },
+    base,
+  );
+  t.after(() => plane.close());
+  const served = {
+    ...envelope,
+    callbackUrl: plane.url,
+    providerCredentialFile,
+  };
+  podHolds(t, {
+    ...forgeGitIsolated,
+    TMPDIR: temporary,
+    [workerTaskVariable]: JSON.stringify(served),
+  });
+  const workspace = await ownCheckout(forge, root);
+  const { task: answered } = await envelopeTask(served);
+
+  await workerAttempt(envelopeLaunch(served, answered), {
+    minted: root,
+    write: async () => undefined,
+    clone: async () => workspace,
+    agent: libReadingAgent(root, forge),
+  });
+
+  assert.equal(await readFile(join(root, "outcome"), "utf8"), "read\n");
+  assert.deepEqual(
+    [...new Set(presentedTo(forge, projectRepositories.lib))],
+    plane.reads,
+  );
+  assert.deepEqual(presentedTo(forge, projectRepositories.unbound), []);
+  for (const dump of ["agent.env", "shell.env"]) {
+    const text = await readFile(join(root, dump), "utf8");
+    assert.ok(!text.includes(served.bearer), `${dump} holds the bearer`);
+  }
 });

@@ -91,7 +91,12 @@ import {
   workerSummaryText,
 } from "./checks.mjs";
 import { keepWorkerLease } from "./lease.mjs";
-import { planeCredential, workerCredentialPath } from "./planeCredential.mjs";
+import {
+  planeCredential,
+  planeCredentialAnswered,
+  workerCredentialPath,
+} from "./planeCredential.mjs";
+import { projectReadsServed } from "./projectReads.mjs";
 import {
   workerRepositories,
   workerRepository,
@@ -128,6 +133,7 @@ const workerSecretKinds = {
   bearer: "the attempt's bearer",
   mounted: "a credential the launcher mounted",
   minted: "the git credential the plane minted",
+  read: "a read the plane minted for another repository",
 };
 
 let activeTask;
@@ -257,9 +263,9 @@ async function excludedFromWork(directory, paths) {
 
 /**
  * The files and the setup lines a worker block asks for, in the workspace it
- * runs in, its lines told `changeBase` as the stage's commands are.
+ * runs in, its lines handed what the attempt hands the stage's commands.
  */
-export async function prepareWorker(task, directory, changeBase) {
+export async function prepareWorker(task, directory, handed) {
   const provisioned = [];
   for (const file of task.worker?.files ?? []) {
     const target = workspaceFile(directory, file.path);
@@ -271,7 +277,7 @@ export async function prepareWorker(task, directory, changeBase) {
   for (const setup of task.worker?.setup ?? []) {
     await command("/bin/sh", ["-eu", "-c", setup], {
       cwd: directory,
-      env: workerStageEnvironment(process.env, changeBase),
+      env: workerStageEnvironment(process.env, handed),
     });
   }
   const { stdout: status } = await command(
@@ -370,7 +376,10 @@ async function runAgentEnvironment(context, shell) {
 async function runAgent(context) {
   const task = ticketImagesBriefed(context.task, await agentImages(context));
   const shell = await context.agent.prepareShell(
-    workerShellEnvironment(process.env, context.changeBase),
+    workerShellEnvironment(process.env, {
+      changeBase: context.changeBase,
+      git: context.git,
+    }),
   );
   const argv = context.agent.invocation(task, {
     resultSchema: workerTemporaryFile(agentResultSchemaName),
@@ -431,6 +440,7 @@ async function workSource(context, workspace, verdict) {
     ...workspace,
     command: context.command ?? command,
     secrets: context.held(),
+    git: context.git,
   });
 }
 
@@ -686,7 +696,11 @@ async function admitWorkerTask(task, agent) {
 export async function runWorkerTask(context, commands) {
   if (commands === undefined) return runAgent(context);
   const run = await runChecks(
-    { directory: context.directory, changeBase: context.changeBase },
+    {
+      directory: context.directory,
+      changeBase: context.changeBase,
+      git: context.git,
+    },
     commands,
     { scrub: context.scrub },
   );
@@ -874,10 +888,76 @@ export async function workerMintedWritable(directory) {
 }
 
 /**
+ * The reads every git this attempt runs makes of the other repositories its
+ * project binds, served under `minted` and asked of the plane under the
+ * attempt's bearer, each password held among the attempt's secrets.
+ */
+function workerProjectReads({
+  task,
+  bearer,
+  repositoryId,
+  minted,
+  keepSecret,
+  request = workerRequest,
+}) {
+  return projectReadsServed({
+    repositoryId,
+    directory: minted,
+    mint: (repository) =>
+      planeCredentialAnswered({
+        task,
+        bearer,
+        path: workerCredentialPath,
+        repository,
+        request,
+      }),
+    keep: (value) => keepSecret({ kind: workerSecretKinds.read, value }),
+  });
+}
+
+/**
+ * What one attempt does in the workspace it cloned, every git it runs handed
+ * `git`: its setup, its run, and what that run leaves behind.
+ */
+async function workerAttemptWorked(attempt, workspace, git) {
+  const { task, bearer, evidence, scrub } = attempt;
+  const handed = { changeBase: workspace.changeBase, git };
+  await prepareWorker(task, workspace.directory, handed);
+  const run = await runWorkerTask(
+    {
+      task,
+      bearer,
+      directory: workspace.directory,
+      ...handed,
+      images: workspace.images,
+      agentEnvironment: attempt.agentEnvironment,
+      scrub,
+      evidence,
+      agent: attempt.agent,
+    },
+    attempt.commands,
+  );
+  await publishWorkerResult(
+    {
+      task,
+      bearer,
+      evidence,
+      scrub,
+      held: attempt.held,
+      git,
+      stopLease: attempt.stopLease,
+      request: workerRequest,
+    },
+    workspace,
+    run,
+  );
+}
+
+/**
  * One attempt, run from its task onwards the same whichever carrier brought it.
  * `seams` are `workerWorkspace`'s, less the directory, which is the launch's;
- * `minted`, the directory checked in place of the contract's; and `agent`, run
- * in place of the one the task names.
+ * `minted`, the directory checked and the reads served under in place of the
+ * contract's; and `agent`, run in place of the one the task names.
  */
 export async function workerAttempt(launch, seams = {}) {
   const {
@@ -900,49 +980,41 @@ export async function workerAttempt(launch, seams = {}) {
     workspace: into,
   } = await launch.given(agent);
   activeBearer = bearer;
-  const { agentEnvironment, scrub, keepSecret, held, evidence } =
-    await workerRun({ task, bearer, credentialFiles, mounted, agent });
+  const ran = await workerRun({
+    task,
+    bearer,
+    credentialFiles,
+    mounted,
+    agent,
+  });
   await workerMintedWritable(minted);
   const stopLease = keepWorkerLease(task, bearer);
+  let reads;
   try {
     const workspace = await workerWorkspace(
       task,
       repositories,
       credentialFiles,
       bearer,
-      keepSecret,
+      ran.keepSecret,
       { ...workspaceSeams, workspace: into },
     );
-    await prepareWorker(task, workspace.directory, workspace.changeBase);
-    const run = await runWorkerTask(
-      {
-        task,
-        bearer,
-        directory: workspace.directory,
-        changeBase: workspace.changeBase,
-        images: workspace.images,
-        agentEnvironment,
-        scrub,
-        evidence,
-        agent,
-      },
-      commands,
-    );
-    await publishWorkerResult(
-      {
-        task,
-        bearer,
-        evidence,
-        scrub,
-        held,
-        stopLease,
-        request: workerRequest,
-      },
+    reads = await workerProjectReads({
+      task,
+      bearer,
+      repositoryId: workspace.repositoryId,
+      minted,
+      keepSecret: ran.keepSecret,
+      request: workspaceSeams.request,
+    });
+    await workerAttemptWorked(
+      { ...ran, task, bearer, agent, commands, stopLease },
       workspace,
-      run,
+      reads.git,
     );
   } finally {
-    evidence.stop();
+    ran.evidence.stop();
+    await reads?.close();
     await stopLease();
   }
 }
@@ -952,7 +1024,9 @@ export async function workerAttempt(launch, seams = {}) {
  * totals reach the plane before the report that terminalizes the execution, so
  * a settled task never carries figures nothing wrote. `context.command` is the
  * seam a passing work attempt's push runs through, this module's own where it
- * is absent, and `context.held` answers the secrets that push is checked for.
+ * is absent; `context.held` answers the secrets that push is checked for; and
+ * `context.git` is the attempt's git configuration, which its commit and its
+ * push are handed with the hooks they run.
  */
 export async function publishWorkerResult(
   context,

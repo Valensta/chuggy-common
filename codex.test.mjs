@@ -285,8 +285,9 @@ test("a Codex credential's home is under HOME where none is named", async (t) =>
 /**
  * What a Codex run's shell is handed for a pod whose image set three of the
  * variables `check.sh` moves aside, one plain, one empty, and one to every
- * character a TOML basic string must escape and some it need not, and whose
- * attempt knows the commit its change started from.
+ * character a TOML basic string must escape and some it need not, and that
+ * hands git an entry of its own; and whose attempt knows the commit its change
+ * started from and adds an entry to git's configuration.
  */
 const handed = workerShellEnvironment(
   {
@@ -295,8 +296,14 @@ const handed = workerShellEnvironment(
     [workerImageVariable("NODE_PATH")]: "",
     [workerImageVariable("LD_LIBRARY_PATH")]:
       '/image/it\'s "lib"\\\n\t\u0001\u007f\u009f\u{1F600}end',
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.pager",
+    GIT_CONFIG_VALUE_0: "cat",
   },
-  "a".repeat(40),
+  {
+    changeBase: "a".repeat(40),
+    git: [["credential.https://github.com.helper", "cache --socket '/m'"]],
+  },
 );
 
 /**
@@ -310,7 +317,7 @@ function codexSetTable(argument) {
   assert.ok(argument.startsWith(prefix) && argument.endsWith("}"), argument);
   const body = argument.slice(prefix.length, -1);
   const entries = [
-    ...body.matchAll(/([A-Z_]+) = ("(?:[^"\\]|\\.)*")(?:, |$)/gu),
+    ...body.matchAll(/([A-Z0-9_]+) = ("(?:[^"\\]|\\.)*")(?:, |$)/gu),
   ];
   assert.equal(entries.map(([entry]) => entry).join(""), body);
   return Object.fromEntries(
@@ -320,7 +327,9 @@ function codexSetTable(argument) {
 
 /**
  * Catches Codex's shell set a value other than the one a check stage's shells
- * are handed, or set it in a string TOML refuses for a raw control character.
+ * are handed, or set it in a string TOML refuses for a raw control character;
+ * and git's entries, whose keys Codex drops from what its shell inherits, set
+ * short of the whole count.
  */
 test("a Codex run's shell is set exactly what it is handed", () => {
   const [flag, argument, ...rest] = codexShellArguments(handed);
@@ -331,6 +340,11 @@ test("a Codex run's shell is set exactly what it is handed", () => {
   assert.deepEqual(codexSetTable(argument), handed);
   assert.deepEqual(Object.keys(codexSetTable(argument)).sort(), [
     workerChangeBaseVariable,
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_KEY_1",
+    "GIT_CONFIG_VALUE_0",
+    "GIT_CONFIG_VALUE_1",
     "LD_LIBRARY_PATH",
     "NODE_OPTIONS",
     "NODE_PATH",

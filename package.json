@@ -7,7 +7,7 @@
   },
   "private": true,
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.7.0/chuggy-worker-contract-1.7.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.8.0/chuggy-worker-contract-1.8.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -52,6 +52,7 @@
     "poolRunner.mjs",
     "poolSessionPlane.mjs",
     "poolTokens.mjs",
+    "projectReads.mjs",
     "rateLimit.mjs",
     "register.mjs",
     "registryAuth.mjs",

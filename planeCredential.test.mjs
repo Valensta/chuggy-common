@@ -6,6 +6,7 @@ import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnviron
 
 import {
   planeCredential,
+  planeCredentialAnswered,
   sessionCredentialPath,
   workerCredentialPath,
 } from "./planeCredential.mjs";
@@ -118,6 +119,55 @@ test("a session names its repository and the plane is told nothing else", async 
   assert.deepEqual(JSON.parse(plane.asked[0].init.body), {
     repository: "https://github.com/kasofsk/chuggy.git",
   });
+});
+
+/**
+ * Catches a read of another repository asked without naming it, which the
+ * plane answers with the attempt's own credential; or one written where the
+ * askpass reads the attempt's own, which its push would then present.
+ */
+test("an attempt names another repository in its body and is answered what it is minted, written nowhere", async () => {
+  const plane = planeOf({ status: 200, ok: true, json: async () => minted });
+
+  const read = await planeCredentialAnswered({
+    task,
+    bearer: "capability",
+    path: workerCredentialPath,
+    repository: "https://github.com/kasofsk/chuggy-lib.git",
+    request: plane.request,
+  });
+
+  assert.deepEqual(read, minted);
+  assert.equal(plane.asked[0].path, workerCredentialPath);
+  assert.equal(plane.asked[0].init.method, "POST");
+  assert.equal(plane.asked[0].init.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(plane.asked[0].init.body), {
+    repository: "https://github.com/kasofsk/chuggy-lib.git",
+  });
+});
+
+/**
+ * Catches a repository the project does not bind answered with anything at
+ * all, which a caller could fall back from to the launcher's mount.
+ */
+test("another repository the plane mints nothing for is answered nothing", async () => {
+  const plane = planeOf({
+    status: 404,
+    ok: false,
+    json: async () => ({ reason: "NotMinted" }),
+  });
+
+  assert.equal(
+    await planeCredentialAnswered({
+      task,
+      bearer: "capability",
+      path: workerCredentialPath,
+      repository: "https://github.com/kasofsk/unbound.git",
+      request: plane.request,
+    }),
+    undefined,
+  );
+  assert.deepEqual(plane.asked[0].transport.settled, [404]);
 });
 
 /**

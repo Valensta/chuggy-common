@@ -73,6 +73,7 @@ import { heartbeatIntervalMilliseconds, keepWorkerLease } from "./lease.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import {
   planeCredential,
+  planeCredentialAnswered,
   sessionCredentialPath,
   workerCredentialPath,
 } from "./planeCredential.mjs";
@@ -485,6 +486,7 @@ const jobReactions = {
   },
   credential: {
     200: "reads",
+    400: "stops",
     401: "stops",
     404: "reads",
     409: "stops",
@@ -612,6 +614,31 @@ test("every status a job route the pod calls may answer is one the pod has a nam
     jobReactions,
     [],
     jobCallers,
+    jobSuccess,
+    jobTransport,
+  );
+});
+
+/**
+ * Catches a read the pod names of another repository meeting a status of the
+ * credential route otherwise than the pod's ask for its own does, or naming
+ * it in a body the route's schema refuses.
+ */
+test("a read of another repository meets every status of the credential route as the pod's own ask does", async () => {
+  await heldToMap(
+    { ...planes.job, answers: { credential: planes.job.answers.credential } },
+    { credential: jobReactions.credential },
+    [],
+    {
+      credential: (request) =>
+        planeCredentialAnswered({
+          task: jobTask,
+          bearer,
+          path: workerCredentialPath,
+          repository: "https://github.com/kasofsk/chuggy-common.git",
+          request,
+        }),
+    },
     jobSuccess,
     jobTransport,
   );

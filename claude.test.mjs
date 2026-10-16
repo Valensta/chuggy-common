@@ -183,11 +183,17 @@ function claudeCommandEnvironment(shell, script, environment) {
 /** The commit an attempt's change started from, where it knows one. */
 const attemptBase = "a".repeat(40);
 
+/** An entry an attempt's git configuration adds, its value one a shell must quote. */
+const attemptGit = [
+  ["credential.https://github.com.helper", "cache --socket '/minted/it''s'"],
+];
+
 /**
  * Catches an agent's shell running a project's commands in an environment a
  * check stage's shells are not handed: a value lost, mangled by its quoting,
- * left under the name `check.sh` kept it under, the task document, or a change
- * base other than the attempt's own.
+ * left under the name `check.sh` kept it under, the task document, a change
+ * base other than the attempt's own, or git's configuration other than the
+ * attempt's.
  */
 for (const shell of [...agentShells, ...posixShells])
   test(
@@ -196,14 +202,18 @@ for (const shell of [...agentShells, ...posixShells])
       skip: shell.absent,
     },
     () => {
-      for (const changeBase of [attemptBase, undefined])
+      for (const handed of [
+        { changeBase: attemptBase },
+        {},
+        { changeBase: attemptBase, git: attemptGit },
+      ])
         assert.deepEqual(
           claudeCommandEnvironment(
             shell,
-            claudeShellScript(workerShellEnvironment(checkedPod, changeBase)),
+            claudeShellScript(workerShellEnvironment(checkedPod, handed)),
             workerAgentEnvironment(checkedPod),
           ),
-          workerStageEnvironment(checkedPod, changeBase),
+          workerStageEnvironment(checkedPod, handed),
         );
     },
   );
@@ -223,7 +233,9 @@ test("a Claude run's shell script is written once, privately, where CLAUDE_ENV_F
   t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, "shell.sh");
 
-  const handed = workerShellEnvironment(checkedPod, attemptBase);
+  const handed = workerShellEnvironment(checkedPod, {
+    changeBase: attemptBase,
+  });
 
   assert.deepEqual(await prepareClaudeShell(handed, file), {
     environment: { CLAUDE_ENV_FILE: file },
