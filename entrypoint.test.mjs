@@ -2555,8 +2555,20 @@ function presentedTo(forge, name) {
 }
 
 /**
+ * The `node_modules` this suite's own imports resolve from: the checkout's, or
+ * the runtime's above it where an image runs the suites.
+ */
+function resolvingModules() {
+  const entry = fileURLToPath(
+    import.meta.resolve("@chuggy/worker-contract/workerEnvironment"),
+  );
+  const contract = join("node_modules", "@chuggy", "worker-contract");
+  return join(entry.slice(0, entry.lastIndexOf(contract)), "node_modules");
+}
+
+/**
  * A copy of the shipped set under `root`, its askpass executable as an image
- * installs it, reading the packages it imports from this checkout.
+ * installs it, reading the packages it imports from where this suite does.
  */
 async function shippedCore(root) {
   const core = join(root, "core");
@@ -2567,7 +2579,7 @@ async function shippedCore(root) {
   for (const file of [...files, "package.json"])
     await copyFile(join(here, file), join(core, file));
   await chmod(join(core, "git-askpass.sh"), 0o555);
-  await symlink(join(here, "node_modules"), join(core, "node_modules"));
+  await symlink(resolvingModules(), join(core, "node_modules"));
   return core;
 }
 
