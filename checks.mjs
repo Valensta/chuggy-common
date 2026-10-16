@@ -33,11 +33,20 @@
  * a base nobody gave this attempt. The shell runs with `-u`, so a line reads it
  * as `${CHUG_CHANGE_BASE-}`, and `"$CHUG_CHANGE_BASE"` aborts where it is unset.
  *
+ * THOSE SHELLS ARE HANDED THE ATTEMPT'S GIT CONFIGURATION, through the
+ * variables git reads entries from after every file it reads, appended to any
+ * the pod holds. The pod's own entries are named again beside the attempt's,
+ * because an agent that filters its shell's environment by name, as Codex
+ * drops any name holding `KEY`, would leave git a count whose keys are gone,
+ * which git refuses. Cargo is told to fetch a git dependency through git,
+ * which reads those entries, rather than through libgit2, which does not; a
+ * value the pod already holds for that variable is left to stand.
+ *
  * AN AGENT'S SHELL IS HANDED WHAT THOSE SHELLS ARE, so that a check the agent
  * runs is handed what the stage's would be. The agent is started from what
- * they inherit, and its shell is handed the moved values and the attempt's own
- * change base by the agent's own means, beside what the agent itself was
- * given to run with.
+ * they inherit, and its shell is handed the moved values, the attempt's own
+ * change base and its git configuration by the agent's own means, beside what
+ * the agent itself was given to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -220,30 +229,88 @@ export function workerAgentEnvironment(environment) {
   return workerUnkeptEnvironment(workerInheritedEnvironment(environment));
 }
 
+/** The variable git reads how many configuration entries the environment holds from. */
+const workerGitCountVariable = "GIT_CONFIG_COUNT";
+
+/** The variable that has Cargo fetch a git dependency through git rather than libgit2. */
+const workerCargoGitVariable = "CARGO_NET_GIT_FETCH_WITH_CLI";
+
+/** The variables git reads the key and the value of entry `index` from. */
+function workerGitEntryVariables(index) {
+  return [
+    `GIT_CONFIG_KEY_${String(index)}`,
+    `GIT_CONFIG_VALUE_${String(index)}`,
+  ];
+}
+
+/** How many configuration entries `environment` hands git, refused where git would refuse it. */
+function workerGitCount(environment) {
+  const count = environment[workerGitCountVariable] ?? "";
+  if (!/^[0-9]*$/u.test(count))
+    throw new Error(`${workerGitCountVariable} is ${count}, which git refuses`);
+  return Number(count);
+}
+
+/**
+ * `git`, each `[key, value]` an entry git reads, appended to the entries
+ * `environment` already hands git, every one of those named again; and Cargo
+ * told to fetch through git, where `environment` does not already say how.
+ * Nothing where `git` names no entry.
+ */
+export function workerGitEnvironment(environment, git) {
+  if (git.length === 0) return {};
+  const standing = workerGitCount(environment);
+  const kept = Array.from({ length: standing }, (_, index) =>
+    workerGitEntryVariables(index).filter((name) =>
+      Object.hasOwn(environment, name),
+    ),
+  )
+    .flat()
+    .map((name) => [name, environment[name]]);
+  const added = git.flatMap((entry, index) => {
+    const [key, value] = workerGitEntryVariables(standing + index);
+    return [
+      [key, entry[0]],
+      [value, entry[1]],
+    ];
+  });
+  return Object.fromEntries([
+    [workerGitCountVariable, String(standing + git.length)],
+    ...kept,
+    ...added,
+    ...(Object.hasOwn(environment, workerCargoGitVariable)
+      ? []
+      : [[workerCargoGitVariable, "true"]]),
+  ]);
+}
+
 /**
  * What a stage's shells are handed beyond that, which an agent's shell is
  * handed by the agent's own means: each variable `check.sh` moved aside, back
- * under its own name, and `changeBase` where the attempt knows one.
+ * under its own name; `handed.changeBase` where the attempt knows one; and
+ * `handed.git`, the entries the attempt's git configuration adds.
  */
-export function workerShellEnvironment(environment, changeBase) {
+export function workerShellEnvironment(environment, handed = {}) {
+  const { changeBase, git = [] } = handed;
   return {
     ...workerImageEnvironment(environment),
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
+    ...workerGitEnvironment(environment, git),
   };
 }
 
 /**
- * What a stage's shells are handed. With no `changeBase` it is what each of
+ * What a stage's shells are handed. With nothing `handed` it is what each of
  * the image's programs the core runs itself is handed: git, and every hook a
  * project's setup installed for it, which need the image's values as its
  * shells do and are not to be handed the task document.
  */
-export function workerStageEnvironment(environment, changeBase) {
+export function workerStageEnvironment(environment, handed) {
   return {
     ...workerAgentEnvironment(environment),
-    ...workerShellEnvironment(environment, changeBase),
+    ...workerShellEnvironment(environment, handed),
   };
 }
 
@@ -369,8 +436,9 @@ function checkReport(commands, ran, scrub) {
 /**
  * Runs one check stage: every command in order, stopping at the first that does
  * not exit cleanly, and reporting each command's own status through the
- * caller's credential scrub. `context` names the directory the commands run in
- * and, where the attempt knows it, the commit the change started from.
+ * caller's credential scrub. `context` names the directory the commands run in,
+ * the commit the change started from where the attempt knows it, and the
+ * attempt's git configuration where it has one.
  */
 export async function runChecks(context, commands, services = {}) {
   if (commands.length === 0)
@@ -380,7 +448,10 @@ export async function runChecks(context, commands, services = {}) {
     write = (text) => process.stdout.write(text),
     scrub = checkNoScrub,
   } = services;
-  const environment = workerStageEnvironment(process.env, context.changeBase);
+  const environment = workerStageEnvironment(process.env, {
+    changeBase: context.changeBase,
+    git: context.git,
+  });
   const ran = [];
   let kept = 0;
   for (const command of commands) {

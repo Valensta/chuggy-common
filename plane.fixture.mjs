@@ -35,6 +35,7 @@ import {
 } from "@chuggy/worker-contract/workerContract";
 import { resultManifestDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
+  workerCredentialSchema,
   workerPlaneAnswers,
   workerPlaneBytesMediaType,
   workerPlaneRoutes,
@@ -48,7 +49,8 @@ import { pausedClock } from "./clock.fixture.mjs";
 
 /**
  * Each wire: its routes, what each answers, the schema a route's JSON body is
- * read under, and the routes whose body is bytes.
+ * read under, the routes that schema reads only where a body is sent, and the
+ * routes whose body is bytes.
  */
 export const planes = {
   job: {
@@ -59,7 +61,9 @@ export const planes = {
       runTotals: workerRunTotalsSchema,
       runEnded: workerRunEndedSchema,
       report: resultManifestDocumentSchema,
+      credential: workerCredentialSchema,
     },
+    optional: ["credential"],
     bytes: ["artifact", "runConfiguration", "runTranscript"],
   },
   session: {
@@ -116,7 +120,8 @@ function offeredBody(plane, route, init) {
   }
   const schema = plane.bodies[route];
   if (init.body === undefined) {
-    if (schema !== undefined) throw violated(`${route} was offered no body`);
+    if (schema !== undefined && !plane.optional?.includes(route))
+      throw violated(`${route} was offered no body`);
     return undefined;
   }
   const body = JSON.parse(String(init.body));

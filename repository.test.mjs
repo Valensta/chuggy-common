@@ -210,6 +210,26 @@ test("worker repositories are one keyed object", () => {
   );
 });
 
+/**
+ * The prompts git asks an askpass, each naming a remote whose path holds the
+ * word git's username prompt begins with, as a remote named with git's
+ * `credential.useHttpPath` does.
+ */
+const askpassPrompts = {
+  username: [
+    "Username: ",
+    "Username for 'https://github.com/org/UsernameTools.git': ",
+  ],
+  password: [
+    "Password: ",
+    "Password for 'https://selected-user@github.com/org/UsernameTools.git': ",
+  ],
+};
+
+/**
+ * Catches a password prompt answered with the username because the remote it
+ * names holds the word, which fails every push to that repository.
+ */
 test("git askpass reads the selected repository credential", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-askpass-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -221,23 +241,17 @@ test("git askpass reads the selected repository credential", async (t) => {
     CHUG_WORKER_GIT_CREDENTIAL_USERNAME: "selected-user",
   };
 
-  const username = await executeFile(
-    "/bin/sh",
-    [askpass, "Username for repository"],
-    {
-      env: environment,
-    },
-  );
-  const password = await executeFile(
-    "/bin/sh",
-    [askpass, "Password for repository"],
-    {
-      env: environment,
-    },
-  );
+  for (const [asked, answer] of [
+    ["username", "selected-user\n"],
+    ["password", "selected-token\n"],
+  ])
+    for (const prompt of askpassPrompts[asked]) {
+      const { stdout } = await executeFile("/bin/sh", [askpass, prompt], {
+        env: environment,
+      });
 
-  assert.equal(username.stdout, "selected-user\n");
-  assert.equal(password.stdout, "selected-token\n");
+      assert.equal(stdout, answer, prompt);
+    }
 });
 
 /** The answer the askpass gives under `shell` on a PATH of nothing, the credential file holding `content`. */

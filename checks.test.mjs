@@ -31,6 +31,7 @@ import {
   workerCheckCommands,
   workerCheckOutputCharsMax,
   workerCheckStageOutputCharsMax,
+  workerGitEnvironment,
   workerImageSteeringVariables,
   workerImageVariable,
   workerInheritedEnvironment,
@@ -326,6 +327,96 @@ test("a stage's commands are told the commit the change started from", async () 
   assert.deepEqual(
     output.checks.map((check) => check.output),
     [changeBase, changeBase],
+  );
+});
+
+/** An attempt's git configuration, each key one git reads more than one value of. */
+const attemptGit = [
+  ["url.https://forge.test/.insteadOf", "git@forge.test:"],
+  ["url.https://forge.test/.insteadOf", "ssh://git@forge.test/"],
+];
+
+/** A command that prints every value git reads of the attempt's key, read past every file git reads. */
+const printsAttemptGit =
+  "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git config --get-all url.https://forge.test/.insteadOf";
+
+/**
+ * Catches the attempt's git configuration not reaching a stage's shells, which
+ * leaves a check that fetches a submodule another repository holds unable to.
+ */
+test("a stage's commands are handed the attempt's git configuration", async () => {
+  const { output } = await runChecks(
+    { ...workspace, git: attemptGit },
+    [printsAttemptGit],
+    { write: () => undefined },
+  );
+
+  assert.equal(
+    output.checks[0].output,
+    "git@forge.test:\nssh://git@forge.test/\n",
+  );
+});
+
+/**
+ * Catches the attempt's entries replacing the pod's own, or the pod's own left
+ * to an inherited name a shell that filters by name, as Codex's does, drops.
+ */
+test("an attempt's git entries follow the pod's own, which are named again", () => {
+  const pod = {
+    PATH: "/bin",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.pager",
+    GIT_CONFIG_VALUE_0: "cat",
+  };
+
+  assert.deepEqual(workerGitEnvironment(pod, attemptGit), {
+    GIT_CONFIG_COUNT: "3",
+    GIT_CONFIG_KEY_0: "core.pager",
+    GIT_CONFIG_VALUE_0: "cat",
+    GIT_CONFIG_KEY_1: attemptGit[0][0],
+    GIT_CONFIG_VALUE_1: attemptGit[0][1],
+    GIT_CONFIG_KEY_2: attemptGit[1][0],
+    GIT_CONFIG_VALUE_2: attemptGit[1][1],
+    CARGO_NET_GIT_FETCH_WITH_CLI: "true",
+  });
+  assert.deepEqual(workerGitEnvironment(pod, []), {});
+});
+
+/**
+ * Catches Cargo left to fetch a git dependency through libgit2, which reads
+ * none of the attempt's git configuration, so a dependency on another
+ * repository the project binds is fetched with no credential; and the pod's
+ * own say on it overridden.
+ */
+test("Cargo fetches through git where the attempt configures it, unless the pod says otherwise", () => {
+  assert.equal(
+    workerStageEnvironment({ PATH: "/bin" }, { git: attemptGit })
+      .CARGO_NET_GIT_FETCH_WITH_CLI,
+    "true",
+  );
+  assert.equal(
+    workerStageEnvironment(
+      { PATH: "/bin", CARGO_NET_GIT_FETCH_WITH_CLI: "false" },
+      { git: attemptGit },
+    ).CARGO_NET_GIT_FETCH_WITH_CLI,
+    "false",
+  );
+  assert.ok(
+    !Object.hasOwn(
+      workerStageEnvironment({ PATH: "/bin" }),
+      "CARGO_NET_GIT_FETCH_WITH_CLI",
+    ),
+  );
+});
+
+/**
+ * Catches a count git refuses carried into every git the attempt runs, where
+ * each would fail with an error naming nothing the attempt set.
+ */
+test("a pod handing git a count it refuses is refused before anything runs", () => {
+  assert.throws(
+    () => workerGitEnvironment({ GIT_CONFIG_COUNT: "two" }, attemptGit),
+    /GIT_CONFIG_COUNT is two/u,
   );
 });
 

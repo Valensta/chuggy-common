@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 
 import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocuments";
 
-import { workerStageEnvironment } from "./checks.mjs";
+import { workerGitEnvironment, workerStageEnvironment } from "./checks.mjs";
 
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
 const sourceObjectHeaderBytesMax = 256;
@@ -195,7 +195,9 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * GIT IS THE IMAGE'S. Every call before the push, and every hook a project's
  * setup installed that one of them runs, is handed what the image's own
  * programs are, and the push is handed the credential's environment, which
- * is that and its askpass.
+ * is that and its askpass. The commit and the push are handed `git`, the
+ * attempt's git configuration, as well, since the hooks they run are the
+ * project's.
  *
  * THE PUSH ASKS FOR ITS CREDENTIAL AGAIN. `refresh` is present where the plane
  * minted the one the clone used: a minted token expires, an attempt may outlive
@@ -214,10 +216,14 @@ export async function commitAndPushSource({
   environment,
   refresh,
   secrets,
+  git = [],
 }) {
   if (!Array.isArray(secrets))
     throw new Error("a push is checked against the secrets the pod holds");
-  const local = { cwd: directory, env: workerStageEnvironment(process.env) };
+  const local = {
+    cwd: directory,
+    env: workerStageEnvironment(process.env, { git }),
+  };
   await command("git", ["config", "user.name", "Chuggy Worker"], local);
   await command(
     "git",
@@ -250,9 +256,10 @@ export async function commitAndPushSource({
       `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
     );
   const ref = ticketBranch(task);
+  const pushing = refresh === undefined ? environment : await refresh();
   await command("git", ["push", repository, `${commit}:${ref}`], {
     cwd: directory,
-    env: refresh === undefined ? environment : await refresh(),
+    env: { ...pushing, ...workerGitEnvironment(pushing, git) },
   });
   return { repository: repositoryId, ref, commit, base };
 }
