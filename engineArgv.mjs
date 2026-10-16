@@ -12,6 +12,7 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 
 import {
+  jobEngineSocket,
   jobGid,
   jobPidsMax,
   jobProviderCredentialFile,
@@ -36,6 +37,11 @@ import {
  * @property {string} network
  * @property {string} image
  * @property {RuntimeVolumes} [runtime] the volumes of a job started through chuggy's runtime in place of its image's entrypoint; none, and the image's own entrypoint runs
+ * @property {EngineSocket} [engineSocket] this machine's engine, handed to the workload through its socket; none, and it is handed nothing of the engine
+ *
+ * @typedef {object} EngineSocket this machine's container engine, as a workload is handed it
+ * @property {string} path the socket's path on this machine
+ * @property {number} gid the socket's group on this machine
  *
  * @typedef {object} RuntimeVolumes a job's own volumes where it starts through chuggy's runtime
  * @property {string} volume the one holding its copy of the runtime
@@ -120,6 +126,15 @@ export function podmanRemoteArgv() {
   return ["info", "--format", "{{.Host.ServiceIsRemote}}"];
 }
 
+/** Where podman's API socket is on this machine, and whether it is there. */
+export function podmanSocketArgv() {
+  return [
+    "info",
+    "--format",
+    "{{.Host.RemoteSocket.Path}} {{.Host.RemoteSocket.Exists}}",
+  ];
+}
+
 /** Docker's security options, which name a daemon running rootless. */
 export function dockerInfoArgv() {
   return ["info", "--format", "{{json .SecurityOptions}}"];
@@ -146,11 +161,35 @@ export function mintedTmpfs(engine) {
 }
 
 /**
+ * What a workload handed this machine's engine is run with: the engine's
+ * socket, mounted read-only where docker's clients look for one, and on docker
+ * the socket's group, without which the image's user cannot reach it. No
+ * workload is added to root's group, so a socket of root's group adds none.
+ * Podman's workload needs no group, since keep-id maps the user running
+ * podman, who owns its socket, onto the image's user.
+ *
+ * @param {EngineName} engine
+ * @param {EngineSocket | undefined} socket
+ */
+function runArgvEngineSocket(engine, socket) {
+  if (socket === undefined) return [];
+  return [
+    "--mount",
+    `type=bind,source=${socket.path},target=${jobEngineSocket},readonly`,
+    ...(engine === "docker" && socket.gid !== 0
+      ? ["--group-add", String(socket.gid)]
+      : []),
+  ];
+}
+
+/**
  * One workload's container, a job's and a session's alike but for the kind
  * it is labelled with. The mounts and the security options are the rig's pod
  * in container terms: the image's user, no capabilities, no privilege
  * escalation, the engine's default seccomp profile, the minted credential in
- * memory the image's user owns, and the workspace in a volume of its own.
+ * memory the image's user owns, and the workspace in a volume of its own. A
+ * workload handed this machine's engine is also run with its socket, as
+ * `runArgvEngineSocket` says.
  *
  * A JOB GIVEN RUNTIME VOLUMES STARTS THROUGH THEM, as the cluster starts one:
  * the runtime's mounted read-only at `workerRuntimeDirectory`, the workspace's
@@ -211,6 +250,7 @@ export function runArgv(engine, workload) {
     `${String(workload.memoryMib)}m`,
     "--mount",
     `type=bind,source=${workload.tokenFile},target=${jobProviderCredentialFile},readonly`,
+    ...runArgvEngineSocket(engine, workload.engineSocket),
     "--tmpfs",
     mintedTmpfs(engine),
     "--volume",

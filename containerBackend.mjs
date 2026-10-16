@@ -7,8 +7,9 @@
  * A SESSION IS RUN AS A JOB IS. Its container is a job's but for the kind it
  * is labelled with, which `held` and `ended` read back, and its deadline,
  * which is its assignment's own: a session ends of itself once idle, and the
- * runner's cap is a job's. A container with no kind label is a job's: a
- * runner that ran nothing else started it.
+ * runner's cap is a job's. Chuggy's runtime and this machine's engine, below,
+ * are a job's alone. A container with no kind label is a job's: a runner that
+ * ran nothing else started it.
  *
  * PLACEMENT IS ASYNCHRONOUS. The plane renews a lease only while a poll names
  * it held, and a cold pull can outlast a lease, so `place` decides only
@@ -46,6 +47,14 @@
  * removed by a later `held`, which never takes one of a placement in flight
  * or of a container it lists. An assignment naming no runtime runs its
  * image's own entrypoint.
+ *
+ * A JOB IS HANDED THIS MACHINE'S ENGINE where its runner hands jobs one: the
+ * engine's socket, mounted into its container, and the variables that tell
+ * docker's clients and testcontainers where it is, which are the backend's
+ * whatever the runner's environment says. What a job starts there is the
+ * engine's, beside the job's container rather than in it, and goes with
+ * neither that container nor its volumes. A session is never handed the
+ * engine.
  */
 
 import { randomBytes } from "node:crypto";
@@ -89,6 +98,7 @@ import {
   enginePullRefused,
 } from "./engineErrors.mjs";
 import {
+  jobEngineSocketEnvironment,
   jobEnvelope,
   jobEnvironmentAttempt,
   jobEnvironmentFile,
@@ -131,6 +141,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {string} logDir
  * @property {{cpuMillis: number, memoryMib: number}} machine
  * @property {number} pullRetryMs the wait before a pull the registry refused is tried again
+ * @property {import("./engineArgv.mjs").EngineSocket} [engineSocket] this machine's engine, which each job is handed through its socket and no session is; none, and no workload is
  *
  * @typedef {object} ContainerBackendSeams
  * @property {Engine} engine
@@ -1134,17 +1145,36 @@ async function containerAssignment(state, name) {
 }
 
 /**
+ * This machine's engine where a workload is handed it: a job's, where the
+ * runner hands its jobs one, and never a session's.
+ *
+ * @param {ContainerBackendSettings} settings
+ * @param {Placement} placement
+ */
+function workloadEngineSocket(settings, placement) {
+  return placement.kind === "Job" ? settings.engineSocket : undefined;
+}
+
+/**
  * The environment a workload's env file carries beside its envelope: the
- * runner's, and for a job started through chuggy's runtime the workspace its
- * check is to find writable, which is the one its envelope names.
+ * runner's, then what a job handed this machine's engine is told of it, and
+ * for a job started through chuggy's runtime the workspace its check is to
+ * find writable, which is the one its envelope names.
  *
  * @param {ContainerBackendSettings} settings
  * @param {Placement} placement
  */
 function workloadEnvironment(settings, placement) {
-  return placement.runtime === undefined
-    ? settings.environment
-    : { ...settings.environment, [workerWorkspaceVariable]: jobWorkspace };
+  const socket = workloadEngineSocket(settings, placement);
+  return {
+    ...settings.environment,
+    ...(socket === undefined
+      ? {}
+      : jobEngineSocketEnvironment(settings.engine, socket.path)),
+    ...(placement.runtime === undefined
+      ? {}
+      : { [workerWorkspaceVariable]: jobWorkspace }),
+  };
 }
 
 /**
@@ -1206,6 +1236,7 @@ async function started(state, placement, assignment, envelope) {
         network: settings.network,
         image: placement.image,
         runtime: placement.runtime?.volumes,
+        engineSocket: workloadEngineSocket(settings, placement),
       }),
     );
   } finally {

@@ -7,6 +7,8 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 
 import {
+  jobEngineSocketEnvironment,
+  jobEngineSocketVariables,
   jobEnvelope,
   jobEnvironmentAttempt,
   jobEnvironmentFile,
@@ -111,5 +113,36 @@ test("each variable a job is handed by the runner or its core is reserved", () =
       "CLAUDE_CODE_OAUTH_TOKEN",
       workerWorkspaceVariable,
     ].toSorted(),
+  );
+});
+
+test("a job handed this machine's engine is told docker's socket, testcontainers the socket's path on this machine, and on podman where what it starts is reached", () => {
+  assert.deepEqual(
+    jobEngineSocketEnvironment("docker", "/var/run/docker.sock"),
+    {
+      DOCKER_HOST: "unix:///var/run/docker.sock",
+      TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: "/var/run/docker.sock",
+    },
+  );
+  assert.deepEqual(
+    jobEngineSocketEnvironment("podman", "/run/user/1000/podman/podman.sock"),
+    {
+      DOCKER_HOST: "unix:///var/run/docker.sock",
+      TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE:
+        "/run/user/1000/podman/podman.sock",
+      TESTCONTAINERS_HOST_OVERRIDE: "host.containers.internal",
+    },
+  );
+});
+
+/** Catches a variable a job is told of the engine that a runner's environment could still name, only to lose it to the backend's. */
+test("each variable a job handed this machine's engine is told, on either engine, is named among those a runner's environment may not name", () => {
+  const told = [
+    jobEngineSocketEnvironment("docker", "/var/run/docker.sock"),
+    jobEngineSocketEnvironment("podman", "/run/user/1000/podman/podman.sock"),
+  ].flatMap((variables) => Object.keys(variables));
+  assert.deepEqual(
+    jobEngineSocketVariables.toSorted(),
+    [...new Set(told)].toSorted(),
   );
 });
