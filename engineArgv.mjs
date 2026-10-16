@@ -41,7 +41,7 @@ import {
  *
  * @typedef {object} EngineSocket this machine's container engine, as a workload is handed it
  * @property {string} path the socket's path on this machine
- * @property {number} gid the socket's group on this machine
+ * @property {number} gid the socket's group on this machine, which a docker workload is added to unless it is root's and a podman one never is
  *
  * @typedef {object} RuntimeVolumes a job's own volumes where it starts through chuggy's runtime
  * @property {string} volume the one holding its copy of the runtime
