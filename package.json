@@ -40,6 +40,7 @@
     "engineErrors.mjs",
     "entrypoint.mjs",
     "git-askpass.sh",
+    "hostBackend.mjs",
     "job.mjs",
     "leadDecision.mjs",
     "lease.mjs",

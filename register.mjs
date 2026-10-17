@@ -20,7 +20,9 @@ import { URL } from "node:url";
 import { TextDecoder } from "node:util";
 
 import {
+  workerPoolCapabilitiesMax,
   workerPoolCapabilitiesSchema,
+  workerPoolCapabilitySchema,
   workerPoolIdentityCharsMax,
   workerPoolRedemptionSchema,
 } from "@chuggy/worker-contract/workerPool";
@@ -39,21 +41,23 @@ import {
  * @typedef {z.infer<typeof registeredPersonalRunnerSchema>} RegisteredPersonalRunner
  * @typedef {RegisteredDedicatedPool | RegisteredPersonalRunner} RegisteredPool
  *
- * @typedef {{kind?: undefined, api: URL, token: string, pool: string}
- *   | {kind: "Personal", api: URL, token: string}} RegisterAskedRequest
- *   chuggy's origin, the token, and the name a pool takes; a personal runner takes none
- * @typedef {RegisterAskedRequest & {capability: string}} RegisterRequest
- *   `capability` is this machine's platform, the one capability the runner declares
+ * @typedef {{kind?: undefined, api: URL, token: string, pool: string, capabilities: readonly string[]}
+ *   | {kind: "Personal", api: URL, token: string, capabilities: readonly string[]}} RegisterAskedRequest
+ *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, and what the operator declares beside the platforms
+ * @typedef {RegisterAskedRequest} RegisterRequest
+ *   `capabilities` is whole: this machine's platforms first, then what the operator declared
  *
  * @typedef {object} RegisterAsked what the operator asked
  * @property {string | undefined} api
  * @property {string | undefined} token
  * @property {string | undefined} pool
  * @property {boolean | undefined} [personal] the token is a member's personal one
+ * @property {readonly string[] | undefined} [capabilities] what the operator declares the machine meets, beside its platforms
  *
  * @typedef {object} RegisterMachine
  * @property {string} hostname
- * @property {string} arch as `process.arch` names it
+ * @property {string} arch as `process.arch` names its containers' machine
+ * @property {readonly string[]} [hosted] the platforms it runs work on its host, beside its containers'
  */
 
 /** Where a pool's token is redeemed, under chuggy's API. */
@@ -202,8 +206,32 @@ function registerApi(text) {
 }
 
 /**
+ * What the operator declares the machine meets, or why not: each a token a
+ * requirement can name, once, and none a platform, which is the machine's and
+ * which register finds.
+ *
+ * @param {readonly string[]} declared
+ * @returns {{declared: readonly string[]} | {refused: string}}
+ */
+function registerDeclared(declared) {
+  for (const capability of declared) {
+    if (!workerPoolCapabilitySchema.safeParse(capability).success)
+      return {
+        refused: `--capability ${capability} is not a capability: letters, digits, _, : and -, beginning with a letter or digit`,
+      };
+    if (capability.startsWith("Platform:"))
+      return {
+        refused: `--capability ${capability} names a platform, which register finds of this machine`,
+      };
+  }
+  if (new Set(declared).size !== declared.length)
+    return { refused: "--capability names one capability twice" };
+  return { declared };
+}
+
+/**
  * What the operator asked, checked, or why it cannot be redeemed: everything
- * but the platform, so a runner that must ask its engine for the platform can
+ * but the platforms, so a runner that must ask its engine for a platform can
  * refuse a wrong ask first. Nothing here spends the token.
  *
  * @param {RegisterAsked} asked
@@ -215,6 +243,9 @@ export function registerAskedChecked(asked, hostname) {
     return { refused: "register needs --api and --token" };
   const api = registerApi(asked.api);
   if (typeof api === "string") return { refused: api };
+  const declared = registerDeclared(asked.capabilities ?? []);
+  if ("refused" in declared) return declared;
+  const { declared: capabilities } = declared;
   if (asked.personal === true) {
     if (asked.pool !== undefined)
       return {
@@ -223,7 +254,9 @@ export function registerAskedChecked(asked, hostname) {
       };
     if (!registerTokenAllowed(asked.token))
       return { refused: "--token is not a registration token" };
-    return { checked: { kind: "Personal", api, token: asked.token } };
+    return {
+      checked: { kind: "Personal", api, token: asked.token, capabilities },
+    };
   }
   const pool = asked.pool ?? registerPoolNameDefault(hostname);
   if (pool === undefined)
@@ -236,7 +269,7 @@ export function registerAskedChecked(asked, hostname) {
     };
   if (!registerTokenAllowed(asked.token))
     return { refused: "--token is not a registration token" };
-  return { checked: { api, token: asked.token, pool } };
+  return { checked: { api, token: asked.token, pool, capabilities } };
 }
 
 /**
@@ -251,8 +284,8 @@ function registerTokenAllowed(token) {
 
 /**
  * The redemption the operator asked for, or why it cannot be made: the ask
- * checked, then the platform the machine's containers run. Nothing here
- * spends the token.
+ * checked, then the platform the machine's containers run, those it runs on
+ * its host, and what the operator declared. Nothing here spends the token.
  *
  * @param {RegisterAsked} asked
  * @param {RegisterMachine} machine
@@ -261,14 +294,22 @@ function registerTokenAllowed(token) {
 export function registerRequest(asked, machine) {
   const answer = registerAskedChecked(asked, machine.hostname);
   if ("refused" in answer) return answer;
-  const capability = Object.hasOwn(registerPlatforms, machine.arch)
+  const platform = Object.hasOwn(registerPlatforms, machine.arch)
     ? registerPlatforms[machine.arch]
     : undefined;
-  if (capability === undefined)
+  if (platform === undefined)
     return {
       refused: `this machine is ${machine.arch}, and a pool runs Linux on x64 or arm64`,
     };
-  return { request: { ...answer.checked, capability } };
+  const capabilities = [
+    ...new Set([platform, ...(machine.hosted ?? [])]),
+    ...answer.checked.capabilities,
+  ];
+  if (capabilities.length > workerPoolCapabilitiesMax)
+    return {
+      refused: `a pool declares at most ${String(workerPoolCapabilitiesMax)} capabilities, its platforms among them`,
+    };
+  return { request: { ...answer.checked, capabilities } };
 }
 
 /**
@@ -309,7 +350,7 @@ function registerRefusal(status, body, request) {
   if (status === 404)
     return "the registration token is unknown, spent or expired; mint another in chuggy's console";
   if (status === 403)
-    return `the registration token does not permit ${request.capability}; mint one that does`;
+    return `the registration token does not permit every capability declared, of ${request.capabilities.join(", ")}; mint one that does`;
   if (status === 409 && request.kind === "Personal")
     return "chuggy registered this member's runner again meanwhile, and the token is not spent; run register again";
   if (status === 400) {
@@ -336,7 +377,7 @@ const registeredSpent = "the token is spent, so mint another";
 /**
  * The pool file a 201 carries, checked whole: it must be one the worker core
  * reads, of the kind asked for and for the pool asked for, declaring the
- * capability asked for.
+ * capabilities asked for.
  *
  * @param {Uint8Array} body
  * @param {RegisterRequest} request
@@ -387,15 +428,17 @@ function registeredParsed(schema, document) {
 }
 
 /**
- * Refuses a file declaring other than the one capability asked for.
+ * Refuses a file declaring other than the capabilities asked for.
  *
  * @param {RegisteredPool} file
  * @param {RegisterRequest} request
  */
 function registeredCapabilityAsked(file, request) {
+  const declared = new Set(file.capabilities);
   if (
-    file.capabilities.length !== 1 ||
-    file.capabilities[0] !== request.capability
+    declared.size !== file.capabilities.length ||
+    declared.size !== request.capabilities.length ||
+    !request.capabilities.every((capability) => declared.has(capability))
   )
     registeredAnotherAnswered();
 }
@@ -403,7 +446,7 @@ function registeredCapabilityAsked(file, request) {
 /** @returns {never} */
 function registeredAnotherAnswered() {
   throw new Error(
-    `chuggy answered the registration for another pool or capability than the one asked for; ${registeredSpent}`,
+    `chuggy answered the registration for another pool, or capabilities other than those asked for; ${registeredSpent}`,
   );
 }
 
@@ -414,7 +457,7 @@ function registeredAnotherAnswered() {
  * @param {RegisterRequest} request
  */
 function registerPosted(request) {
-  const capabilities = [request.capability];
+  const capabilities = [...request.capabilities];
   return request.kind === "Personal"
     ? {
         path: registerPersonalPath,

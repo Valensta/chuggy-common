@@ -15,6 +15,7 @@ import {
 import {
   checkedContainerBackendSettings,
   containerBackend,
+  containerImageOf,
   containerImageFaultTexts,
   containerName,
   pullFailureDwellMs,
@@ -241,6 +242,63 @@ test("a present image is not pulled", async (t) => {
   await backend.place(assignment(), "Job");
   await backend.settled();
   assert.deepEqual(verbs(state), ["image", "run"]);
+});
+
+test("a job that pins no image runs in the first image its owner listed declaring every capability it names but its platform", async (t) => {
+  const xcode = "registry.example/owner/xcode:16";
+  const bazel = "registry.example/owner/bazel:7";
+  const { backend, state } = await harness(t, {
+    images: [
+      { image: bazel, capabilities: ["Tool:Bazel"] },
+      { image: xcode, capabilities: ["Agent:Claude", "Tool:Xcode"] },
+      { image, capabilities: ["Agent:Claude", "Tool:Xcode", "Cache:Warm"] },
+    ],
+  });
+  state.images.add(xcode);
+  await backend.place(
+    assignment({
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", "Agent:Claude", "Tool:Xcode"],
+    }),
+    "Job",
+  );
+  await backend.settled();
+  const run = state.calls.find((call) => call.argv[0] === "run");
+  assert.ok(run?.argv.includes(xcode), JSON.stringify(run?.argv));
+  assert.deepEqual(
+    await backend.place(
+      assignment({
+        assignment: "asg-2",
+        image: undefined,
+        capabilities: ["Platform:Linux:Amd64", "Agent:Codex"],
+      }),
+      "Job",
+    ),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment pins no image, and no image this pool's owner listed declares every capability it names",
+    },
+  );
+});
+
+test("an image an assignment pins is the one it runs, whatever its owner listed", () => {
+  const listed = [{ image: "registry.example/owner/any", capabilities: [] }];
+  assert.equal(
+    containerImageOf(listed, { image, capabilities: ["Platform:Linux:Amd64"] }),
+    image,
+  );
+  assert.equal(
+    containerImageOf(listed, {
+      image: undefined,
+      capabilities: ["Platform:Linux:Arm64"],
+    }),
+    "registry.example/owner/any",
+  );
+  assert.equal(
+    containerImageOf([], { image: undefined, capabilities: [] }),
+    undefined,
+  );
 });
 
 test("a pull that fails drops out of held and is logged", async (t) => {
@@ -864,7 +922,10 @@ test("a stop the engine could not be reached for is unavailable", async (t) => {
 test("what this machine cannot take is refused, naming no value of the envelope", async (t) => {
   const { backend, state } = await harness(t);
   const refusals = [
-    [assignment({ image: undefined }), /pins no image/u],
+    [
+      assignment({ image: undefined }),
+      /pins no image, and no image this pool's owner listed declares every capability it names/u,
+    ],
     [assignment({ image: undefined, runtime }), /pins no image/u],
     [
       assignment({ cpuMillis: 8001 }),

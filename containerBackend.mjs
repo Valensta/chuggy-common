@@ -4,6 +4,11 @@
  * the worker core. chuggy's Kubernetes pool backend is the behaviour this
  * mirrors, with a container where it has a pod.
  *
+ * AN ASSIGNMENT THAT PINS NO IMAGE RUNS IN ONE ITS OWNER LISTED: the first of
+ * `images` declaring every capability the assignment names but its platform,
+ * which is this engine's. Nothing here checks that an image meets what it
+ * declares; its owner declared it, as the pool's own capabilities are.
+ *
  * A SESSION IS RUN AS A JOB IS. Its container is a job's but for the kind it
  * is labelled with, which `held` and `ended` read back, and its deadline,
  * which is its assignment's own: a session ends of itself once idle, and the
@@ -67,6 +72,10 @@ import {
   workerJobCommand,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
+import {
+  workerImageCharsMax,
+  workerPoolCapabilitySchema,
+} from "@chuggy/worker-contract/workerPool";
 import { z } from "zod";
 
 import {
@@ -142,6 +151,11 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {{cpuMillis: number, memoryMib: number}} machine
  * @property {number} pullRetryMs the wait before a pull the registry refused is tried again
  * @property {import("./engineArgv.mjs").EngineSocket} [engineSocket] this machine's engine, which each job is handed through its socket and no session is; none, and no workload is
+ * @property {readonly OwnerImage[]} [images] what a job whose assignment pins no image runs in; none, and no such job is taken
+ *
+ * @typedef {object} OwnerImage an image its pool's owner runs work in that names capabilities rather than an image
+ * @property {string} image
+ * @property {readonly string[]} capabilities what the owner declares it meets
  *
  * @typedef {object} ContainerBackendSeams
  * @property {Engine} engine
@@ -819,6 +833,37 @@ async function heldAssignments(state) {
   return [...held].map(([assignment, kind]) => ({ assignment, kind }));
 }
 
+/** The images an owner lists for work that pins none, as a runner's settings name them. */
+export const ownerImagesSchema = z.array(
+  z.strictObject({
+    image: z.string().min(1).max(workerImageCharsMax),
+    capabilities: z.array(
+      workerPoolCapabilitySchema.refine(
+        (capability) => !capability.startsWith("Platform:"),
+        "names a platform, which is the engine's",
+      ),
+    ),
+  }),
+);
+
+/**
+ * The image an assignment runs in: the one it pins, or else the first its
+ * owner listed declaring every capability it names but its platform.
+ *
+ * @param {readonly OwnerImage[]} images
+ * @param {Pick<WorkerPoolAssignment, "image" | "capabilities">} assignment
+ * @returns {string | undefined}
+ */
+export function containerImageOf(images, assignment) {
+  if (assignment.image !== undefined) return assignment.image;
+  const needed = assignment.capabilities.filter(
+    (capability) => !capability.startsWith("Platform:"),
+  );
+  return images.find((listed) =>
+    needed.every((capability) => listed.capabilities.includes(capability)),
+  )?.image;
+}
+
 /**
  * Why this machine will not take an assignment, or nothing.
  *
@@ -828,8 +873,8 @@ async function heldAssignments(state) {
  */
 async function placementRefusal(state, assignment) {
   const { machine } = state.settings;
-  if (assignment.image === undefined)
-    return "the assignment pins no image, and this pool runs only an image its assignment pins";
+  if (containerImageOf(state.settings.images ?? [], assignment) === undefined)
+    return "the assignment pins no image, and no image this pool's owner listed declares every capability it names";
   if (assignment.cpuMillis > machine.cpuMillis)
     return `the assignment asks for ${String(assignment.cpuMillis)} CPU millis and this machine has ${String(machine.cpuMillis)}`;
   if (assignment.memoryMib > machine.memoryMib)
@@ -1363,7 +1408,9 @@ async function placed(state, assignment, kind) {
     assignment: assignment.assignment,
     kind,
     name: containerName(settings.pool, assignment.assignment),
-    image: /** @type {string} */ (assignment.image),
+    image: /** @type {string} */ (
+      containerImageOf(settings.images ?? [], assignment)
+    ),
     phase: "Placing",
     deadlineEpochSecs:
       Math.floor(placedMs / 1000) +

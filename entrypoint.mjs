@@ -25,6 +25,8 @@
  * back on and the attempt runs from admission onwards exactly as a pushed one.
  * A session's task, which a pool holds only with the site's API, bounds and
  * model on it, runs as a session pod's own launch does (`./session.mjs`).
+ * A job its runner started on its host mints credentials into that job's own
+ * directory rather than a mount's, and a session never runs there.
  *
  * WHAT PREPARING THE WORKSPACE LEAVES IS NOT THE WORK. Each file a block
  * provisions, and whatever its setup lines leave untracked, such as a lockfile
@@ -90,6 +92,8 @@ import {
   workerStageEnvironment,
   workerSummaryText,
 } from "./checks.mjs";
+import { hostJobVariable } from "./coreRuntime.mjs";
+import { jobHostPlaces } from "./job.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
   planeCredential,
@@ -1157,8 +1161,16 @@ async function main() {
     return workerAttempt(documentLaunch(carried));
   const envelope = envelopeRead(carried);
   const fetched = await envelopeTask(envelope);
+  const host = process.env[hostJobVariable];
   if (fetched.mode === "Work")
-    return workerAttempt(envelopeLaunch(envelope, fetched.task));
+    return workerAttempt(
+      envelopeLaunch(envelope, fetched.task),
+      host === undefined ? {} : { minted: jobHostPlaces(host).minted },
+    );
+  if (host !== undefined)
+    throw new Error(
+      "a session runs in a container, never on its runner's host",
+    );
   const { sessionEnvelopeServices, sessionMain } =
     await import("./session.mjs");
   process.exitCode = await sessionMain(
