@@ -11,22 +11,38 @@
  * then be the node a project's checks and its agent's shell run.
  *
  * THE TREE'S `share/` HOLDS THE CA BUNDLE CODEX IS GIVEN.
+ *
+ * A CORE RUN ON ITS RUNNER'S HOST HAS NO SUCH TREE, so its agents are the
+ * ones its PATH finds, which is its owner's, and Codex verifies a peer
+ * against the host's own store.
  */
 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** The askpass, the agents' binaries and the CA bundle of a core whose module is at `moduleUrl`. */
-export function coreRuntimePaths(moduleUrl) {
+/** What names a host-run job's directory to the core it runs, which it is set for no other. */
+export const hostJobVariable = "CHUGGY_HOST_JOB";
+
+/**
+ * The askpass, the agents' binaries and the CA bundle of a core whose module
+ * is at `moduleUrl`, run as `environment` says.
+ *
+ * @param {string} moduleUrl
+ * @param {Readonly<Record<string, string | undefined>>} [environment]
+ */
+export function coreRuntimePaths(moduleUrl, environment = {}) {
   const core = dirname(fileURLToPath(moduleUrl));
   const tree = resolve(core, "..", "..");
+  const hosted = environment[hostJobVariable] !== undefined;
   return {
     askpass: join(core, "git-askpass.sh"),
-    claude: join(tree, "bin", "claude"),
-    codex: join(tree, "bin", "codex"),
-    certificates: join(tree, "share", "ca-certificates.crt"),
+    claude: hosted ? "claude" : join(tree, "bin", "claude"),
+    codex: hosted ? "codex" : join(tree, "bin", "codex"),
+    certificates: hosted
+      ? undefined
+      : join(tree, "share", "ca-certificates.crt"),
   };
 }
 
 /** This core's own. */
-export const coreRuntime = coreRuntimePaths(import.meta.url);
+export const coreRuntime = coreRuntimePaths(import.meta.url, process.env);

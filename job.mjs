@@ -7,13 +7,23 @@
  * its core would refuse, and is read back from a container under the same
  * schema. A job its runner hands this machine's container engine is also
  * given the engine's socket, and told where it is.
+ *
+ * A JOB RUN ON ITS RUNNER'S HOST HAS A DIRECTORY WHERE A CONTAINER HAS MOUNTS.
+ * Its workspace, its home and the directory credentials are minted to are each
+ * in it, and the core is told it under `hostJobVariable`, which is how the
+ * core knows it runs on a host: there its agents are the ones on its PATH,
+ * since a host carries no runtime tree of chuggy's.
  */
+
+import { join } from "node:path";
 
 import {
   workerTaskVariable,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
+
+import { hostJobVariable } from "./coreRuntime.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
@@ -36,6 +46,20 @@ export const jobWorkspace = "/workspace";
 /** Where the Claude token file is mounted, read-only. */
 export const jobProviderCredentialFile =
   "/var/run/chuggy/credentials/claude-code";
+
+/**
+ * Where a job run on its runner's host keeps what a container would mount,
+ * each in its directory.
+ *
+ * @param {string} directory
+ */
+export function jobHostPlaces(directory) {
+  return {
+    workspace: join(directory, "workspace"),
+    home: join(directory, "home"),
+    minted: join(directory, "minted"),
+  };
+}
 
 /**
  * Where a job handed this machine's container engine finds its socket, which
@@ -85,6 +109,7 @@ export const reservedJobVariables = [
   workerTaskVariable,
   "CLAUDE_CODE_OAUTH_TOKEN",
   workerWorkspaceVariable,
+  hostJobVariable,
 ];
 
 /**
@@ -93,16 +118,24 @@ export const reservedJobVariables = [
  *
  * @param {WorkerPoolAssignment} assignment
  * @param {JobBounds} bounds
+ * @param {{workspace: string, providerCredentialFile: string}} [places] where the workload finds them; a container's mounts where absent
  * @returns {string}
  */
-export function jobEnvelope(assignment, bounds) {
+export function jobEnvelope(
+  assignment,
+  bounds,
+  places = {
+    workspace: jobWorkspace,
+    providerCredentialFile: jobProviderCredentialFile,
+  },
+) {
   const envelope = poolEnvelopeSchema.safeParse({
     callbackUrl: assignment.callbackUrl,
     bearer: assignment.bearer,
-    workspace: jobWorkspace,
+    workspace: places.workspace,
     timeoutSecsMax: bounds.timeoutSecsMax,
     outputBytesMax: bounds.outputBytesMax,
-    providerCredentialFile: jobProviderCredentialFile,
+    providerCredentialFile: places.providerCredentialFile,
   });
   if (!envelope.success)
     throw new RangeError(

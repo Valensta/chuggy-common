@@ -118,6 +118,8 @@ import { routeFilled } from "./wire.mjs";
  * wire. An intent is bounded as a whole and by nothing a line at a time, so a
  * session is told what bounds one and nothing about where its lines break.
  */
+const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?}, each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none.`;
+
 const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`checks\` are command lines added to the first Check stage the configuration runs as commands, which initialize_draft answers as \`commandedCheckStage\`, counted from zero, so they run only in a program that reaches that stage, and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes its repository's landing, which for a newly bound repository is a pull request; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke.`;
 
 /**
@@ -631,10 +633,18 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration.",
-    shape: (z) => ({ revision: identity(z) }),
-    call: (context, { revision }) =>
-      read(context, projectPath(context, "draftInitialization", { revision })),
+      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection.",
+    shape: (z) => ({
+      revision: identity(z),
+      work: identity(z).optional(),
+      evaluation: identity(z).optional(),
+      finalization: identity(z).optional(),
+    }),
+    call: (context, { revision, work, evaluation, finalization }) =>
+      read(
+        context,
+        `${projectPath(context, "draftInitialization", { revision })}${search({ work, evaluation, finalization })}`,
+      ),
   },
   {
     name: "file_dependent",
@@ -647,6 +657,7 @@ export const chuggyProjectTools = [
       expectedProjectSequence: count(z),
       authoring: anyObject(z),
       brief: anyObject(z),
+      selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) => {
       if (!dependentRelationsAdmitted.includes(args.relation))
@@ -666,18 +677,24 @@ export const chuggyProjectTools = [
         expectedProjectSequence: args.expectedProjectSequence,
         authoring: args.authoring,
         brief: args.brief,
+        selection: args.selection,
       });
     },
   },
   {
     name: "revise_draft",
-    description: `Replaces one open draft's authoring and brief, fenced on the version read. ${chuggyBriefDescription} The brief is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
+    description: `Replaces one open draft's authoring, brief and selection, fenced on the version read. ${chuggyBriefDescription} The brief is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
     shape: (z) => ({
       ticket: ticket(z),
       expectedVersion: count(z),
       configurationRevision: identity(z),
       authoring: anyObject(z),
       brief: anyObject(z),
+      selection: anyObject(z)
+        .optional()
+        .describe(
+          `${chuggySelectionDescription} It is replaced whole, so send back the \`selection\` read_draft answered or the revision clears it.`,
+        ),
     }),
     call: (context, args) =>
       write(
@@ -689,6 +706,7 @@ export const chuggyProjectTools = [
           configurationRevision: args.configurationRevision,
           authoring: args.authoring,
           brief: args.brief,
+          selection: args.selection,
         },
       ),
   },
@@ -728,6 +746,7 @@ export const chuggyProjectTools = [
       expectedProjectSequence: count(z),
       authoring: anyObject(z),
       brief: anyObject(z),
+      selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) =>
       write(context, projectPath(context, "drafts"), "POST", {
@@ -736,6 +755,7 @@ export const chuggyProjectTools = [
         expectedProjectSequence: args.expectedProjectSequence,
         authoring: args.authoring,
         brief: args.brief,
+        selection: args.selection,
       }),
   },
   {

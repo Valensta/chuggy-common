@@ -199,13 +199,14 @@ const codexCertificateVariables = [
  * which an image without ca-certificates does not have, and trusts the bundle
  * beside that store rather than in its place. The variable is one no other
  * program reads, so git and every program the project runs keep whatever
- * store the image has.
+ * store the image has. A core with no bundle gives none.
  */
 export async function prepareCodexEnvironment(
   environment,
   certificates = coreRuntime.certificates,
 ) {
   if (
+    certificates === undefined ||
     codexCertificateVariables.some((name) => Object.hasOwn(environment, name))
   )
     return {};

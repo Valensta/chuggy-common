@@ -67,6 +67,21 @@ test("a registration's file only its owner can open is read back whole", async (
     );
 });
 
+test("a registration whose operator runs work on the machine itself is read back saying so, and says it only as true", async () => {
+  assert.deepEqual(
+    await written(
+      JSON.stringify({ ...registration, host: true }),
+      0o600,
+      poolCredentials,
+    ),
+    { ...registration, host: true },
+  );
+  assert.match(
+    await refusal(JSON.stringify({ ...registration, host: false })),
+    /host/u,
+  );
+});
+
 test("a registration naming its registry host, with or without a port, is read back whole", async () => {
   for (const registryHost of [
     "chuggy-registry.invalid",

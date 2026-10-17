@@ -33,6 +33,21 @@ test("a core in chuggy's runtime finds the agents in the runtime's own bin", () 
   );
 });
 
+/** Catches a host-run core reaching for a runtime tree its host does not have. */
+test("a core run on its runner's host finds its agents on its PATH and gives Codex no bundle", () => {
+  assert.deepEqual(
+    coreRuntimePaths("file:///usr/local/lib/chuggy/coreRuntime.mjs", {
+      CHUGGY_HOST_JOB: "/Users/owner/Library/Caches/chuggy/jobs/job-1",
+    }),
+    {
+      askpass: "/usr/local/lib/chuggy/git-askpass.sh",
+      claude: "claude",
+      codex: "codex",
+      certificates: undefined,
+    },
+  );
+});
+
 /** Catches an askpass named anywhere but beside the modules that hand it to git. */
 test("this core's askpass is the one shipped beside its modules", async () => {
   assert.equal(

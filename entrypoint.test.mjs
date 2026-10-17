@@ -572,6 +572,83 @@ test("a pod launched without its minted credential directory ends the attempt be
 });
 
 /**
+ * A job its runner started on its host mints into its own directory, so one
+ * there runs on as a pod with the contract's directory mounted does, and one
+ * missing is named where the core looked. Catches a host job checked at the
+ * contract's path, which no host has.
+ */
+test("a job run on its runner's host finds its minted credential directory in its own", async () => {
+  const plane = await commandedPlane();
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-host-job-"));
+  try {
+    const job = {
+      [workerTaskVariable]: JSON.stringify({
+        ...envelope,
+        callbackUrl: plane.url,
+      }),
+      CHUGGY_HOST_JOB: directory,
+    };
+    const missing = await launched(job);
+    assert.equal(missing.code, 1);
+    assert.ok(
+      missing.stderr.includes(
+        `the minted credential directory ${join(directory, "minted")} does not exist`,
+      ),
+      missing.stderr,
+    );
+
+    plane.asked.splice(0);
+    await mkdir(join(directory, "minted"));
+    const ran = await launched(job);
+    assert.equal(ran.code, 1);
+    assert.match(
+      ran.stderr,
+      /^no repository configuration for repository-1$/mu,
+    );
+    assert.deepEqual(
+      plane.asked.map(({ route }) => route),
+      ["task", "input", "credential", "runTotals", "artifact", "runEnded"],
+    );
+  } finally {
+    await plane.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/** Catches a session run on a host, which its pinned image says it never is. */
+test("a session's envelope on its runner's host is refused before the session opens", async () => {
+  const plane = await servedPlane(
+    (route) =>
+      route === "task"
+        ? { status: 200, body: poolHeldSessionAnswer }
+        : { status: 200, body: facts },
+    poolHeldSessionWire,
+  );
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-host-job-"));
+  try {
+    const ran = await launched({
+      [workerTaskVariable]: JSON.stringify({
+        ...envelope,
+        callbackUrl: plane.url,
+      }),
+      CHUGGY_HOST_JOB: directory,
+    });
+    assert.equal(ran.code, 1);
+    assert.match(
+      ran.stderr,
+      /^a session runs in a container, never on its runner's host$/mu,
+    );
+    assert.deepEqual(
+      plane.asked.map(({ route }) => route),
+      ["task"],
+    );
+  } finally {
+    await plane.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/**
  * A task whose configuration names no worker is refused before the pod reads
  * anything else, and the attempt still ends then, under the envelope's bearer
  * and with the refusal as its error text. Catches a pod that holds no bearer

@@ -2,7 +2,9 @@
  * The file a pool's registration writes: who the pool is, where its issuer,
  * plane and image registry are, and its client credential. A personal
  * runner's is a pool's with the project and pool taken out and the member it
- * serves put in, told apart by its `kind`. It is refused unless
+ * serves put in, told apart by its `kind`. Its `host`, the one thing in it
+ * chuggy did not answer, is the operator's: a job that pins no image runs on
+ * the machine itself. It is refused unless
  * only its owner can read or write it, and no refusal carries the file's text,
  * because the secret is in it.
  */
@@ -24,6 +26,7 @@ import { z } from "zod";
  *   token to when it pulls
  * @property {string} clientId
  * @property {string} clientSecret
+ * @property {true} [host] a job that pins no image runs on the machine itself
  *
  * @typedef {PoolIdentity & PoolEndpoints} PoolCredentials
  */
@@ -52,6 +55,7 @@ const poolCredentialsSchema = z.strictObject({
     .optional(),
   clientId: poolCredentialsTextSchema,
   clientSecret: poolCredentialsTextSchema,
+  host: z.literal(true).optional(),
 });
 
 const personalRunnerCredentialsSchema = poolCredentialsSchema

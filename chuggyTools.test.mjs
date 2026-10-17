@@ -1148,6 +1148,55 @@ test("an origination without the fence the route requires never reaches it", asy
   assert.equal(api.calls.length, 0);
 });
 
+/** A catalog selection, which a draft on a catalog carries to the route as it was given. */
+const selection = { work: "build-sonnet", evaluation: "standard" };
+
+test("a draft filed or revised with a selection carries it to the route, and one without carries none", async () => {
+  const { api, call } = toolsOf();
+  const revision = {
+    ticket: 4,
+    expectedVersion: 2,
+    configurationRevision: "r1",
+    authoring: { dependencies: [] },
+    brief: { title: "t" },
+  };
+
+  for (const [tool, args] of [
+    ["create_draft", origination],
+    ["file_dependent", dependent],
+    ["revise_draft", revision],
+  ]) {
+    await call(tool, { ...args, selection });
+    await call(tool, args);
+  }
+
+  assert.equal(api.calls.length, 6);
+  for (const [index, held] of api.calls.entries()) {
+    const body = JSON.parse(held.init.body);
+    if (index % 2 === 0) assert.deepEqual(body.selection, selection, held.path);
+    else assert.equal("selection" in body, false, held.path);
+  }
+});
+
+test("a draft's defaults are initialized under the selection it will carry", async () => {
+  const { api, call } = toolsOf();
+
+  await call("initialize_draft", { revision: "r1", ...selection });
+
+  assert.equal(
+    api.calls[0].path,
+    "/api/v1/tenants/vteng/projects/chuggy/draft-initializations/r1?work=build-sonnet&evaluation=standard",
+  );
+});
+
+/** The selection is explained on its own parameter, which no tool description's cut reaches. */
+test("each draft tool's selection parameter says what a selection is", () => {
+  for (const name of ["create_draft", "file_dependent", "revise_draft"]) {
+    const tool = chuggyProjectTools.find((held) => held.name === name);
+    assert.match(tool?.shape(z).selection?.description ?? "", /catalog/u, name);
+  }
+});
+
 /** What every project tool is driven with where a suite drives them all. */
 const projectToolArguments = {
   list_tickets: {},

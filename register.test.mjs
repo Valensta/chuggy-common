@@ -39,7 +39,8 @@ const request = {
   api: new URL("https://chuggy.example"),
   token: "registration-token-fixture",
   pool: "shame",
-  capability: "Platform:Linux:Amd64",
+  capabilities: ["Platform:Linux:Amd64"],
+  host: false,
 };
 
 /** @type {import("./register.mjs").RegisterRequest} */
@@ -47,7 +48,8 @@ const personalRequest = {
   kind: "Personal",
   api: new URL("https://chuggy.example"),
   token: "registration-token-fixture",
-  capability: "Platform:Linux:Amd64",
+  capabilities: ["Platform:Linux:Amd64"],
+  host: false,
 };
 
 /** @param {import("node:test").TestContext} t */
@@ -56,6 +58,21 @@ async function scratch(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test("a redemption asked to run work on the machine itself answers a pool file that says so, and never tells chuggy", async () => {
+  const { fetch, requests } = answeringFetch(201, registered);
+  assert.deepEqual(await registerRedeemed({ ...request, host: true }, fetch), {
+    ...registered,
+    host: true,
+  });
+  assert.equal("host" in JSON.parse(String(requests[0].init.body)), false);
+  const asked = registerAskedChecked(
+    { api: "https://chuggy.example/", token: "t", pool: undefined, host: true },
+    "shame",
+  );
+  assert.ok("checked" in asked);
+  assert.equal(asked.checked.host, true);
+});
 
 test("a redemption is posted to chuggy's registrations as its native media type, declaring this machine's platform", async () => {
   const { fetch, requests } = answeringFetch(201, registered);
@@ -86,7 +103,7 @@ test("each refusal chuggy answers is one line, naming nothing it was sent", asyn
     [
       403,
       { error: { code: "CapabilityNotPermitted", message: "no" } },
-      "the registration token does not permit Platform:Linux:Amd64; mint one that does",
+      "the registration token does not permit every capability declared, of Platform:Linux:Amd64; mint one that does",
     ],
     [
       400,
@@ -150,14 +167,17 @@ test("a 201 whose body is no pool file for the pool asked for is refused, naming
     ],
     [{ ...registered, registryHost: "Registry/x" }, /registryHost /u],
     [{ ...registered, tenant: "" }, /tenant /u],
-    [{ ...registered, pool: "other" }, /for another pool or capability/u],
+    [
+      { ...registered, pool: "other" },
+      /for another pool, or capabilities other/u,
+    ],
     [
       { ...registered, capabilities: ["Platform:Linux:Arm64"] },
-      /for another pool or capability/u,
+      /for another pool, or capabilities other/u,
     ],
     [
       { ...registered, capabilities: ["Platform:Linux:Amd64", "gpu"] },
-      /for another pool or capability/u,
+      /for another pool, or capabilities other/u,
     ],
     ["{", /with no JSON/u],
   ];
@@ -259,7 +279,8 @@ test("a request declares this machine's platform and names the pool for its host
       api: new URL("https://chuggy.example"),
       token: "t",
       pool: "shame",
-      capability: "Platform:Linux:Amd64",
+      capabilities: ["Platform:Linux:Amd64"],
+      host: false,
     },
   });
   const arm = registerRequest(
@@ -268,7 +289,87 @@ test("a request declares this machine's platform and names the pool for its host
   );
   assert.ok("request" in arm);
   assert.equal(arm.request.pool, "geoff-laptop");
-  assert.equal(arm.request.capability, "Platform:Linux:Arm64");
+  assert.deepEqual(arm.request.capabilities, ["Platform:Linux:Arm64"]);
+});
+
+test("a request declares the host's platforms and the operator's capabilities after the containers' platform", () => {
+  const asked = {
+    api: "https://chuggy.example/",
+    token: "t",
+    pool: undefined,
+    capabilities: ["Agent:Claude", "Tool:Xcode"],
+  };
+  const answer = registerRequest(asked, {
+    hostname: "shame",
+    arch: "arm64",
+    hosted: ["Platform:MacOS:Arm64"],
+  });
+  assert.ok("request" in answer);
+  assert.deepEqual(answer.request.capabilities, [
+    "Platform:Linux:Arm64",
+    "Platform:MacOS:Arm64",
+    "Agent:Claude",
+    "Tool:Xcode",
+  ]);
+  const linuxHost = registerRequest(asked, {
+    hostname: "shame",
+    arch: "x64",
+    hosted: ["Platform:Linux:Amd64"],
+  });
+  assert.ok("request" in linuxHost);
+  assert.deepEqual(linuxHost.request.capabilities, [
+    "Platform:Linux:Amd64",
+    "Agent:Claude",
+    "Tool:Xcode",
+  ]);
+  for (const [capabilities, why] of [
+    [["Platform:MacOS:Arm64"], /names a platform, which register finds/u],
+    [["has space"], /is not a capability/u],
+    [["-lead"], /is not a capability/u],
+    [["Agent:Claude", "Agent:Claude"], /names one capability twice/u],
+  ]) {
+    const refused = registerAskedChecked({ ...asked, capabilities }, "shame");
+    assert.ok("refused" in refused, JSON.stringify(capabilities));
+    assert.match(refused.refused, why);
+  }
+  const many = Array.from(
+    { length: 64 },
+    (_, index) => `Tool:${String(index)}`,
+  );
+  const over = registerRequest(
+    { ...asked, capabilities: many },
+    { hostname: "shame", arch: "x64" },
+  );
+  assert.ok("refused" in over);
+  assert.match(
+    over.refused,
+    /at most 64 capabilities, its platforms among them/u,
+  );
+});
+
+test("a 201 declaring the capabilities asked for in another order is the pool asked for", async () => {
+  const asked = {
+    ...request,
+    capabilities: ["Platform:Linux:Amd64", "Agent:Claude"],
+  };
+  const answered = {
+    ...registered,
+    capabilities: ["Agent:Claude", "Platform:Linux:Amd64"],
+  };
+  assert.deepEqual(
+    await registerRedeemed(asked, answeringFetch(201, answered).fetch),
+    answered,
+  );
+  await assert.rejects(
+    registerRedeemed(
+      asked,
+      answeringFetch(201, {
+        ...registered,
+        capabilities: ["Agent:Claude", "Agent:Claude"],
+      }).fetch,
+    ),
+    /for another pool, or capabilities other/u,
+  );
 });
 
 test("the ask is checked apart from the platform, and a wrong ask is refused before an unknown platform is", () => {
@@ -278,6 +379,8 @@ test("the ask is checked apart from the platform, and a wrong ask is refused bef
       api: new URL("https://chuggy.example"),
       token: "t",
       pool: "shame",
+      capabilities: [],
+      host: false,
     },
   });
   assert.deepEqual(registerAskedChecked({ ...asked, pool: "Shame" }, "x"), {
@@ -522,7 +625,7 @@ test("a personal redemption is posted to chuggy's personal registrations, naming
   });
 });
 
-test("a 201 whose body is no personal runner's file for the capability asked for is refused, naming no value in it", async () => {
+test("a 201 whose body is no personal runner's file for the capabilities asked for is refused, naming no value in it", async () => {
   const { kind, ...kindless } = personal;
   assert.equal(kind, "Personal");
   const refused = [
@@ -540,7 +643,7 @@ test("a 201 whose body is no personal runner's file for the capability asked for
     ],
     [
       { ...personal, capabilities: ["Platform:Linux:Arm64"] },
-      /for another pool or capability/u,
+      /for another pool, or capabilities other/u,
     ],
   ];
   for (const [body, why] of refused)
@@ -594,6 +697,8 @@ test("a personal ask names no pool, and is checked as a pool's is otherwise", ()
       kind: "Personal",
       api: new URL("https://chuggy.example"),
       token: "t",
+      capabilities: [],
+      host: false,
     },
   });
   assert.deepEqual(registerRequest(asked, { hostname: "---", arch: "arm64" }), {
@@ -601,7 +706,8 @@ test("a personal ask names no pool, and is checked as a pool's is otherwise", ()
       kind: "Personal",
       api: new URL("https://chuggy.example"),
       token: "t",
-      capability: "Platform:Linux:Arm64",
+      capabilities: ["Platform:Linux:Arm64"],
+      host: false,
     },
   });
   for (const [refusedAsk, why] of [
