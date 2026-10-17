@@ -277,12 +277,12 @@ test("a job that pins no image runs in the first image its owner listed declarin
     {
       placed: "Refused",
       evidence:
-        "the assignment pins no image, and no image this pool's owner listed declares every capability it names",
+        "the assignment pins no image, and no image this pool's owner listed meets it: a Linux one declaring every capability it names",
     },
   );
 });
 
-test("an image an assignment pins is the one it runs, whatever its owner listed", () => {
+test("an image an assignment pins is the one it runs, whatever its owner listed, and an owner's runs only Linux work", () => {
   const listed = [{ image: "registry.example/owner/any", capabilities: [] }];
   assert.equal(
     containerImageOf(listed, { image, capabilities: ["Platform:Linux:Amd64"] }),
@@ -297,6 +297,13 @@ test("an image an assignment pins is the one it runs, whatever its owner listed"
   );
   assert.equal(
     containerImageOf([], { image: undefined, capabilities: [] }),
+    undefined,
+  );
+  assert.equal(
+    containerImageOf(listed, {
+      image: undefined,
+      capabilities: ["Platform:MacOS:Arm64"],
+    }),
     undefined,
   );
 });
@@ -924,7 +931,7 @@ test("what this machine cannot take is refused, naming no value of the envelope"
   const refusals = [
     [
       assignment({ image: undefined }),
-      /pins no image, and no image this pool's owner listed declares every capability it names/u,
+      /pins no image, and no image this pool's owner listed meets it/u,
     ],
     [assignment({ image: undefined, runtime }), /pins no image/u],
     [

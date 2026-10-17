@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import {
   access,
   mkdir,
@@ -16,6 +17,8 @@ import { setTimeout as wait } from "node:timers/promises";
 import {
   checkedHostBackendSettings,
   hostBackend,
+  hostEnvironmentRefusal,
+  hostExitWatched,
   hostJobEnvironment,
   hostJobName,
   hostPlatformsDeclared,
@@ -29,18 +32,28 @@ import {
  */
 const fixtureCore = `
 import { spawn } from "node:child_process";
-import { readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 const out = process.env.HOST_FIXTURE_OUT;
 const directory = process.env.CHUGGY_HOST_JOB;
 const seen = { cwd: process.cwd(), env: process.env, places: readdirSync(directory).sort() };
 const mode = process.env.HOST_FIXTURE_MODE;
-if (mode === "grandchild") {
-  const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+if (mode === "grandchild" || mode === "stubborn" || mode === "orphan") {
+  const body = mode === "grandchild" ? "" : "process.on('SIGTERM', () => {});";
+  const grandchild = spawn(process.execPath, ["-e", body + "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   seen.grandchild = grandchild.pid;
+}
+if (mode === "readonly") {
+  mkdirSync(join(process.env.HOME, "go", "pkg"), { recursive: true });
+  writeFileSync(join(process.env.HOME, "go", "pkg", "mod.txt"), "cached");
+  chmodSync(join(process.env.HOME, "go", "pkg", "mod.txt"), 0o444);
+  chmodSync(join(process.env.HOME, "go", "pkg"), 0o555);
+  chmodSync(join(process.env.HOME, "go"), 0o555);
 }
 writeFileSync(out, JSON.stringify(seen));
 process.stdout.write("fixture output\\n");
 if (mode?.startsWith("exit:")) process.exit(Number(mode.slice(5)));
+if (mode === "orphan" || mode === "readonly") setTimeout(() => process.exit(0), 100);
 setInterval(() => {}, 1000);
 `;
 
@@ -216,6 +229,67 @@ test("a stop kills the job's whole group, and its end is never named", async (t)
   assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
 });
 
+test("a stop kills what of the group outlives its leader", async (t) => {
+  const { backend, seen } = await harness(t, "stubborn");
+  await backend.place(assignment(), "Job");
+  const { grandchild } = await seen();
+  await backend.stop("asg-1");
+  for (let tries = 0; alive(grandchild) && tries < 100; tries++) await wait(10);
+  assert.equal(alive(grandchild), false);
+});
+
+test("a job that ends leaving a process behind has its group killed", async (t) => {
+  const { backend, seen } = await harness(t, "orphan");
+  await backend.place(assignment(), "Job");
+  const { grandchild } = await seen();
+  await backend.settled();
+  for (let tries = 0; alive(grandchild) && tries < 100; tries++) await wait(10);
+  assert.equal(alive(grandchild), false);
+});
+
+test("a job whose directory holds a read-only tree still ends, named, its directory gone", async (t) => {
+  const { backend, settings } = await harness(t, "readonly");
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  await backend.held();
+  assert.equal((await backend.ended()).length, 1);
+  assert.deepEqual(await readdir(settings.directory), []);
+});
+
+test("the runner's exit or a signal ending it kills its jobs, and a signal nothing else handles still ends it", () => {
+  const process = Object.assign(new EventEmitter(), {
+    pid: 7,
+    /** @type {[number, string][]} */
+    killed: [],
+    /** @param {number} pid @param {string} signal */
+    kill(pid, signal) {
+      this.killed.push([pid, signal]);
+      return true;
+    },
+  });
+  let exits = 0;
+  hostExitWatched(() => (exits += 1), /** @type {never} */ (process));
+  const handled = [];
+  process.once("SIGINT", () => handled.push("SIGINT"));
+  process.emit("SIGTERM");
+  assert.equal(exits, 1);
+  assert.deepEqual(process.killed, [[7, "SIGTERM"]]);
+  process.emit("SIGINT");
+  assert.equal(exits, 2);
+  assert.deepEqual(handled, ["SIGINT"]);
+  assert.deepEqual(process.killed, [[7, "SIGTERM"]]);
+  process.emit("exit");
+  assert.equal(exits, 3);
+});
+
+test("an owner's environment naming what a host job's core or places set is refused by name", () => {
+  assert.equal(hostEnvironmentRefusal({ CI: "1" }), undefined);
+  assert.match(
+    String(hostEnvironmentRefusal({ TMPDIR: "/var/tmp" })),
+    /^TMPDIR is set for every host job/u,
+  );
+});
+
 test("a job past its deadline is killed and named so", async (t) => {
   const { backend } = await harness(t, "sleep");
   await backend.place(assignment({ deadlineSecs: 1 }), "Job");
@@ -324,6 +398,7 @@ test("a host's settings name its platforms, and leave chuggy's variables alone",
   for (const [overrides, why] of [
     [{ platforms: [] }, /at least one platform/u],
     [{ platforms: ["Tool:Xcode"] }, /is no platform token/u],
+    [{ timeoutSecsMax: 2_147_484 }, /timeout is at most 2147483 seconds/u],
     [{ environment: { HOME: "/x" } }, /HOME is set for every host job/u],
     [
       { environment: { CHUG_WORKER_TASK: "x" } },

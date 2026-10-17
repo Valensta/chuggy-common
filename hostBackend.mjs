@@ -12,8 +12,8 @@
  * WHAT IS RUNNING IS THIS PROCESS'S OWN. A host has no engine to read back, so
  * a restarted runner holds nothing its predecessor started: those jobs leave
  * `held`, their leases lapse and their attempts fail as a lost pod's do. Each
- * job runs in a process group of its own, which a stop, its deadline and the
- * runner's own exit kill whole.
+ * job runs in a process group of its own, which its end, a stop, its deadline
+ * and the runner's own exit or signal kill whole.
  *
  * EACH JOB HAS A DIRECTORY OF ITS OWN, where a container has mounts: its
  * workspace, its home, its temporary files and the credentials it mints, as
@@ -28,7 +28,7 @@
 
 import { spawn as spawnDefault } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath, URL } from "node:url";
@@ -64,7 +64,7 @@ import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
  * @property {typeof spawnDefault} [spawn]
  * @property {(pid: number, signal: NodeJS.Signals) => void} [kill] signals a process group
  * @property {Readonly<Record<string, string | undefined>>} [environment] the runner's own, which a job inherits
- * @property {(onExit: () => void) => void} [atExit] runs `onExit` as the runner exits
+ * @property {(onExit: () => void) => void} [atExit] runs `onExit` as the runner ends, `hostExitWatched` where absent
  * @property {(tokenFile: string) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the token file, or nothing
  * @property {(line: string) => void} log
  * @property {() => number} [nowMs]
@@ -78,6 +78,7 @@ import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
  * @property {string} directory
  * @property {boolean} stopped whether this pool stopped it, whose end is then never named
  * @property {boolean} expired whether its deadline killed it
+ * @property {boolean} reaped whether its group was killed once its process closed, after which nothing signals it
  * @property {Promise<void>} done settles once it has ended and its directory is gone
  *
  * @typedef {object} HostInFlight a job running on the host, as a runner's status names it beside its containers' placements
@@ -110,6 +111,9 @@ import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
 /** How long a job asked to stop is given before its group is killed outright. */
 export const hostStopGraceMs = 10_000;
 
+/** The longest deadline a timer can hold, which bounds `timeoutSecsMax`. */
+export const hostTimeoutSecsMax = Math.floor((2 ** 31 - 1) / 1000);
+
 /** The variables a host job's places set, which the owner's environment may not name. */
 const hostPlaceVariables = ["HOME", "TMPDIR"];
 
@@ -124,15 +128,32 @@ const hostWithheldVariables = [...reservedJobVariables, ...hostPlaceVariables];
 export function checkedHostBackendSettings(settings) {
   if (settings.platforms.length === 0)
     throw new RangeError("a host backend runs on at least one platform");
+  if (settings.timeoutSecsMax > hostTimeoutSecsMax)
+    throw new RangeError(
+      `a host job's timeout is at most ${String(hostTimeoutSecsMax)} seconds`,
+    );
   for (const platform of settings.platforms)
     if (!/^Platform:[A-Za-z0-9]+:[A-Za-z0-9]+$/u.test(platform))
       throw new RangeError(`${platform} is no platform token`);
-  for (const name of Object.keys(settings.environment))
-    if (hostWithheldVariables.includes(name))
-      throw new RangeError(
-        `${name} is set for every host job, and the owner's environment cannot name it`,
-      );
+  const named = hostEnvironmentRefusal(settings.environment);
+  if (named !== undefined) throw new RangeError(named);
   return settings;
+}
+
+/**
+ * Why an owner's environment cannot be a host job's, or nothing: it names a
+ * variable the job's core or its places set.
+ *
+ * @param {Readonly<Record<string, string>>} environment
+ * @returns {string | undefined}
+ */
+export function hostEnvironmentRefusal(environment) {
+  const name = Object.keys(environment).find((each) =>
+    hostWithheldVariables.includes(each),
+  );
+  return name === undefined
+    ? undefined
+    : `${name} is set for every host job, and the owner's environment cannot name it`;
 }
 
 /**
@@ -251,7 +272,8 @@ function hostJobStarted(child) {
 }
 
 /**
- * Signals a job's group, where its process has not ended.
+ * Signals a job's group, until it was killed as its process closed: the group
+ * outlives its leader, and its id can be another's once the group is gone.
  *
  * @param {State} state
  * @param {HostJob} job
@@ -259,7 +281,7 @@ function hostJobStarted(child) {
  */
 function signalled(state, job, signal) {
   const { pid } = job.child;
-  if (pid === undefined || job.child.exitCode !== null) return;
+  if (pid === undefined || job.reaped) return;
   try {
     state.kill(pid, signal);
   } catch {
@@ -288,6 +310,42 @@ async function hostJobEnded(state, job) {
 }
 
 /**
+ * Removes a job's directory, making each directory in it writable where a
+ * removal was refused, as a module cache's read-only tree is; or logs why it
+ * could not, so that no job's end waits on it.
+ *
+ * @param {State} state
+ * @param {string} directory
+ */
+async function hostDirectoryRemoved(state, directory) {
+  try {
+    await rm(directory, { recursive: true, force: true });
+  } catch {
+    try {
+      await hostDirectoryWritable(directory);
+      await rm(directory, { recursive: true, force: true });
+    } catch (failure) {
+      state.seams.log(
+        `${directory} could not be removed: ${failure instanceof Error ? failure.message : String(failure)}`,
+      );
+    }
+  }
+}
+
+/**
+ * Makes a directory and every directory under it its owner's to change,
+ * each before it is read.
+ *
+ * @param {string} directory
+ */
+async function hostDirectoryWritable(directory) {
+  await chmod(directory, 0o700);
+  for (const entry of await readdir(directory, { withFileTypes: true }))
+    if (entry.isDirectory())
+      await hostDirectoryWritable(join(directory, entry.name));
+}
+
+/**
  * Removes the job directories no job of this run holds, which a predecessor
  * left.
  *
@@ -304,8 +362,7 @@ async function hostSwept(state) {
   }
   for (const name of names) {
     const directory = join(state.settings.directory, name);
-    if (!held.has(directory))
-      await rm(directory, { recursive: true, force: true });
+    if (!held.has(directory)) await hostDirectoryRemoved(state, directory);
   }
 }
 
@@ -375,7 +432,7 @@ async function hostJobSpawned(state, name, made) {
     return { child, log };
   } catch (failure) {
     await log.close();
-    await rm(made.directory, { recursive: true, force: true });
+    await hostDirectoryRemoved(state, made.directory);
     state.seams.log(
       `${name} could not start: ${failure instanceof Error ? failure.message : String(failure)}`,
     );
@@ -384,8 +441,9 @@ async function hostJobSpawned(state, name, made) {
 }
 
 /**
- * Watches a started job: its deadline kills it, and its end removes its
- * directory and, unless this pool stopped it, is named.
+ * Watches a started job: its deadline kills it, and its end kills what is left
+ * of its group, removes its directory and, unless this pool stopped it, is
+ * named.
  *
  * @param {State} state
  * @param {HostJob} job
@@ -401,17 +459,22 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
   job.done = new Promise((settle) => {
     job.child.once("close", (code, signal) => {
       clearTimeout(deadline);
+      signalled(state, job, "SIGKILL");
+      job.reaped = true;
       void (async () => {
-        await log.close();
-        await rm(job.directory, { recursive: true, force: true });
-        if (state.jobs.get(job.assignment) === job)
-          state.jobs.delete(job.assignment);
-        if (!job.stopped) {
-          const why = hostJobEndedWhy(job, code, signal);
-          state.seams.log(`${name} ended: ${why}`);
-          state.pending.push({ kind: "Job", job: job.attempt, why });
+        try {
+          await log.close().catch(() => undefined);
+          await hostDirectoryRemoved(state, job.directory);
+        } finally {
+          if (state.jobs.get(job.assignment) === job)
+            state.jobs.delete(job.assignment);
+          if (!job.stopped) {
+            const why = hostJobEndedWhy(job, code, signal);
+            state.seams.log(`${name} ended: ${why}`);
+            state.pending.push({ kind: "Job", job: job.attempt, why });
+          }
+          settle();
         }
-        settle();
       })();
     });
   });
@@ -452,6 +515,7 @@ async function hostPlaced(state, assignment, kind) {
     directory: made.directory,
     stopped: false,
     expired: false,
+    reaped: false,
     done: Promise.resolve(),
   };
   hostJobWatched(state, job, name, started.log, deadlineSecs);
@@ -486,6 +550,25 @@ async function hostHeld(state) {
 }
 
 /**
+ * Runs `onExit` as this process exits, or as a SIGTERM or SIGINT ends it: a
+ * signal's default end emits no exit, and a host job's group is its own, so
+ * neither a service manager nor a terminal reaches it. A runner that handles
+ * the signal itself still does; one that does not is ended by it as before.
+ *
+ * @param {() => void} onExit
+ * @param {Pick<NodeJS.Process, "once" | "prependOnceListener" | "listenerCount" | "kill" | "pid">} [process]
+ */
+export function hostExitWatched(onExit, process = globalThis.process) {
+  process.once("exit", onExit);
+  for (const signal of /** @type {const} */ (["SIGTERM", "SIGINT"]))
+    process.prependOnceListener(signal, () => {
+      onExit();
+      if (process.listenerCount(signal) === 0)
+        process.kill(process.pid, signal);
+    });
+}
+
+/**
  * @param {HostBackendSettings} settings
  * @param {HostBackendSeams} seams
  * @returns {HostBackend}
@@ -507,11 +590,9 @@ export function hostBackend(settings, seams) {
     ready: [],
     swept: false,
   };
-  (seams.atExit ?? ((onExit) => globalThis.process.once("exit", onExit)))(
-    () => {
-      for (const job of state.jobs.values()) signalled(state, job, "SIGKILL");
-    },
-  );
+  (seams.atExit ?? hostExitWatched)(() => {
+    for (const job of state.jobs.values()) signalled(state, job, "SIGKILL");
+  });
   return {
     place: /** @type {WorkerPoolBackend["place"]} */ (
       /**

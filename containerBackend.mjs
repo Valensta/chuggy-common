@@ -848,7 +848,8 @@ export const ownerImagesSchema = z.array(
 
 /**
  * The image an assignment runs in: the one it pins, or else the first its
- * owner listed declaring every capability it names but its platform.
+ * owner listed declaring every capability it names but its platform, which an
+ * engine's image is only where it is Linux.
  *
  * @param {readonly OwnerImage[]} images
  * @param {Pick<WorkerPoolAssignment, "image" | "capabilities">} assignment
@@ -856,6 +857,14 @@ export const ownerImagesSchema = z.array(
  */
 export function containerImageOf(images, assignment) {
   if (assignment.image !== undefined) return assignment.image;
+  if (
+    assignment.capabilities.some(
+      (capability) =>
+        capability.startsWith("Platform:") &&
+        !capability.startsWith("Platform:Linux:"),
+    )
+  )
+    return undefined;
   const needed = assignment.capabilities.filter(
     (capability) => !capability.startsWith("Platform:"),
   );
@@ -874,7 +883,7 @@ export function containerImageOf(images, assignment) {
 async function placementRefusal(state, assignment) {
   const { machine } = state.settings;
   if (containerImageOf(state.settings.images ?? [], assignment) === undefined)
-    return "the assignment pins no image, and no image this pool's owner listed declares every capability it names";
+    return "the assignment pins no image, and no image this pool's owner listed meets it: a Linux one declaring every capability it names";
   if (assignment.cpuMillis > machine.cpuMillis)
     return `the assignment asks for ${String(assignment.cpuMillis)} CPU millis and this machine has ${String(machine.cpuMillis)}`;
   if (assignment.memoryMib > machine.memoryMib)
