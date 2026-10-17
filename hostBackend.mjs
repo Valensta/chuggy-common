@@ -13,7 +13,9 @@
  * a restarted runner holds nothing its predecessor started: those jobs leave
  * `held`, their leases lapse and their attempts fail as a lost pod's do. Each
  * job runs in a process group of its own, which its end, a stop, its deadline
- * and the runner's own exit or signal kill whole.
+ * and the runner's own exit or signal kill whole. A runner killed outright,
+ * by SIGKILL or the kernel, kills none: its jobs run on undeadlined until they
+ * end, and the next start removes their directories.
  *
  * EACH JOB HAS A DIRECTORY OF ITS OWN, where a container has mounts: its
  * workspace, its home, its temporary files and the credentials it mints, as
@@ -550,7 +552,7 @@ async function hostHeld(state) {
 }
 
 /**
- * Runs `onExit` as this process exits, or as a SIGTERM or SIGINT ends it: a
+ * Runs `onExit` as this process exits, or as a SIGTERM, SIGINT or SIGHUP ends it: a
  * signal's default end emits no exit, and a host job's group is its own, so
  * neither a service manager nor a terminal reaches it. A runner that handles
  * the signal itself still does; one that does not is ended by it as before.
@@ -560,7 +562,7 @@ async function hostHeld(state) {
  */
 export function hostExitWatched(onExit, process = globalThis.process) {
   process.once("exit", onExit);
-  for (const signal of /** @type {const} */ (["SIGTERM", "SIGINT"]))
+  for (const signal of /** @type {const} */ (["SIGTERM", "SIGINT", "SIGHUP"]))
     process.prependOnceListener(signal, () => {
       onExit();
       if (process.listenerCount(signal) === 0)

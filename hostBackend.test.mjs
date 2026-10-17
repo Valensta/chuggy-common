@@ -278,8 +278,14 @@ test("the runner's exit or a signal ending it kills its jobs, and a signal nothi
   assert.equal(exits, 2);
   assert.deepEqual(handled, ["SIGINT"]);
   assert.deepEqual(process.killed, [[7, "SIGTERM"]]);
-  process.emit("exit");
+  process.emit("SIGHUP");
   assert.equal(exits, 3);
+  assert.deepEqual(process.killed, [
+    [7, "SIGTERM"],
+    [7, "SIGHUP"],
+  ]);
+  process.emit("exit");
+  assert.equal(exits, 4);
 });
 
 test("an owner's environment naming what a host job's core or places set is refused by name", () => {
