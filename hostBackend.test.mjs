@@ -18,6 +18,7 @@ import {
   hostBackend,
   hostJobEnvironment,
   hostJobName,
+  hostPlatformsDeclared,
   hostRoutedBackend,
   hostRuns,
 } from "./hostBackend.mjs";
@@ -400,6 +401,23 @@ function recording(calls, name, held = new Set()) {
     containers: async () => [`${name}-container`],
   };
 }
+
+test("a pool runs work on its host on the platforms of the host's system it declared, only where registered to", () => {
+  const capabilities = [
+    "Platform:Linux:Arm64",
+    "Platform:MacOS:Arm64",
+    "Agent:Claude",
+  ];
+  assert.deepEqual(hostPlatformsDeclared({ capabilities }, "MacOS"), []);
+  assert.deepEqual(
+    hostPlatformsDeclared({ capabilities, host: true }, "MacOS"),
+    ["Platform:MacOS:Arm64"],
+  );
+  assert.deepEqual(
+    hostPlatformsDeclared({ capabilities, host: true }, "Linux"),
+    ["Platform:Linux:Arm64"],
+  );
+});
 
 test("a host beside a container backend takes its own jobs, and everything else goes to the containers", async () => {
   /** @type {string[]} */

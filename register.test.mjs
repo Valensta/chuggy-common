@@ -40,6 +40,7 @@ const request = {
   token: "registration-token-fixture",
   pool: "shame",
   capabilities: ["Platform:Linux:Amd64"],
+  host: false,
 };
 
 /** @type {import("./register.mjs").RegisterRequest} */
@@ -48,6 +49,7 @@ const personalRequest = {
   api: new URL("https://chuggy.example"),
   token: "registration-token-fixture",
   capabilities: ["Platform:Linux:Amd64"],
+  host: false,
 };
 
 /** @param {import("node:test").TestContext} t */
@@ -56,6 +58,21 @@ async function scratch(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test("a redemption asked to run work on the machine itself answers a pool file that says so, and never tells chuggy", async () => {
+  const { fetch, requests } = answeringFetch(201, registered);
+  assert.deepEqual(await registerRedeemed({ ...request, host: true }, fetch), {
+    ...registered,
+    host: true,
+  });
+  assert.equal("host" in JSON.parse(String(requests[0].init.body)), false);
+  const asked = registerAskedChecked(
+    { api: "https://chuggy.example/", token: "t", pool: undefined, host: true },
+    "shame",
+  );
+  assert.ok("checked" in asked);
+  assert.equal(asked.checked.host, true);
+});
 
 test("a redemption is posted to chuggy's registrations as its native media type, declaring this machine's platform", async () => {
   const { fetch, requests } = answeringFetch(201, registered);
@@ -263,6 +280,7 @@ test("a request declares this machine's platform and names the pool for its host
       token: "t",
       pool: "shame",
       capabilities: ["Platform:Linux:Amd64"],
+      host: false,
     },
   });
   const arm = registerRequest(
@@ -362,6 +380,7 @@ test("the ask is checked apart from the platform, and a wrong ask is refused bef
       token: "t",
       pool: "shame",
       capabilities: [],
+      host: false,
     },
   });
   assert.deepEqual(registerAskedChecked({ ...asked, pool: "Shame" }, "x"), {
@@ -679,6 +698,7 @@ test("a personal ask names no pool, and is checked as a pool's is otherwise", ()
       api: new URL("https://chuggy.example"),
       token: "t",
       capabilities: [],
+      host: false,
     },
   });
   assert.deepEqual(registerRequest(asked, { hostname: "---", arch: "arm64" }), {
@@ -687,6 +707,7 @@ test("a personal ask names no pool, and is checked as a pool's is otherwise", ()
       api: new URL("https://chuggy.example"),
       token: "t",
       capabilities: ["Platform:Linux:Arm64"],
+      host: false,
     },
   });
   for (const [refusedAsk, why] of [

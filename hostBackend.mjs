@@ -6,8 +6,8 @@
  *
  * NOTHING ISOLATES A HOST JOB. It runs as its runner's user, reads what that
  * user can read and runs whatever its task asks with that user's rights. A
- * pool registers its host's platform only where its owner accepts that of
- * every project it serves.
+ * pool runs one only where its operator registered it with `--host`, which
+ * its pool file then says, accepting that of every project it serves.
  *
  * WHAT IS RUNNING IS THIS PROCESS'S OWN. A host has no engine to read back, so
  * a restarted runner holds nothing its predecessor started: those jobs leave
@@ -41,6 +41,7 @@ import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
  * @typedef {import("./poolLoop.mjs").WorkerPoolBackend} WorkerPoolBackend
+ * @typedef {import("./poolCredentials.mjs").PoolCredentials} PoolCredentials
  * @typedef {import("./poolLoop.mjs").WorkerPoolEnded} WorkerPoolEnded
  * @typedef {import("./poolLoop.mjs").WorkerPoolHeld} WorkerPoolHeld
  * @typedef {import("./poolLoop.mjs").WorkerPoolPlacement} WorkerPoolPlacement
@@ -132,6 +133,20 @@ export function checkedHostBackendSettings(settings) {
         `${name} is set for every host job, and the owner's environment cannot name it`,
       );
   return settings;
+}
+
+/**
+ * The platforms a pool runs work on its host: those of the host's operating
+ * system it declared, where its operator registered it to, and none otherwise.
+ *
+ * @param {Pick<PoolCredentials, "capabilities" | "host">} credentials
+ * @param {"Linux" | "MacOS"} operatingSystem the host's
+ */
+export function hostPlatformsDeclared(credentials, operatingSystem) {
+  if (credentials.host !== true) return [];
+  return credentials.capabilities.filter((capability) =>
+    capability.startsWith(`Platform:${operatingSystem}:`),
+  );
 }
 
 /**

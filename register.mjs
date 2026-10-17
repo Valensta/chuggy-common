@@ -39,11 +39,12 @@ import {
  * @typedef {import("./poolIdentity.mjs").PoolIdentity} PoolIdentity
  * @typedef {z.infer<typeof registeredPoolSchema>} RegisteredDedicatedPool
  * @typedef {z.infer<typeof registeredPersonalRunnerSchema>} RegisteredPersonalRunner
- * @typedef {RegisteredDedicatedPool | RegisteredPersonalRunner} RegisteredPool
+ * @typedef {(RegisteredDedicatedPool | RegisteredPersonalRunner) & {host?: true}} RegisteredPool
+ *   what chuggy answered, and whether the operator runs work on the machine itself
  *
- * @typedef {{kind?: undefined, api: URL, token: string, pool: string, capabilities: readonly string[]}
- *   | {kind: "Personal", api: URL, token: string, capabilities: readonly string[]}} RegisterAskedRequest
- *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, and what the operator declares beside the platforms
+ * @typedef {{kind?: undefined, api: URL, token: string, pool: string, capabilities: readonly string[], host: boolean}
+ *   | {kind: "Personal", api: URL, token: string, capabilities: readonly string[], host: boolean}} RegisterAskedRequest
+ *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, what the operator declares beside the platforms, and whether a job that pins no image runs on the machine itself
  * @typedef {RegisterAskedRequest} RegisterRequest
  *   `capabilities` is whole: this machine's platforms first, then what the operator declared
  *
@@ -53,6 +54,7 @@ import {
  * @property {string | undefined} pool
  * @property {boolean | undefined} [personal] the token is a member's personal one
  * @property {readonly string[] | undefined} [capabilities] what the operator declares the machine meets, beside its platforms
+ * @property {boolean | undefined} [host] a job that pins no image runs on the machine itself, which the pool file then says
  *
  * @typedef {object} RegisterMachine
  * @property {string} hostname
@@ -246,6 +248,7 @@ export function registerAskedChecked(asked, hostname) {
   const declared = registerDeclared(asked.capabilities ?? []);
   if ("refused" in declared) return declared;
   const { declared: capabilities } = declared;
+  const host = asked.host === true;
   if (asked.personal === true) {
     if (asked.pool !== undefined)
       return {
@@ -255,7 +258,13 @@ export function registerAskedChecked(asked, hostname) {
     if (!registerTokenAllowed(asked.token))
       return { refused: "--token is not a registration token" };
     return {
-      checked: { kind: "Personal", api, token: asked.token, capabilities },
+      checked: {
+        kind: "Personal",
+        api,
+        token: asked.token,
+        capabilities,
+        host,
+      },
     };
   }
   const pool = asked.pool ?? registerPoolNameDefault(hostname);
@@ -269,7 +278,7 @@ export function registerAskedChecked(asked, hostname) {
     };
   if (!registerTokenAllowed(asked.token))
     return { refused: "--token is not a registration token" };
-  return { checked: { api, token: asked.token, pool, capabilities } };
+  return { checked: { api, token: asked.token, pool, capabilities, host } };
 }
 
 /**
@@ -394,15 +403,16 @@ function registeredPool(body, request) {
       `chuggy answered the registration with no JSON; ${registeredSpent}`,
     );
   }
+  const hosted = request.host ? { host: /** @type {const} */ (true) } : {};
   if (request.kind === "Personal") {
     const runner = registeredParsed(registeredPersonalRunnerSchema, document);
     registeredCapabilityAsked(runner, request);
-    return runner;
+    return { ...runner, ...hosted };
   }
   const pool = registeredParsed(registeredPoolSchema, document);
   if (pool.pool !== request.pool) registeredAnotherAnswered();
   registeredCapabilityAsked(pool, request);
-  return pool;
+  return { ...pool, ...hosted };
 }
 
 /**
