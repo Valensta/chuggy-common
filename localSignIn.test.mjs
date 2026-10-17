@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { setTimeout } from "node:timers";
 import { URL, URLSearchParams } from "node:url";
 
 import {
@@ -51,7 +52,7 @@ function serversOf(grant) {
     if (asked === `${issuer}/oauth2/token` && init?.method === "POST") {
       const fields = Object.fromEntries(new URLSearchParams(init.body));
       grants.push(fields);
-      const { status = 200, body } = grant(fields, grants.length);
+      const { status = 200, body } = await grant(fields, grants.length);
       return globalThis.Response.json(body ?? {}, { status });
     }
     return new globalThis.Response("", { status: 404 });
@@ -118,7 +119,91 @@ test("with nothing to renew, a call is answered with a sign-in page, and the pag
   );
   assert.equal(store.renewal, "renewal-1");
   assert.equal(await signIn.token(), "access-1");
-  assert.doesNotMatch(needed.message, /access-|renewal-/);
+});
+
+test("a declined sign-in is said on the page, which then closes, and the next call opens another", async (t) => {
+  const { fetch, grants } = serversOf((_fields, n) => issued(n));
+  const signIn = localSignIn(site, storeOf(undefined), { fetch });
+  t.after(() => signIn.close());
+  const needed = await signInNeeded(signIn);
+  const query = new URL(needed.url).searchParams;
+  const declined = await globalThis.fetch(
+    `${query.get("redirect_uri")}?error=access_denied&state=${query.get("state")}`,
+  );
+  assert.equal(declined.status, 200);
+  assert.match(await declined.text(), /declined/);
+  assert.equal(grants.length, 0);
+  await assert.rejects(globalThis.fetch(query.get("redirect_uri")));
+  assert.notEqual((await signInNeeded(signIn)).url, needed.url);
+});
+
+test("a page whose browser left before its answer ends, and the next call opens another", async (t) => {
+  let granting;
+  const granted = new Promise((resolve) => {
+    granting = resolve;
+  });
+  let release;
+  const { fetch } = serversOf(() => {
+    granting();
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  const signIn = localSignIn(site, storeOf(undefined), { fetch });
+  t.after(() => signIn.close());
+  const needed = await signInNeeded(signIn);
+  const query = new URL(needed.url).searchParams;
+  const leaving = new globalThis.AbortController();
+  const answering = globalThis.fetch(
+    `${query.get("redirect_uri")}?code=the-code&state=${query.get("state")}`,
+    { signal: leaving.signal },
+  );
+  await granted;
+  leaving.abort();
+  await assert.rejects(answering);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release({ status: 400, body: { error: "invalid_grant" } });
+  for (let looks = 0; looks < 100; looks += 1) {
+    if ((await signInNeeded(signIn)).url !== needed.url) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("the page stayed open after its browser left");
+});
+
+test("a code the issuer refuses is said on the page by what failed, and nothing is stored", async (t) => {
+  const { fetch } = serversOf(() => ({
+    status: 400,
+    body: { error: "invalid_grant" },
+  }));
+  const store = storeOf(undefined);
+  const signIn = localSignIn(site, store, { fetch });
+  t.after(() => signIn.close());
+  const query = new URL((await signInNeeded(signIn)).url).searchParams;
+  const answered = await globalThis.fetch(
+    `${query.get("redirect_uri")}?code=the-code&state=${query.get("state")}`,
+  );
+  assert.equal(answered.status, 502);
+  const page = await answered.text();
+  assert.match(page, /refused the code/);
+  assert.doesNotMatch(page, /the-code|invalid_grant/);
+  assert.equal(store.renewal, undefined);
+});
+
+test("an authorization endpoint's own query is kept beside the sign-in's", async (t) => {
+  const { fetch: served } = serversOf((_fields, n) => issued(n));
+  const fetch = async (url, init) =>
+    String(url) === `${issuer}/.well-known/openid-configuration`
+      ? globalThis.Response.json({
+          issuer,
+          authorization_endpoint: `${issuer}/oauth2/auth?tenant=one`,
+          token_endpoint: `${issuer}/oauth2/token`,
+        })
+      : served(url, init);
+  const signIn = localSignIn(site, storeOf(undefined), { fetch });
+  t.after(() => signIn.close());
+  const query = new URL((await signInNeeded(signIn)).url).searchParams;
+  assert.equal(query.get("tenant"), "one");
+  assert.equal(query.get("client_id"), localSignInClientId);
 });
 
 test("a held token is renewed ahead of its expiry, and the renewal replaces the stored one", async () => {
@@ -169,10 +254,15 @@ test("a renewal the issuer refuses is forgotten, and the call is asked to sign i
   assert.equal(store.renewal, undefined);
 });
 
-test("an issuer that fails keeps the stored renewal and says so by status", async () => {
-  const { fetch } = serversOf(() => ({ status: 503 }));
-  const store = storeOf("renewal-0");
-  const signIn = localSignIn(site, store, { fetch });
-  await assert.rejects(signIn.token(), /answered 503 for a token/);
-  assert.equal(store.renewal, "renewal-0");
+test("an issuer that fails or limits renewals keeps the stored renewal and says so by status", async () => {
+  for (const status of [503, 429, 403]) {
+    const { fetch } = serversOf(() => ({ status }));
+    const store = storeOf("renewal-0");
+    const signIn = localSignIn(site, store, { fetch });
+    await assert.rejects(
+      signIn.token(),
+      new RegExp(`answered ${String(status)} for a token`, "u"),
+    );
+    assert.equal(store.renewal, "renewal-0");
+  }
 });

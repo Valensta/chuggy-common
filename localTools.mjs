@@ -13,7 +13,8 @@
  * A CALL IS ITS OWN TURN. Nothing over stdio says which turn of a chat a call
  * belongs to, so each submitted command mints its operation from a turn of its
  * own. A command repeated is a second operation, and the API's fences on what
- * the command names are what refuse it.
+ * the command names are what refuse it, so the pod's description of a repeat
+ * is replaced with that.
  *
  * A 401 IS ASKED ONCE MORE. It says the token was what was wrong, and nothing
  * it answered was applied, so the held token is dropped and the call is made
@@ -24,6 +25,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { URL } from "node:url";
 
 import {
@@ -33,10 +35,14 @@ import {
 
 import { chuggyRequest } from "./chuggyApi.mjs";
 import {
+  chuggySubmissionRepeatDescription,
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
 } from "./chuggyTools.mjs";
+import { localSignIn } from "./localSignIn.mjs";
+import { localTokenStore } from "./localTokenStore.mjs";
+import { registerEndpointRefusal } from "./register.mjs";
 
 /** Every capability whose tools a person's own agent is given. */
 export const localToolCapabilities = [
@@ -44,6 +50,9 @@ export const localToolCapabilities = [
   "DraftAuthor",
   "DraftOriginate",
 ];
+
+/** What a submitted command made again answers here, where every call is a turn of its own. */
+export const localToolRepeatDescription = `The same call again is a new operation, submitted again: where the first already landed, the API refuses the second for what it names, so read_operation the first's id to learn what it did before calling again.`;
 
 const localToolUnauthorizedStatus = 401;
 const localToolAttemptsMax = 2;
@@ -71,14 +80,21 @@ export function localToolRequest(signIn, request = chuggyRequest) {
  * its API are served at, and `tenant` and `project` are as its routes name
  * them.
  */
-export function localToolContext({ site, tenant, project, version, signIn }) {
+export function localToolContext({
+  site,
+  tenant,
+  project,
+  version,
+  signIn,
+  request = chuggyRequest,
+}) {
   return chuggyToolContext(
     { tenant, project, api: { url: new URL(site).origin } },
     undefined,
     {
       capabilities: localToolCapabilities,
       version,
-      request: localToolRequest(signIn),
+      request: localToolRequest(signIn, request),
       turn: () => randomUUID(),
     },
   );
@@ -94,7 +110,10 @@ export function localToolServer(context, sdk) {
     server.registerTool(
       definition.name,
       {
-        description: definition.description,
+        description: definition.description.replace(
+          chuggySubmissionRepeatDescription,
+          localToolRepeatDescription,
+        ),
         inputSchema: definition.shape(sdk.z),
       },
       chuggyToolHandler(definition, sdk.z),
@@ -102,12 +121,70 @@ export function localToolServer(context, sdk) {
   return server;
 }
 
-/** Serves the tools on this process's stdio until the transport closes. */
-export async function localToolServe(context, sdk) {
+/**
+ * Serves the tools on stdio until the transport closes, which the SDK's own
+ * does on a read that fails and not on the end of its input, so the end of
+ * `stdin` closes it too.
+ */
+export async function localToolServe(context, sdk, stdin = process.stdin) {
   const server = localToolServer(context, sdk);
   const closed = new Promise((resolve) => {
     server.server.onclose = resolve;
   });
   await server.connect(new sdk.StdioServerTransport());
+  const ended = () => void server.close();
+  stdin.once("end", ended);
+  stdin.once("close", ended);
   await closed;
+}
+
+/**
+ * Why an ask for one project's tools cannot be served, or nothing: the site is
+ * one this machine sends a credential to, and the workspace and project are
+ * each named.
+ */
+export function localToolAskRefusal({ site, workspace, project }) {
+  if (site === undefined || workspace === undefined || project === undefined)
+    return "the tools need a site, a workspace and a project";
+  let url;
+  try {
+    url = new URL(site);
+  } catch {
+    return `the site ${site} is not a URL`;
+  }
+  const refused = registerEndpointRefusal(url);
+  if (refused !== undefined) return `the site ${refused}`;
+  if (url.username !== "" || url.password !== "")
+    return "the site must carry no credentials";
+  if (workspace === "" || project === "")
+    return "the workspace and the project must each be named";
+  return undefined;
+}
+
+/** The file in `directory` one site's renewal token is kept in. */
+export function localToolSignInFile(directory, site) {
+  return join(directory, encodeURIComponent(new URL(site).origin));
+}
+
+/**
+ * One project's tools served on stdio under the sign-in kept in `signIns`,
+ * until the agent closes stdio. The ask is `localToolAskRefusal`'s to check
+ * first; a `fetch` not given is the global one.
+ */
+export async function localToolServed(asked, sdk, stdin = process.stdin) {
+  const { site, workspace, project, version, signIns, fetch } = asked;
+  const signIn = localSignIn(
+    site,
+    localTokenStore(localToolSignInFile(signIns, site)),
+    { fetch },
+  );
+  try {
+    await localToolServe(
+      localToolContext({ site, tenant: workspace, project, version, signIn }),
+      sdk,
+      stdin,
+    );
+  } finally {
+    signIn.close();
+  }
 }

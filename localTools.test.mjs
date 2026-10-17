@@ -1,14 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 
 import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
 import { z } from "zod";
 
-import { chuggyProjectTools } from "./chuggyTools.mjs";
 import {
+  chuggyProjectTools,
+  chuggySubmissionRepeatDescription,
+} from "./chuggyTools.mjs";
+import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import {
+  localToolAskRefusal,
   localToolContext,
+  localToolRepeatDescription,
   localToolRequest,
+  localToolServe,
+  localToolServed,
   localToolServer,
+  localToolSignInFile,
 } from "./localTools.mjs";
 
 function signInOf(tokens) {
@@ -112,8 +126,8 @@ test("a registered tool reaches its project's route under the person's token", a
     project: "chuggy",
     version: "1",
     signIn: signInOf(["token"]),
+    request: api.request,
   });
-  context.request = localToolRequest(signInOf(["token"]), api.request);
   const { registered, sdk } = sdkOf();
   localToolServer(context, sdk);
   const readTicket = registered.find(({ name }) => name === "read_ticket");
@@ -124,5 +138,146 @@ test("a registered tool reaches its project's route under the person's token", a
   assert.match(
     api.calls[0].path,
     /\/tenants\/vteng\/projects\/chuggy\/tickets\/7$/,
+  );
+});
+
+test("a submitted command is described as a new operation each call, and every other description is the pod's", () => {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  const { registered, sdk } = sdkOf();
+  localToolServer(context, sdk);
+  const submissions = [];
+  for (const { name, config } of registered) {
+    const pod = chuggyProjectTools.find((tool) => tool.name === name);
+    assert.ok(!config.description.includes(chuggySubmissionRepeatDescription));
+    if (pod.description.includes(chuggySubmissionRepeatDescription)) {
+      submissions.push(name);
+      assert.ok(config.description.includes(localToolRepeatDescription));
+    } else assert.equal(config.description, pod.description);
+  }
+  assert.deepEqual(submissions.sort(), ["release_draft", "revoke_ticket"]);
+});
+
+test("the end of the agent's input closes the server", async () => {
+  const stdin = new EventEmitter();
+  const closed = [];
+  class McpServer {
+    constructor() {
+      this.server = {};
+    }
+    registerTool() {}
+    async connect(transport) {
+      this.transport = transport;
+    }
+    async close() {
+      closed.push(this.transport);
+      this.server.onclose?.();
+    }
+  }
+  class StdioServerTransport {}
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  const served = localToolServe(
+    context,
+    { McpServer, StdioServerTransport, z },
+    stdin,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closed.length, 0);
+  stdin.emit("end");
+  await served;
+  assert.ok(closed[0] instanceof StdioServerTransport);
+});
+
+test("served with the global fetch, a call with no sign-in is answered with a page, and the end of input ends it", async (t) => {
+  const signIns = await mkdtemp(join(tmpdir(), "local-tools-"));
+  t.after(() => rm(signIns, { recursive: true, force: true }));
+  t.mock.method(globalThis, "fetch", async (url) => {
+    const asked = String(url);
+    if (asked === "https://chuggy.test/config.json")
+      return globalThis.Response.json({
+        issuer: "https://auth.test",
+        audience: "https://chuggy.test/api",
+      });
+    if (asked === "https://auth.test/.well-known/openid-configuration")
+      return globalThis.Response.json({
+        issuer: "https://auth.test",
+        authorization_endpoint: "https://auth.test/oauth2/auth",
+        token_endpoint: "https://auth.test/oauth2/token",
+      });
+    return new globalThis.Response("", { status: 404 });
+  });
+  const stdin = new EventEmitter();
+  const handlers = new Map();
+  class McpServer {
+    constructor() {
+      this.server = {};
+    }
+    registerTool(name, _config, handler) {
+      handlers.set(name, handler);
+    }
+    async connect() {}
+    async close() {
+      this.server.onclose?.();
+    }
+  }
+  const served = localToolServed(
+    {
+      site: "https://chuggy.test",
+      workspace: "vteng",
+      project: "chuggy",
+      version: "1",
+      signIns,
+    },
+    { McpServer, StdioServerTransport: class {}, z },
+    stdin,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const answer = await handlers.get("read_ticket")({ ticket: 7 });
+  assert.equal(answer.isError, true);
+  const text = answer.content.map(({ text }) => text).join("");
+  assert.match(
+    text,
+    /not signed in to https:\/\/chuggy\.test: ask the person to open https:\/\/auth\.test\/oauth2\/auth\?/,
+  );
+  stdin.emit("end");
+  await served;
+});
+
+test("an ask names a site a credential may be sent to, and a workspace and project", () => {
+  const named = { workspace: "vteng", project: "chuggy" };
+  assert.match(localToolAskRefusal(named), /need a site/);
+  assert.match(
+    localToolAskRefusal({ ...named, site: "http://chuggy.test" }),
+    /https/,
+  );
+  assert.match(
+    localToolAskRefusal({ ...named, site: "https://me:pw@chuggy.test" }),
+    /no credentials/,
+  );
+  assert.match(
+    localToolAskRefusal({ ...named, site: "https://chuggy.test", project: "" }),
+    /each be named/,
+  );
+  assert.equal(
+    localToolAskRefusal({ ...named, site: "http://127.0.0.1:8080" }),
+    undefined,
+  );
+});
+
+test("each site's sign-in is a file of its own, named by its origin", () => {
+  assert.equal(
+    localToolSignInFile("/home/me/sign-ins", "https://chuggy.test/console"),
+    "/home/me/sign-ins/https%3A%2F%2Fchuggy.test",
   );
 });

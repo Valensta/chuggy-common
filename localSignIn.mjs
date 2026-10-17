@@ -3,32 +3,36 @@
  * access token every tool call presents, renewed ahead of its expiry, and the
  * sign-in page that starts one when there is none.
  *
- * IT SIGNS IN AS THE SETUP PROGRAM'S CLIENT. chuggy registers that client, in
- * `ui/chuggy-ui/app/core/setupProgram.ts`, as public, returning to a loopback
- * address on any port, under the scopes named here. The authorization code
+ * IT SIGNS IN AS THE SETUP PROGRAM'S CLIENT, the one chuggy's
+ * `ui/chuggy-ui/app/core/setupProgram.ts` names: public, returning to a
+ * loopback address on any port, under the scopes named here, as the issuer
+ * registers it. The authorization code
  * flow with PKCE is the console's, and the site's own `/config.json` names
  * the issuer and the audience, so a site that moves its issuer moves this too.
  *
  * NO SIGN-IN IS STARTED BY A PAGE OPENING ITSELF. A call made with no renewal
- * token, or with one the issuer refused, is answered with the address of a
- * page this process holds on `127.0.0.1`, for the agent to hand the person.
- * The page stays answerable until it is answered or its bound passes; a call
- * made meanwhile is answered with the same address. An answer the page reads
+ * token, or with one the issuer refused, is answered with the issuer's sign-in
+ * address, for the agent to hand the person; the sign-in returns to a page
+ * this process holds on `127.0.0.1`, so it is opened on this machine. The
+ * page stays answerable until it is answered or its bound passes; a call made
+ * meanwhile is answered with the same address. An answer the page reads
  * is one carrying the state this sign-in sent, checked before anything else
  * is read, so nothing else that reaches the port can end it.
  *
  * A TOKEN IS NEVER IN AN ANSWER. Not in an error, not in a page, not in a
  * line written anywhere. A refusal from the issuer is said by its status.
  *
- * Renewals run under the store's lock, one at a time per process, and a
- * renewal the issuer refused clears the store, because a refused renewal token
- * cannot become good again.
+ * Renewals run under the store's lock, one at a time per process. A renewal
+ * the issuer refused, as the console reads a refusal, clears the store; any
+ * other failure keeps it for the next call. A renewal whose answer is lost
+ * after the issuer replaced the token leaves a spent one stored, and the next
+ * renewal ends the sign-in: the console has the same exposure.
  */
 
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { clearTimeout, setImmediate, setTimeout } from "node:timers";
+import { clearTimeout, setTimeout } from "node:timers";
 import { URL, URLSearchParams } from "node:url";
 
 import { chuggyBoundedBody } from "./chuggyApi.mjs";
@@ -54,8 +58,8 @@ const localSignInConfigurationPath = "/config.json";
 const localSignInDiscoveryPath = "/.well-known/openid-configuration";
 const localSignInVerifierBytes = 32;
 const localSignInStateBytes = 16;
-const localSignInRefusalStatusMin = 400;
-const localSignInRefusalStatusMax = 500;
+/** The statuses a token request is refused with, as the console's session holder reads them. */
+const localSignInRefusalStatuses = new Set([400, 401]);
 
 /** What a call is answered with where the person must sign in first. */
 export class LocalSignInNeeded extends Error {
@@ -157,11 +161,7 @@ async function localSignInGrant(ports, issuer, fields) {
       client_id: localSignInClientId,
     }).toString(),
   });
-  if (
-    answer.status >= localSignInRefusalStatusMin &&
-    answer.status < localSignInRefusalStatusMax
-  )
-    return undefined;
+  if (localSignInRefusalStatuses.has(answer.status)) return undefined;
   if (answer.status !== 200)
     throw new Error(
       `the sign-in server answered ${String(answer.status)} for a token`,
@@ -190,7 +190,9 @@ function localSignInPage(response, status, text) {
 
 /**
  * The page a sign-in returns to. It answers the one request carrying its state
- * on its own path, and tells everything else there is nothing here.
+ * on its own path, and tells everything else there is nothing here. The page
+ * ends once that answer is sent or its browser has gone, and not before,
+ * since ending it closes every connection it holds.
  */
 function localSignInCallback(signIn, page, request, response) {
   const asked = new URL(request.url ?? "/", page.origin);
@@ -207,9 +209,9 @@ function localSignInCallback(signIn, page, request, response) {
     return;
   }
   page.answering = true;
+  response.once("close", () => signIn.pageEnded(page));
   const code = asked.searchParams.get("code");
   if (code === null) {
-    signIn.pageEnded(page);
     localSignInPage(
       response,
       200,
@@ -254,7 +256,8 @@ async function localSignInPageOpened(signIn, issuer) {
   page.server = server;
   page.origin = `http://${localSignInLoopbackHost}:${String(server.address().port)}`;
   page.redirect = `${page.origin}${localSignInCallbackPath}`;
-  page.url = `${issuer.authorize}?${new URLSearchParams({
+  const authorize = new URL(issuer.authorize);
+  for (const [name, value] of Object.entries({
     response_type: "code",
     client_id: localSignInClientId,
     redirect_uri: page.redirect,
@@ -265,7 +268,9 @@ async function localSignInPageOpened(signIn, issuer) {
       createHash("sha256").update(verifier).digest(),
     ),
     code_challenge_method: "S256",
-  }).toString()}`;
+  }))
+    authorize.searchParams.set(name, value);
+  page.url = authorize.toString();
   page.timer = setTimeout(() => signIn.pageEnded(page), localSignInListenMsMax);
   page.timer.unref?.();
   return page;
@@ -282,7 +287,9 @@ export function localSignIn(site, store, overrides = {}) {
     fetch: globalThis.fetch,
     nowMs: Date.now,
     randomBytes,
-    ...overrides,
+    ...Object.fromEntries(
+      Object.entries(overrides).filter(([, port]) => port !== undefined),
+    ),
   };
   const origin = new URL(site).origin;
   return localSignInHolder(origin, store, ports);
@@ -320,27 +327,25 @@ function localSignInHolder(site, store, ports) {
       return signIn.known;
     },
     pageEnded(ended) {
+      if (ended.ended) return;
+      ended.ended = true;
       clearTimeout(ended.timer);
       ended.server.close();
       ended.server.closeAllConnections?.();
       if (signIn.page === ended) signIn.page = undefined;
     },
     async pageAnswered(answered, code) {
-      try {
-        const issued = await localSignInGrant(ports, answered.issuer, {
-          grant_type: "authorization_code",
-          code,
-          redirect_uri: answered.redirect,
-          code_verifier: answered.verifier,
-        });
-        if (issued === undefined)
-          throw new Error("the sign-in server refused the code");
-        if (issued.renewal !== undefined)
-          await store.locked(() => store.write(issued.renewal));
-        signIn.held = issued;
-      } finally {
-        setImmediate(() => signIn.pageEnded(answered));
-      }
+      const issued = await localSignInGrant(ports, answered.issuer, {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: answered.redirect,
+        code_verifier: answered.verifier,
+      });
+      if (issued === undefined)
+        throw new Error("the sign-in server refused the code");
+      if (issued.renewal !== undefined)
+        await store.locked(() => store.write(issued.renewal));
+      signIn.held = issued;
     },
   };
   return {

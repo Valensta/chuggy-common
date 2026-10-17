@@ -3,11 +3,12 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { setImmediate, setTimeout } from "node:timers";
+import { setTimeout } from "node:timers";
 
 import {
   localTokenStore,
   localTokenStoreHolderAlive,
+  localTokenStoreLockHeldMsMax,
   localTokenStoreLockWaitMsMax,
 } from "./localTokenStore.mjs";
 
@@ -33,18 +34,23 @@ test("a second hold waits for the first to end", async (t) => {
   const store = localTokenStore(join(await directoryOf(t), "renewal"));
   const order = [];
   let release;
+  let held;
+  const holding = new Promise((resolve) => {
+    held = resolve;
+  });
   const first = store.locked(
     () =>
       new Promise((resolve) => {
         order.push("first held");
         release = resolve;
+        held();
       }),
   );
-  await new Promise((resolve) => setImmediate(resolve));
+  await holding;
   const second = store.locked(async () => {
     order.push("second held");
   });
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await new Promise((resolve) => setTimeout(resolve, 250));
   assert.deepEqual(order, ["first held"]);
   release();
   await first;
@@ -60,7 +66,8 @@ test("a lock whose holder is gone is taken, and one still held past the wait rai
   await assert.rejects(readFile(`${path}.lock`), { code: "ENOENT" });
 
   await writeFile(`${path}.lock`, "4242\n");
-  let nowMs = 0;
+  let nowMs = Date.now();
+  const startedMs = nowMs;
   const held = localTokenStore(path, {
     holderAlive: () => true,
     nowMs: () => nowMs,
@@ -76,7 +83,34 @@ test("a lock whose holder is gone is taken, and one still held past the wait rai
     /held the sign-in lock/,
   );
   assert.equal(ran, false);
-  assert.ok(nowMs >= localTokenStoreLockWaitMsMax);
+  assert.ok(nowMs - startedMs >= localTokenStoreLockWaitMsMax);
+  await readFile(`${path}.lock`);
+});
+
+test("a lock older than any renewal holds one is taken whoever it names, and a younger one is waited on", async (t) => {
+  const path = join(await directoryOf(t), "renewal");
+  await writeFile(`${path}.lock`, `${String(process.pid)}\n`);
+  const startedMs = Date.now();
+  let nowMs = startedMs;
+  const store = localTokenStore(path, {
+    nowMs: () => nowMs,
+    wait: async (ms) => {
+      nowMs += ms;
+    },
+  });
+  await assert.rejects(
+    store.locked(async () => "taken"),
+    /held the sign-in lock/,
+  );
+  nowMs = startedMs + localTokenStoreLockHeldMsMax + 1_000;
+  assert.equal(await store.locked(async () => "taken"), "taken");
+});
+
+test("a held lock names its holder whole", async (t) => {
+  const path = join(await directoryOf(t), "renewal");
+  const store = localTokenStore(path);
+  const seen = await store.locked(async () => readFile(`${path}.lock`, "utf8"));
+  assert.equal(seen, `${String(process.pid)}\n`);
 });
 
 test("a holder is alive while its process runs", () => {
