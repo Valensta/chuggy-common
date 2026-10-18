@@ -93,7 +93,7 @@ import {
   workerSummaryText,
 } from "./checks.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
-import { jobHostPlaces } from "./job.mjs";
+import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
   planeCredential,
@@ -221,7 +221,7 @@ async function command(executable, args, options = {}) {
 }
 
 async function cloneRepository(repository, commit, workspace, environment) {
-  const directory = join(workspace, "repository");
+  const directory = jobRepositoryDirectory(workspace);
   await command("git", ["clone", "--no-checkout", repository, directory], {
     env: environment,
   });

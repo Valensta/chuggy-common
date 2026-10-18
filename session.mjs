@@ -79,6 +79,7 @@ import {
   sessionTaskVariable,
   workerCredentialFilesVariable,
   workerRepositoriesVariable,
+  workerWorkspaceDirectory,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
@@ -140,7 +141,6 @@ const modelUsageCounters = [
 
 const agentSdkModule = "@anthropic-ai/claude-agent-sdk";
 const zodModule = "zod";
-const defaultWorkspace = "/workspace";
 const readStatus = 200;
 const acceptedStatus = 204;
 
@@ -548,7 +548,8 @@ export function sessionQueryOptions(
   token,
   { servers = {}, checkout } = {},
 ) {
-  const workspace = environment[workerWorkspaceVariable] ?? defaultWorkspace;
+  const workspace =
+    environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
   const { allowedTools, disallowedTools } = sessionAllowedTools(
     facts.capabilities,
   );
@@ -845,7 +846,8 @@ async function sessionCredentials(environment, read, slot) {
  * leaves out exactly as before.
  */
 async function sessionTree(take, task, environment, credentialFiles, logging) {
-  const workspace = environment[workerWorkspaceVariable] ?? defaultWorkspace;
+  const workspace =
+    environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
   const named = environment[workerRepositoriesVariable];
   const repositories =
     named === undefined || named.length === 0 ? {} : workerRepositories(named);
@@ -1149,7 +1151,8 @@ export async function sessionMain(services = {}) {
     scrub = held.scrub;
     context.scrub = scrub;
     context.scrubHead = held.scrubHead;
-    const workspace = environment[workerWorkspaceVariable] ?? defaultWorkspace;
+    const workspace =
+      environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
     await ensureDirectory(sessionConfigDirectory(environment, workspace));
     stopLease = startLease(task, bearer, request);
     const checkout = await sessionTree(

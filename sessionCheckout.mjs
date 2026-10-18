@@ -46,15 +46,12 @@
 
 import { execFile } from "node:child_process";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { jobRepositoryDirectory } from "./job.mjs";
 import { workerRepository, workerRepositoryUrl } from "./repository.mjs";
 
 const executeFile = promisify(execFile);
-
-/** The directory under the workspace a session's tree is cloned into, which is the worker's own name. */
-const sessionCheckoutDirectory = "repository";
 
 /** What one git call may print back, matching the worker's own ceiling. */
 const sessionCheckoutBufferBytesMax = 16 * 1024 * 1024;
@@ -178,7 +175,7 @@ export async function sessionCheckout(
   );
   if (remote.refused !== undefined) return { refused: scrub(remote.refused) };
   const { repository, environment } = remote;
-  const directory = join(workspace, sessionCheckoutDirectory);
+  const directory = jobRepositoryDirectory(workspace);
   try {
     await run(["clone", repository, directory], {
       env: environment,
