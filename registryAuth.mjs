@@ -2,8 +2,10 @@
  * The credential of the one pull made under a configuration of the runner's
  * own: a pull of the pool's registry, under the pool's token. That token is
  * chuggy's credential and not this machine's, so it is presented to that
- * registry alone, and in place of any login this machine keeps for it. It is
- * written for that registry into a directory made for that one pull and
+ * registry alone, and in place of any login this machine keeps for it, but for
+ * one a credential helper hands podman where its `registries.conf` names the
+ * helper ahead of `containers-auth.json`, or names no `containers-auth.json`.
+ * It is written for that registry into a directory made for that one pull and
  * removed after it, whatever its outcome, and the engine reads it from there,
  * so it is never in an argv. An image of any other registry is pulled as the
  * engine's own configuration pulls it, under whatever its user set up.

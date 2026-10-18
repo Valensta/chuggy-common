@@ -581,7 +581,17 @@ const pullsMade = (state) =>
     }));
 
 test("the pool's token is presented only to the registry the pool was registered for, and any other image is the engine's own pull", async (t) => {
-  const elsewhere = `registry.example.com/x@sha256:${"b".repeat(64)}`;
+  const elsewhere = [
+    "registry.example.com",
+    "evil-registry.chuggy.example",
+    "registry.chuggy.example.evil.example",
+    "registry.chuggy.example:5000",
+  ].map((host) => `${host}/x@sha256:${"b".repeat(64)}`);
+  const ownPulls = elsewhere.map((other) => ({
+    argv: ["pull", "--quiet", other],
+    environment: {},
+    credential: undefined,
+  }));
   const poolCredential = {
     auths: {
       "registry.chuggy.example": {
@@ -603,11 +613,7 @@ test("the pool's token is presented only to the registry the pool was registered
         environment: {},
         credential: poolCredential,
       },
-      {
-        argv: ["pull", "--quiet", elsewhere],
-        environment: {},
-        credential: undefined,
-      },
+      ...ownPulls,
     ],
     docker: [
       {
@@ -619,11 +625,7 @@ test("the pool's token is presented only to the registry the pool was registered
         },
         credential: poolCredential,
       },
-      {
-        argv: ["pull", "--quiet", elsewhere],
-        environment: {},
-        credential: undefined,
-      },
+      ...ownPulls,
     ],
   };
   for (const engine of /** @type {const} */ (["podman", "docker"])) {
@@ -634,15 +636,17 @@ test("the pool's token is presented only to the registry the pool was registered
     });
     await backend.place(assignment(), "Job");
     await backend.settled();
-    await backend.place(
-      assignment({ assignment: "asg-2", image: elsewhere }),
-      "Job",
-    );
-    await backend.settled();
+    for (const [index, other] of elsewhere.entries()) {
+      await backend.place(
+        assignment({ assignment: `asg-${String(index + 2)}`, image: other }),
+        "Job",
+      );
+      await backend.settled();
+    }
     assert.deepEqual(pullsMade(state), expected[engine], engine);
     assert.equal(minted(), 1);
     assert.deepEqual(invalidated, []);
-    assert.equal(state.containers.size, 2);
+    assert.equal(state.containers.size, 1 + elsewhere.length);
     assert.deepEqual(await readdir(settings.runtimeDir), []);
   }
 });

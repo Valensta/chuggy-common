@@ -137,8 +137,9 @@ export function pullArgv(image) {
 
 /**
  * A pull of the pool's registry, and the variables its engine is run with,
- * under the pool's token alone: docker reads it from `DOCKER_CONFIG`, podman
- * from `--authfile`. A fresh `DOCKER_CONFIG` holds no CLI context either, so
+ * under the pool's token: docker reads it from `DOCKER_CONFIG`, podman from
+ * `--authfile`, unless a credential helper its `registries.conf` names first
+ * answers for the host. A fresh `DOCKER_CONFIG` holds no CLI context either, so
  * docker is also told the endpoint its context resolved to, or the pull would
  * reach another daemon than every other call. `DOCKER_AUTH_CONFIG`, a login
  * docker takes from the environment over any file's, is emptied, which docker
@@ -183,8 +184,8 @@ export function podmanVersionArgv() {
 }
 
 /**
- * Whether podman is a remote client, whose service mounts a container's paths
- * from its own machine.
+ * Whether podman is a remote client, whose service may be on another machine
+ * and mounts a container's paths from there.
  */
 export function podmanRemoteArgv() {
   return ["info", "--format", "{{.Host.ServiceIsRemote}}"];
