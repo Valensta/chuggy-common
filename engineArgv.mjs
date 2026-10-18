@@ -3,7 +3,7 @@
  * the engine's CLI. Nothing here runs anything.
  */
 
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 
 import {
   mintedCredentialDirectory,
@@ -468,7 +468,7 @@ export function ownerVolumeCreateArgv(engine, volume) {
  * @param {string} volume
  */
 function ownerVolumesOpenArgvMount(volume) {
-  return join(jobRunDirectory, "volumes", volume);
+  return posix.join(jobRunDirectory, "volumes", volume);
 }
 
 /**
