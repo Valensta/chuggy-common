@@ -1,8 +1,8 @@
 /**
  * Every stderr in `printed`, and each a pull test lists as refused, is what
- * docker 28.1 or podman 5.8 printed for the failure it is filed under, copied
- * from a run of each against a daemon, and a local registry that challenged
- * for credentials. The rest are built on what those engines print, and crun's
+ * docker 28.1, docker 29.1 on Windows or podman 5.8 printed for the failure it
+ * is filed under, copied from a run of each against a daemon, and a local
+ * registry that challenged for credentials. The rest are built on what those engines print, and crun's
  * on the formats of its own source.
  */
 import assert from "node:assert/strict";
@@ -21,6 +21,7 @@ const printed = {
   Unreachable: [
     "Cannot connect to the Docker daemon at unix:///nonexistent/docker.sock. Is the docker daemon running?",
     'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.49/containers/json": dial unix /var/run/docker.sock: connect: permission denied',
+    "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.",
     'Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: Get "http://d/v5.8.7/libpod/_ping": dial unix /nonexistent/podman.sock: connect: no such file or directory: unix:///nonexistent/podman.sock',
   ],
   NoSuchContainer: [

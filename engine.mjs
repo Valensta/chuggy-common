@@ -3,10 +3,13 @@
  * shell. An answer is the exit code and both streams; only an abort rejects,
  * since the caller is the one who asked for it. A call that could not start,
  * or that ran past its cap, is answered as `failed`, which `engineErrors.mjs`
- * reads as an unreachable engine.
+ * reads as an unreachable engine. On Windows each call's console window is
+ * hidden, since a runner with no console of its own would otherwise open one
+ * for every call.
  */
 
 import { execFile, spawn } from "node:child_process";
+import { writeSync } from "node:fs";
 
 /**
  * @typedef {object} EngineAnswer
@@ -62,6 +65,7 @@ export function containerEngine(binary, callTimeoutMs) {
             timeout: call.signal === undefined ? callTimeoutMs : 0,
             maxBuffer: engineAnswerBytesMax,
             encoding: "utf8",
+            windowsHide: true,
           },
           (error, stdout, stderr) => {
             if (error === null) resolve({ code: 0, stdout, stderr });
@@ -72,10 +76,26 @@ export function containerEngine(binary, callTimeoutMs) {
       }),
     execToFd: (argv, fd) =>
       new Promise((resolve) => {
+        // Piped and written here rather than handed `fd`: libuv opens a
+        // child no console only where none of its outputs is a handle it
+        // inherits, and a runner on no console would otherwise open one.
         const child = spawn(binary, argv, {
-          stdio: ["ignore", fd, fd],
+          stdio: ["ignore", "pipe", "pipe"],
           timeout: callTimeoutMs,
+          windowsHide: true,
         });
+        // A write that fails, as on a full disk, ends the copy and not this
+        // process: the output is the call's, and the call is answered as is.
+        let writing = true;
+        for (const stream of [child.stdout, child.stderr])
+          stream.on("data", (chunk) => {
+            if (!writing) return;
+            try {
+              writeSync(fd, chunk);
+            } catch {
+              writing = false;
+            }
+          });
         child.once("error", (error) => resolve(engineAnswered(error, "", "")));
         child.once("close", (code, signal) =>
           resolve(

@@ -13,7 +13,7 @@
 const engineFailures = /** @type {const} */ ([
   [
     "Unreachable",
-    /cannot connect to the docker daemon|permission denied while trying to connect to the docker daemon|cannot connect to podman/iu,
+    /cannot connect to the docker daemon|permission denied while trying to connect to the docker daemon|failed to connect to the docker api|cannot connect to podman/iu,
   ],
   ["NoSuchContainer", /no such container/iu],
   ["NoSuchVolume", /no such volume/iu],

@@ -19,6 +19,7 @@ import {
   registerEndpointRefusal,
   registerPoolDirectory,
   registerPoolFileName,
+  registerFlushRefusalTolerated,
   registerPoolFileWritten,
   registerPoolNameDefault,
   registerRedeemed,
@@ -786,4 +787,25 @@ test("a personal runner's file is written owner-only beside a pool's of its tena
     "chuggy-personal-client-2",
   );
   assert.equal((await readdir(directory)).length, 2);
+});
+
+test("a directory flush refused with EPERM is gone on past on Windows alone, which refuses to flush a directory", () => {
+  const eperm = Object.assign(
+    new Error("EPERM: operation not permitted, fsync"),
+    {
+      code: "EPERM",
+    },
+  );
+  assert.equal(registerFlushRefusalTolerated(eperm, "win32"), true);
+  for (const platform of /** @type {NodeJS.Platform[]} */ (["linux", "darwin"]))
+    assert.equal(registerFlushRefusalTolerated(eperm, platform), false);
+  for (const code of ["EIO", "EACCES", undefined])
+    assert.equal(
+      registerFlushRefusalTolerated(
+        Object.assign(new Error(), { code }),
+        "win32",
+      ),
+      false,
+    );
+  assert.equal(registerFlushRefusalTolerated(undefined, "win32"), false);
 });

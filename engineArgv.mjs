@@ -49,6 +49,7 @@ import {
  * @typedef {object} EngineSocket this machine's container engine, as a workload is handed it
  * @property {string} path the socket's path on this machine
  * @property {number} gid the socket's group on this machine, which a docker workload is added to unless it is root's and a podman one never is
+ * @property {true} [rootGroup] the socket is reached only through root's group, as Docker Desktop's is in its VM, so a docker workload is added to that group too; a runner says so only where every workload it hands the engine already holds root on the engine's machine
  *
  * @typedef {object} RuntimeVolumes a job's own volumes where it starts through chuggy's runtime
  * @property {string} volume the one holding its copy of the runtime
@@ -229,7 +230,8 @@ export function mintedTmpfs(engine) {
  * What a workload handed this machine's engine is run with: the engine's
  * socket, mounted read-only where docker's clients look for one, and on docker
  * the socket's group, without which the image's user cannot reach it. No
- * workload is added to root's group, so a socket of root's group adds none.
+ * workload is added to root's group, so a socket of root's group adds none,
+ * unless the runner says the socket is reached only through it.
  * Podman's workload needs no group, since keep-id maps the user running
  * podman, who owns its socket, onto the image's user.
  *
@@ -241,7 +243,7 @@ function runArgvEngineSocket(engine, socket) {
   return [
     "--mount",
     `type=bind,source=${socket.path},target=${jobEngineSocket},readonly`,
-    ...(engine === "docker" && socket.gid !== 0
+    ...(engine === "docker" && (socket.gid !== 0 || socket.rootGroup === true)
       ? ["--group-add", String(socket.gid)]
       : []),
   ];

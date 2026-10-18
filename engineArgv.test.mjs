@@ -143,6 +143,14 @@ test("docker adds a job to no group for a socket of root's group", () => {
   );
 });
 
+test("docker adds a job to root's group for a socket its runner says is reached only through it, as Docker Desktop's is", () => {
+  assertHandedEngineSocket(
+    "docker",
+    { path: "/var/run/docker.sock", gid: 0, rootGroup: true },
+    ["--group-add", "0"],
+  );
+});
+
 test("podman mounts a job's engine socket read-only where docker's clients look, and adds the job to no group, since keep-id makes the job's user the socket's owner", () => {
   assertHandedEngineSocket(
     "podman",
