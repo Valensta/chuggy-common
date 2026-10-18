@@ -15,7 +15,7 @@
  * since a host carries no runtime tree of chuggy's.
  */
 
-import { dirname, join, relative } from "node:path";
+import { join, posix, relative } from "node:path";
 
 import {
   mintedCredentialDirectory,
@@ -63,12 +63,13 @@ export function jobRepositoryDirectory(workspace) {
 
 /**
  * Chuggy's own directory in a workload's container, which the credentials it
- * mints and the token file it mounts are in.
+ * mints and the token file it mounts are in. A container's path, so posix on
+ * every host.
  */
-export const jobRunDirectory = dirname(mintedCredentialDirectory);
+export const jobRunDirectory = posix.dirname(mintedCredentialDirectory);
 
 /** Where the Claude token file is mounted, read-only. */
-export const jobProviderCredentialFile = join(
+export const jobProviderCredentialFile = posix.join(
   jobRunDirectory,
   "credentials",
   "claude-code",
