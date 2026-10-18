@@ -82,7 +82,7 @@ test("a call with a signal of its own is not capped, and rejects when it aborts"
   await assert.rejects(aborted, { name: "AbortError" });
 });
 
-test("output of any length goes to a file descriptor, both streams", async (t) => {
+test("output of any length goes to a file descriptor, both streams whole, each in its own order", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-engine-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, "log");
@@ -98,5 +98,18 @@ test("output of any length goes to a file descriptor, both streams", async (t) =
   assert.deepEqual(answer, { code: 0, stdout: "", stderr: "" });
   const text = await readFile(file, "utf8");
   assert.equal(text.length, (1 << 20) + 3);
-  assert.ok(text.endsWith("end"));
+  // The streams reach the file through pipes of their own, so where one's
+  // bytes fall among the other's is not fixed; each stream's are whole.
+  assert.equal(text.replace("end", ""), "x".repeat(1 << 20));
+});
+
+test("output that cannot be written to its file descriptor ends the copy, not the process, and the call is still answered", async () => {
+  const answer = await node.execToFd(
+    [
+      "-e",
+      "process.stdout.write('x'.repeat(1 << 16)); process.stderr.write('end')",
+    ],
+    1 << 30,
+  );
+  assert.deepEqual(answer, { code: 0, stdout: "", stderr: "" });
 });

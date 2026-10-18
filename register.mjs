@@ -580,6 +580,39 @@ export async function registerPoolDirectory(directory) {
 }
 
 /**
+ * Whether a directory flush that failed is one to go on past: on Windows,
+ * which opens a directory but refuses to flush one with EPERM. Anywhere
+ * else a failed flush is one.
+ *
+ * @param {unknown} failure
+ * @param {NodeJS.Platform} platform
+ */
+export function registerFlushRefusalTolerated(failure, platform) {
+  return (
+    platform === "win32" &&
+    /** @type {NodeJS.ErrnoException} */ (failure)?.code === "EPERM"
+  );
+}
+
+/**
+ * The directory's entries flushed, so the rename outlives a crash, where the
+ * platform will flush a directory.
+ *
+ * @param {string} directory
+ */
+async function registerDirectorySynced(directory) {
+  const handle = await open(directory, "r");
+  try {
+    await handle.sync();
+  } catch (failure) {
+    if (!registerFlushRefusalTolerated(failure, process.platform))
+      throw failure;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
  * Writes the pool file whole under a temporary name, owner-only from its
  * creation, and renames it over any earlier file of the same pool.
  *
@@ -612,11 +645,6 @@ export async function registerPoolFileWritten(directory, pool, nameCharsMax) {
     await rm(temporary, { force: true });
     throw failure;
   }
-  const directoryHandle = await open(directory, "r");
-  try {
-    await directoryHandle.sync();
-  } finally {
-    await directoryHandle.close();
-  }
+  await registerDirectorySynced(directory);
   return { file, replaced };
 }
