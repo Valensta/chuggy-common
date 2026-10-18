@@ -3,7 +3,9 @@
  * shell. An answer is the exit code and both streams; only an abort rejects,
  * since the caller is the one who asked for it. A call that could not start,
  * or that ran past its cap, is answered as `failed`, which `engineErrors.mjs`
- * reads as an unreachable engine.
+ * reads as an unreachable engine. On Windows each call's console window is
+ * hidden, since a runner with no console of its own would otherwise open one
+ * for every call.
  */
 
 import { Buffer } from "node:buffer";
@@ -109,6 +111,7 @@ export function containerEngine(binary, callTimeoutMs) {
             timeout: call.signal === undefined ? callTimeoutMs : 0,
             maxBuffer: engineAnswerBytesMax,
             encoding: "utf8",
+            windowsHide: true,
           },
           (error, stdout, stderr) => {
             if (error === null) resolve({ code: 0, stdout, stderr });
@@ -124,6 +127,7 @@ export function containerEngine(binary, callTimeoutMs) {
         const child = spawn(binary, argv, {
           stdio: ["ignore", "pipe", "pipe"],
           timeout: callTimeoutMs,
+          windowsHide: true,
         });
         child.stdout.on("data", kept.add);
         child.stderr.on("data", (chunk) => {
