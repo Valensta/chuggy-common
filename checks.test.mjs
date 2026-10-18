@@ -41,6 +41,7 @@ import {
   workerStageEnvironment,
   workerSummaryCharsMax,
   workerSummaryText,
+  workerTemporaryFile,
 } from "./checks.mjs";
 
 const workspace = { directory: process.cwd() };
@@ -309,6 +310,16 @@ test("a stage's commands inherit the pod's environment but not the task document
     for (const name of [...Object.keys(placed), "SITE_VARIABLE"])
       delete process.env[name];
   }
+});
+
+/** Where the core keeps its own files is the temporary directory as `check.sh` names it. */
+test("an unnamed or empty TMPDIR keeps the core's files in /tmp", () => {
+  assert.equal(
+    workerTemporaryFile("kept", { TMPDIR: "/image/temporary" }),
+    "/image/temporary/kept",
+  );
+  for (const environment of [{}, { TMPDIR: "" }])
+    assert.equal(workerTemporaryFile("kept", environment), "/tmp/kept");
 });
 
 /** A command that prints what the stage told it of the change's base, or `unset`. */

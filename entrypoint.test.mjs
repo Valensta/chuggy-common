@@ -60,7 +60,6 @@ import {
   workerMintedWritable,
   workerMode,
   workerRun,
-  workerTemporaryFile,
   workerWorkspace,
 } from "./entrypoint.mjs";
 import {
@@ -320,16 +319,6 @@ test("an agent's task keeps its result schema in the image's temporary directory
     ),
     agentResultSchema,
   );
-});
-
-/** Where a job keeps its own files is the temporary directory as `check.sh` names it. */
-test("an unnamed or empty TMPDIR keeps a job's files in /tmp", () => {
-  assert.equal(
-    workerTemporaryFile("kept", { TMPDIR: "/image/temporary" }),
-    "/image/temporary/kept",
-  );
-  for (const environment of [{}, { TMPDIR: "" }])
-    assert.equal(workerTemporaryFile("kept", environment), "/tmp/kept");
 });
 
 /** Both halves of what a commanded work task must be granted before it runs. */
