@@ -15,10 +15,12 @@
  * since a host carries no runtime tree of chuggy's.
  */
 
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 import {
+  workerRepositoryDirectory,
   workerTaskVariable,
+  workerWorkspaceDirectory,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
@@ -41,7 +43,21 @@ export const jobGid = 1000;
 export const jobPidsMax = 4096;
 
 /** An anonymous volume of the workload's own container. */
-export const jobWorkspace = "/workspace";
+export const jobWorkspace = workerWorkspaceDirectory;
+
+/**
+ * Where a workload's checkout is in the workspace it works in: where the
+ * contract puts it in a container's, and at the same place in the directory a
+ * job on its runner's host is given.
+ *
+ * @param {string} workspace
+ */
+export function jobRepositoryDirectory(workspace) {
+  return join(
+    workspace,
+    relative(workerWorkspaceDirectory, workerRepositoryDirectory),
+  );
+}
 
 /** Where the Claude token file is mounted, read-only. */
 export const jobProviderCredentialFile =
