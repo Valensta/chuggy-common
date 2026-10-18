@@ -1018,6 +1018,7 @@ const everyToolArgument = {
   attempt: "a-1",
   operation: "o-1",
   session: "s-1",
+  artifact: "image/png:a-1",
   expectedVersion: 1,
   authoringVersion: 1,
   configurationRevision: "r-1",
