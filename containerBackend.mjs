@@ -60,11 +60,24 @@
  * engine's, beside the job's container rather than in it, and goes with
  * neither that container nor its volumes. A session is never handed the
  * engine.
+ *
+ * A JOB MOUNTS EACH VOLUME ITS OWNER LISTS, a named volume or a directory of
+ * this machine, whatever image it runs and however it starts. A named volume
+ * that is not there is made, labelled as this runner's, before the job that
+ * mounts it starts, and each this runner made is opened to the job's user
+ * then, by the job's runtime image, as its runtime volumes are filled, so one
+ * whose opening a stopped runner cut short is opened by the next job.
+ * One its owner made is mounted as it is. A job started through no runtime
+ * has no image to open one with, so it mounts one only once it is there.
+ * These volumes are the owner's, and nothing here removes one: none carries a
+ * pool's label, and none is a job's own. A session mounts none: it runs its
+ * site's session image, whose environment points at none of them, and, as
+ * with the engine, is given nothing of this machine it does not need.
  */
 
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 import {
   workerImageFaults,
@@ -80,6 +93,7 @@ import { z } from "zod";
 
 import {
   assignmentLabel,
+  bindMountNameable,
   deadlineLabel,
   fillLabel,
   forcedRemoveArgv,
@@ -89,6 +103,10 @@ import {
   kindLabel,
   listArgv,
   logsArgv,
+  ownerVolumeCreateArgv,
+  ownerVolumeDirectory,
+  ownerVolumeLabel,
+  ownerVolumesOpenArgv,
   pullArgv,
   removeArgv,
   runArgv,
@@ -98,6 +116,7 @@ import {
   volumeInspectArgv,
   volumeListArgv,
   volumeRemoveArgv,
+  workloadMountTargets,
   workspaceLabel,
 } from "./engineArgv.mjs";
 import {
@@ -111,6 +130,7 @@ import {
   jobEnvelope,
   jobEnvironmentAttempt,
   jobEnvironmentFile,
+  jobRunDirectory,
   jobWorkspace,
 } from "./job.mjs";
 import {
@@ -134,6 +154,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {import("./poolLoop.mjs").WorkerPoolTokens} WorkerPoolTokens
  * @typedef {import("./engine.mjs").Engine} Engine
  * @typedef {import("./engine.mjs").EngineAnswer} EngineAnswer
+ * @typedef {import("./engineArgv.mjs").OwnerVolume} OwnerVolume
  * @typedef {import("./poolIdentity.mjs").PoolIdentity} PoolIdentity
  *
  * @typedef {object} ContainerBackendSettings
@@ -152,6 +173,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {number} pullRetryMs the wait before a pull the registry refused is tried again
  * @property {import("./engineArgv.mjs").EngineSocket} [engineSocket] this machine's engine, which each job is handed through its socket and no session is; none, and no workload is
  * @property {readonly OwnerImage[]} [images] what a job whose assignment pins no image runs in; none, and no such job is taken
+ * @property {readonly OwnerVolume[]} [volumes] what its owner mounts into each job and no session; none, and nothing is
  *
  * @typedef {object} OwnerImage an image its pool's owner runs work in that names capabilities rather than an image
  * @property {string} image
@@ -847,6 +869,100 @@ export const ownerImagesSchema = z.array(
 );
 
 /**
+ * The paths of chuggy's own in a job's container, which no owner's volume is
+ * mounted at, in or above: each `runArgv` mounts, and chuggy's own run
+ * directory, which the credentials it mints are in.
+ */
+export const ownerVolumeTargetsRefused = [
+  ...workloadMountTargets,
+  jobRunDirectory,
+];
+
+/** A name both docker and podman give a volume. */
+const ownerVolumeNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]+$/u;
+
+/**
+ * Why an owner's volume cannot be this source, or nothing.
+ *
+ * @param {string} source
+ */
+function ownerVolumeSourceRefusal(source) {
+  if (ownerVolumeDirectory(source))
+    return bindMountNameable(source)
+      ? undefined
+      : "cannot be named in a bind mount: it has a comma or a line break";
+  return ownerVolumeNamePattern.test(source)
+    ? undefined
+    : "names neither a volume, by two or more letters, digits, '_', '.' and '-' from a letter or digit, nor a directory by its absolute path";
+}
+
+/**
+ * Why an owner's volume cannot be mounted at this target, or nothing. A
+ * target is an absolute path in its normal form, which both `--mount` and
+ * `--volume` can name, and neither is one of chuggy's paths nor is in or
+ * holds one, since a mount there would hide chuggy's or be hidden by it.
+ *
+ * @param {string} target
+ */
+function ownerVolumeTargetRefusal(target) {
+  if (target === "/") return "may not be the container's root";
+  if (
+    !posix.isAbsolute(target) ||
+    posix.normalize(target) !== target ||
+    target.endsWith("/")
+  )
+    return "must be an absolute path in its normal form, with no '.' or '..' and no doubled or trailing '/'";
+  if (/[,:\r\n]/u.test(target))
+    return "cannot be named in a mount: it has a comma, a colon or a line break";
+  const refused = ownerVolumeTargetsRefused;
+  const at = refused.find((path) => target === path);
+  if (at !== undefined) return `is ${at}, chuggy's own`;
+  const within = refused.find((path) => target.startsWith(`${path}/`));
+  if (within !== undefined) return `is in ${within}, chuggy's own`;
+  const holding = refused.find((path) => path.startsWith(`${target}/`));
+  if (holding !== undefined) return `holds ${holding}, chuggy's own`;
+  return undefined;
+}
+
+/**
+ * Adds an issue where a refusal names one.
+ *
+ * @param {(value: string) => string | undefined} refusal
+ */
+function ownerVolumeRefined(refusal) {
+  return z.string().superRefine((value, context) => {
+    const why = refusal(value);
+    if (why !== undefined) context.addIssue({ code: "custom", message: why });
+  });
+}
+
+/**
+ * What a runner's owner mounts into each job, as a runner's settings name
+ * it: the source, told apart as `ownerVolumeDirectory` says, its target in
+ * the job's container, each target once, and whether the job may only read
+ * it.
+ */
+export const ownerVolumesSchema = z
+  .array(
+    z.strictObject({
+      source: ownerVolumeRefined(ownerVolumeSourceRefusal),
+      target: ownerVolumeRefined(ownerVolumeTargetRefusal),
+      readonly: z.boolean().default(false),
+    }),
+  )
+  .superRefine((volumes, context) => {
+    volumes.forEach(({ target }, index) => {
+      const first = volumes.findIndex((volume) => volume.target === target);
+      if (first !== index)
+        context.addIssue({
+          code: "custom",
+          path: [index, "target"],
+          message: `is volume ${String(first)}'s target too`,
+        });
+    });
+  });
+
+/**
  * The image an assignment runs in: the one it pins, or else the first its
  * owner listed declaring every capability it names but its platform, which an
  * engine's image is only where it is Linux.
@@ -1186,6 +1302,104 @@ async function runtimeFilled(state, placement, runtime) {
 }
 
 /**
+ * The labels of an owner's named volume that is there, or nothing where it is
+ * not.
+ *
+ * @param {State} state
+ * @param {string} volume
+ * @returns {Promise<Record<string, string> | undefined>}
+ */
+async function ownerVolumeLabels(state, volume) {
+  const answer = await state.seams.engine.exec(volumeInspectArgv([volume]));
+  if (answer.code !== 0 && engineFailure(answer) === "NoSuchVolume")
+    return undefined;
+  if (answer.code !== 0)
+    throw new Error(
+      `its owner's volume ${volume} could not be inspected: ${engineFailureLine(answer)}`,
+    );
+  let inspected;
+  try {
+    [inspected] = inspectedVolumesSchema.parse(JSON.parse(answer.stdout));
+  } catch {
+    throw new Error(
+      `${state.settings.engine} answered an inspection of its owner's volume ${volume} this runner cannot read`,
+    );
+  }
+  return inspected === undefined ? undefined : (inspected.Labels ?? {});
+}
+
+/**
+ * Makes an owner's named volume that was not there. One another placement
+ * made since, which podman refuses to make again, is taken as made.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {string} volume
+ */
+async function ownerVolumeMade(state, placement, volume) {
+  const { settings, seams } = state;
+  const created = await seams.engine.exec(
+    ownerVolumeCreateArgv(settings.engine, volume),
+  );
+  if (created.code === 0)
+    seams.log(`${placement.name}: its owner's volume ${volume} was made`);
+  else if ((await ownerVolumeLabels(state, volume)) === undefined)
+    throw new Error(
+      `its owner's volume ${volume} could not be made: ${engineFailureLine(created)}`,
+    );
+}
+
+/**
+ * Readies each named volume a job's owner mounts into it, as this backend's
+ * header says: made where it is not there, then, with every other this runner
+ * made, opened by the container `ownerVolumesOpenArgv` names.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ */
+async function ownerVolumesReady(state, placement) {
+  const { settings, seams } = state;
+  const runtime = placement.runtime?.image;
+  /** @type {string[]} */
+  const opened = [];
+  const named = (settings.volumes ?? []).flatMap(({ source }) =>
+    ownerVolumeDirectory(source) ? [] : [source],
+  );
+  for (const volume of new Set(named)) {
+    const labels = await ownerVolumeLabels(state, volume);
+    if (labels !== undefined && !Object.hasOwn(labels, ownerVolumeLabel))
+      continue;
+    if (runtime === undefined) {
+      if (labels !== undefined) continue;
+      throw new Error(
+        `its owner's volume ${volume} is not there, and only a job started through chuggy's runtime can make one`,
+      );
+    }
+    if (labels === undefined) await ownerVolumeMade(state, placement, volume);
+    opened.push(volume);
+  }
+  if (runtime === undefined || opened.length === 0) return;
+  try {
+    const answer = await seams.engine.exec(
+      ownerVolumesOpenArgv(settings.engine, opened, runtime),
+      {
+        signal: placementSignal(
+          state,
+          placement,
+          "its owner's volumes were not opened",
+        ),
+      },
+    );
+    if (answer.code !== 0) throw new Error(engineFailureLine(answer));
+  } catch (failure) {
+    throw runtimeFailure(
+      failure,
+      `this runner could not open its owner's volumes ${opened.join(", ")}`,
+    );
+  }
+}
+
+/**
  * Which assignment an existing container of this name carries.
  *
  * @param {State} state
@@ -1207,6 +1421,16 @@ async function containerAssignment(state, name) {
  */
 function workloadEngineSocket(settings, placement) {
   return placement.kind === "Job" ? settings.engineSocket : undefined;
+}
+
+/**
+ * What a workload is given of its owner's volumes: each, where it is a job.
+ *
+ * @param {ContainerBackendSettings} settings
+ * @param {Placement} placement
+ */
+function workloadOwnerVolumes(settings, placement) {
+  return placement.kind === "Job" ? settings.volumes : undefined;
 }
 
 /**
@@ -1291,6 +1515,7 @@ async function started(state, placement, assignment, envelope) {
         image: placement.image,
         runtime: placement.runtime?.volumes,
         engineSocket: workloadEngineSocket(settings, placement),
+        volumes: workloadOwnerVolumes(settings, placement),
       }),
     );
   } finally {
@@ -1320,10 +1545,11 @@ async function started(state, placement, assignment, envelope) {
 /**
  * Gets what a placement starts from and starts it: chuggy's runtime first
  * where the job starts through one, then the job's image, then the job's
- * volumes of the runtime. Those are removed where the job did not start in
- * them, as where a predecessor's container was found already running the job,
- * and where it failed the container filling them goes first: a stop or the
- * deadline ends only the engine's CLI, and leaves that container holding them.
+ * volumes of the runtime, then its owner's. The runtime's are removed where
+ * the job did not start in them, as where a predecessor's container was found
+ * already running the job, and where it failed the container filling them
+ * goes first: a stop or the deadline ends only the engine's CLI, and leaves
+ * that container holding them.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1342,6 +1568,7 @@ async function placementRun(state, placement, assignment, envelope) {
     placement.controller.signal.throwIfAborted();
     placement.phase = "Starting";
     if (runtime !== undefined) await runtimeFilled(state, placement, runtime);
+    if (placement.kind === "Job") await ownerVolumesReady(state, placement);
     outcome = await started(state, placement, assignment, envelope);
   } catch (failure) {
     if (runtime?.volumes !== undefined)

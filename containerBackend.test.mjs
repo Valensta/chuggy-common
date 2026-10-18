@@ -3,13 +3,16 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 
 import {
+  mintedCredentialDirectory,
   workerImageFaults,
   workerImageFaultStatuses,
+  workerRuntimeDirectory,
+  workerWorkspaceDirectory,
 } from "@chuggy/worker-contract/workerEnvironment";
 
 import {
@@ -18,6 +21,7 @@ import {
   containerImageOf,
   containerImageFaultTexts,
   containerName,
+  ownerVolumesSchema,
   pullFailureDwellMs,
 } from "./containerBackend.mjs";
 import {
@@ -25,7 +29,13 @@ import {
   fakeEngine,
   unstartedEntrypoint,
 } from "./engine.fixture.mjs";
-import { jobEnvelope } from "./job.mjs";
+import { ownerVolumeCreateArgv, ownerVolumesOpenArgv } from "./engineArgv.mjs";
+import {
+  jobEngineSocket,
+  jobEnvelope,
+  jobProviderCredentialFile,
+  jobRunDirectory,
+} from "./job.mjs";
 
 const pool = { tenant: "vteng", project: "chuggy", pool: "shame" };
 const image = "registry.chuggy.example/worker@sha256:" + "a".repeat(64);
@@ -305,6 +315,118 @@ test("an image an assignment pins is the one it runs, whatever its owner listed,
       capabilities: ["Platform:MacOS:Arm64"],
     }),
     undefined,
+  );
+});
+
+/**
+ * What a runner's settings print of these owner volumes' refusals, each
+ * issue's path and message.
+ *
+ * @param {unknown[]} volumes
+ */
+function ownerVolumesRefused(volumes) {
+  const parsed = ownerVolumesSchema.safeParse(volumes);
+  return parsed.success
+    ? []
+    : parsed.error.issues.map(
+        (issue) => `${issue.path.join(".")} ${issue.message}`,
+      );
+}
+
+/** @param {string} target */
+const mountedAt = (target) => [{ source: "cargo", target }];
+
+/** What `ownerVolumesSchema` says of a target not in its normal form. */
+const abnormalTarget =
+  "0.target must be an absolute path in its normal form, with no '.' or '..' and no doubled or trailing '/'";
+
+test("an owner's volume is refused at, in, and above each path chuggy mounts or keeps in a job's container, and at each written otherwise", () => {
+  for (const path of [
+    workerRuntimeDirectory,
+    workerWorkspaceDirectory,
+    mintedCredentialDirectory,
+    jobRunDirectory,
+    jobProviderCredentialFile,
+    jobEngineSocket,
+  ]) {
+    assert.deepEqual(ownerVolumesRefused(mountedAt(path)), [
+      `0.target is ${path}, chuggy's own`,
+    ]);
+    assert.deepEqual(ownerVolumesRefused(mountedAt(`${path}/cache`)), [
+      `0.target is in ${path}, chuggy's own`,
+    ]);
+    const [above] = ownerVolumesRefused(mountedAt(dirname(path)));
+    assert.match(
+      above ?? "",
+      /^0\.target (?:(?:holds|is(?: in)?) \/\S+, chuggy's own|may not be the container's root)$/u,
+      path,
+    );
+    for (const written of [`${path}/`, `/${path}`, `/cache/..${path}`])
+      assert.deepEqual(ownerVolumesRefused(mountedAt(written)), [
+        abnormalTarget,
+      ]);
+  }
+});
+
+test("an owner's volume is refused at the container's root, a relative or abnormal path, or one no mount can name", () => {
+  assert.deepEqual(ownerVolumesRefused(mountedAt("/")), [
+    "0.target may not be the container's root",
+  ]);
+  for (const target of [
+    "cache",
+    "./cache",
+    "",
+    "/cache/",
+    "//cache",
+    "/cache//cargo",
+    "/cache/./cargo",
+    "/cache/../cargo",
+  ])
+    assert.deepEqual(ownerVolumesRefused(mountedAt(target)), [abnormalTarget]);
+  for (const target of ["/cache:cargo", "/cache,cargo", "/cache\ncargo"])
+    assert.deepEqual(ownerVolumesRefused(mountedAt(target)), [
+      "0.target cannot be named in a mount: it has a comma, a colon or a line break",
+    ]);
+  assert.deepEqual(ownerVolumesRefused(mountedAt("/home/runner/.cargo")), []);
+});
+
+test("two owner's volumes mounted at one target are refused, the later named", () => {
+  assert.deepEqual(
+    ownerVolumesRefused([
+      { source: "cargo", target: "/cache/cargo" },
+      { source: "npm-cache", target: "/cache/npm" },
+      { source: "/srv/cargo", target: "/cache/cargo" },
+    ]),
+    ["2.target is volume 0's target too"],
+  );
+});
+
+test("an owner's volume is a named volume by a name both engines give one, or a directory by an absolute path a bind mount can name", () => {
+  const sourced = (source) =>
+    ownerVolumesRefused([{ source, target: "/cache/cargo" }]);
+  for (const source of ["cargo", "npm.cache-2", "/srv/cargo", "/srv/a b"])
+    assert.deepEqual(sourced(source), [], source);
+  for (const source of ["c", "-cargo", "cargo cache", "srv/cargo", "./cargo"])
+    assert.deepEqual(
+      sourced(source),
+      [
+        "0.source names neither a volume, by two or more letters, digits, '_', '.' and '-' from a letter or digit, nor a directory by its absolute path",
+      ],
+      source,
+    );
+  for (const source of ["/srv/a,b", "/srv/a\nb"])
+    assert.deepEqual(sourced(source), [
+      "0.source cannot be named in a bind mount: it has a comma or a line break",
+    ]);
+  assert.deepEqual(
+    ownerVolumesSchema.parse([{ source: "cargo", target: "/cache/cargo" }]),
+    [{ source: "cargo", target: "/cache/cargo", readonly: false }],
+  );
+  assert.equal(
+    ownerVolumesRefused([
+      { source: "cargo", target: "/cache/cargo", type: "volume" },
+    ]).length,
+    1,
   );
 });
 
@@ -2094,4 +2216,257 @@ test("a fill already gone is no failure in podman's words as in docker's, and on
       said,
     );
   }
+});
+
+/** What a job's owner mounts into it in the suites below, a volume of each kind. */
+const ownerMounts = [
+  { source: "/srv/cache", target: "/cache/shared", readonly: true },
+  { source: "cargo", target: "/cache/cargo", readonly: false },
+];
+
+/** The argv a job's container mounts `ownerMounts` with. */
+const ownerMountArgv = [
+  "--mount",
+  "type=bind,source=/srv/cache,target=/cache/shared,readonly",
+  "--volume",
+  "cargo:/cache/cargo:nocopy",
+];
+
+/** The labels of an owner's volume this runner made. */
+const ownerVolumeLabels = { "io.chuggy.owner-volume": "" };
+
+/**
+ * Whether `argv` holds `wanted` in a run.
+ *
+ * @param {string[]} argv
+ * @param {string[]} wanted
+ */
+const holdsRun = (argv, wanted) =>
+  argv.some((_, index) =>
+    wanted.every((value, offset) => argv[index + offset] === value),
+  );
+
+/**
+ * The calls that open owner volumes.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>["state"]} state
+ */
+const openings = (state) =>
+  state.calls.filter(({ argv }) => argv.includes("CHOWN"));
+
+test("a job mounts each of its owner's volumes, whatever image it runs and however it starts, and a session none", async (t) => {
+  const { backend, state } = await harness(t, {
+    volumes: ownerMounts,
+    images: [{ image, capabilities: ["container"] }],
+  });
+  state.images.add(image);
+  state.images.add(runtime);
+  state.volumes.set("cargo", { labels: {} });
+  await backend.place(assignment(), "Job");
+  await backend.place(assignment({ assignment: "asg-2", runtime }), "Job");
+  await backend.place(
+    assignment({ assignment: "asg-3", image: undefined }),
+    "Job",
+  );
+  await backend.place(assignment({ assignment: "ses-1" }), "Session");
+  await backend.settled();
+  for (const job of ["asg-1", "asg-2", "asg-3"])
+    assert.ok(holdsRun(ranWith(state, job).argv, ownerMountArgv), job);
+  const session = ranWith(state, "ses-1").argv;
+  assert.ok(!session.some((value) => /cache/u.test(value)), session.join(" "));
+});
+
+test("a named volume not there is made labelled as the owner's, and opened to the job's user with each other this runner made, after its runtime is copied and before it starts, on either engine", async (t) => {
+  for (const engine of /** @type {const} */ (["docker", "podman"])) {
+    const { backend, state, log } = await harness(t, {
+      engine,
+      volumes: [
+        ...ownerMounts,
+        { source: "npm-cache", target: "/cache/npm", readonly: false },
+        { source: "theirs", target: "/cache/theirs", readonly: true },
+      ],
+    });
+    state.volumes.set("npm-cache", { labels: ownerVolumeLabels });
+    state.volumes.set("theirs", { labels: {} });
+    await placedThroughRuntime({ backend, state });
+    const made = state.calls.filter(
+      ({ argv }) =>
+        argv[1] === "create" && argv.includes("io.chuggy.owner-volume"),
+    );
+    assert.deepEqual(
+      made.map(({ argv }) => argv),
+      [ownerVolumeCreateArgv(engine, "cargo")],
+      engine,
+    );
+    assert.deepEqual(state.volumes.get("cargo"), { labels: ownerVolumeLabels });
+    assert.deepEqual(
+      openings(state).map(({ argv }) => argv),
+      [ownerVolumesOpenArgv(engine, ["cargo", "npm-cache"], runtime)],
+      engine,
+    );
+    const order = [
+      (argv) => argv.includes("--rm") && !argv.includes("CHOWN"),
+      (argv) => argv.includes("CHOWN"),
+      (argv) => argv.includes("-d"),
+    ].map((wanted) => state.calls.findIndex(({ argv }) => wanted(argv)));
+    assert.deepEqual(
+      [...order].sort((a, b) => a - b),
+      order,
+      engine,
+    );
+    assert.ok(order[0] >= 0, engine);
+    assert.ok(
+      log.includes(
+        `${containerName(pool, "asg-1")}: its owner's volume cargo was made`,
+      ),
+      log.join("\n"),
+    );
+  }
+});
+
+test("named volumes their owner made are mounted as they are, and nothing makes or opens one", async (t) => {
+  const context = await harness(t, { volumes: ownerMounts });
+  context.state.volumes.set("cargo", { labels: { "owner.label": "kept" } });
+  const container = await placedThroughRuntime(context);
+  assert.ok(container?.volumes?.includes("cargo:/cache/cargo:nocopy"));
+  assert.deepEqual(openings(context.state), []);
+  assert.ok(
+    !context.state.calls.some(
+      ({ argv }) => argv[1] === "create" && argv.at(-1) === "cargo",
+    ),
+  );
+  assert.deepEqual(context.state.volumes.get("cargo"), {
+    labels: { "owner.label": "kept" },
+  });
+});
+
+test("a job started through no runtime mounts a named volume that is there as it is, and its placement fails, making nothing, where one is not", async (t) => {
+  const there = await harness(t, { volumes: ownerMounts });
+  there.state.images.add(image);
+  there.state.volumes.set("cargo", { labels: ownerVolumeLabels });
+  await there.backend.place(assignment(), "Job");
+  await there.backend.settled();
+  assert.ok(holdsRun(ranWith(there.state, "asg-1").argv, ownerMountArgv));
+  assert.deepEqual(openings(there.state), []);
+
+  const missing = await harness(t, { volumes: ownerMounts });
+  missing.state.images.add(image);
+  await missing.backend.place(assignment(), "Job");
+  await missing.backend.settled();
+  assert.equal(missing.state.containers.size, 0);
+  assert.equal(missing.state.volumes.size, 0);
+  const [ended] = await endsNamed(missing.backend);
+  assert.ok(ended?.kind === "Job");
+  assert.equal(
+    ended.why,
+    "its container was not started: its owner's volume cargo is not there, and only a job started through chuggy's runtime can make one",
+  );
+});
+
+test("a runner that cannot inspect, make or open an owner's volume fails the placement and keeps none of the job's own volumes", async (t) => {
+  /** @type {[string, (state: Awaited<ReturnType<typeof harness>>["state"]) => void, RegExp, string[]][]} */
+  const cases = [
+    [
+      "inspected",
+      (state) => {
+        state.intercept = (call) =>
+          call.argv[1] === "inspect" && call.argv.at(-1) === "cargo"
+            ? failedWith("Error response from daemon: i/o timeout")
+            : undefined;
+      },
+      /^its container was not started: its owner's volume cargo could not be inspected: .*i\/o timeout$/u,
+      [],
+    ],
+    [
+      "read",
+      (state) => {
+        state.intercept = (call) =>
+          call.argv[1] === "inspect" && call.argv.at(-1) === "cargo"
+            ? { code: 0, stdout: "[{}]\n", stderr: "" }
+            : undefined;
+      },
+      /^its container was not started: podman answered an inspection of its owner's volume cargo this runner cannot read$/u,
+      [],
+    ],
+    [
+      "made",
+      (state) => {
+        state.intercept = (call) =>
+          call.argv[1] === "create" && call.argv.at(-1) === "cargo"
+            ? failedWith("Error response from daemon: no space left on device")
+            : undefined;
+      },
+      /^its container was not started: its owner's volume cargo could not be made: .*no space left/u,
+      [],
+    ],
+    [
+      "opened",
+      (state) => {
+        state.intercept = (call) =>
+          call.argv.includes("CHOWN")
+            ? failedWith(
+                "node:fs:1: Error: EPERM: operation not permitted, chown '/var/run/chuggy/volumes/cargo'",
+              )
+            : undefined;
+      },
+      /^its container was not started: this runner could not open its owner's volumes cargo: .*EPERM/u,
+      ["cargo"],
+    ],
+  ];
+  for (const [what, arrange, why, kept] of cases) {
+    const context = await harness(t, { volumes: ownerMounts });
+    arrange(context.state);
+    await placedThroughRuntime(context);
+    assert.equal(context.state.containers.size, 0, what);
+    assert.deepEqual([...context.state.volumes.keys()], kept, what);
+    const [ended] = await endsNamed(context.backend);
+    assert.ok(ended?.kind === "Job");
+    assert.match(ended.why, why, what);
+  }
+});
+
+test("an owner's volume another placement made after this one found it missing is taken as made", async (t) => {
+  const raced = await harness(t, { volumes: ownerMounts });
+  raced.state.intercept = (call) => {
+    if (call.argv[1] !== "create" || call.argv.at(-1) !== "cargo")
+      return undefined;
+    raced.state.volumes.set("cargo", { labels: ownerVolumeLabels });
+    return failedWith(
+      "Error: volume with name cargo already exists: volume already exists",
+      125,
+    );
+  };
+  const container = await placedThroughRuntime(raced);
+  assert.ok(container?.volumes?.includes("cargo:/cache/cargo:nocopy"));
+  assert.equal(openings(raced.state).length, 1);
+});
+
+test("no sweep removes an owner's volume: not a restarted runner's first held, nor the end of a job that mounted it", async (t) => {
+  const context = await harness(t, {
+    volumes: [
+      ...ownerMounts,
+      { source: "npm-cache", target: "/cache/npm", readonly: false },
+      { source: "theirs", target: "/cache/theirs", readonly: true },
+    ],
+  });
+  const { backend, state } = context;
+  state.volumes.set("left-runtime", runtimeVolume("asg-gone", "left-fill"));
+  state.volumes.set("npm-cache", { labels: ownerVolumeLabels });
+  state.volumes.set("theirs", { labels: {} });
+  assert.deepEqual(await backend.held(), []);
+  assert.deepEqual([...state.volumes.keys()].sort(), ["npm-cache", "theirs"]);
+
+  const container = await placedThroughRuntime(context);
+  assert.ok(container !== undefined);
+  container.status = "exited";
+  container.exitCode = 0;
+  assert.equal((await endsNamed(backend)).length, 1);
+  assert.equal(state.containers.size, 0);
+  assert.deepEqual([...state.volumes.keys()].sort(), [
+    "cargo",
+    "npm-cache",
+    "theirs",
+  ]);
+  await backend.held();
+  assert.deepEqual(state.volumes.get("cargo"), { labels: ownerVolumeLabels });
 });

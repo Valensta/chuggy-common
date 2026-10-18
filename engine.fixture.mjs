@@ -79,6 +79,24 @@ function flagValues(argv, flag) {
 }
 
 /**
+ * The labels an argv sets, each `key=value` or a bare key, which the engine
+ * gives an empty value.
+ *
+ * @param {string[]} argv
+ * @returns {Record<string, string>}
+ */
+function labelsSet(argv) {
+  return Object.fromEntries(
+    flagValues(argv, "--label").map((label) => {
+      const equals = label.indexOf("=");
+      return equals === -1
+        ? [label, ""]
+        : [label.slice(0, equals), label.slice(equals + 1)];
+    }),
+  );
+}
+
+/**
  * The flags of `run` that take no value of their own.
  */
 const runSwitches = new Set(["-d", "--rm"]);
@@ -269,12 +287,7 @@ function run(state, call) {
       `docker: Error response from daemon: Conflict. The container name "/${name}" is already in use by container "${existing.id}". You have to remove (or rename) that container to be able to reuse that name.`,
       125,
     );
-  const labels = Object.fromEntries(
-    flagValues(argv, "--label").map((label) => {
-      const equals = label.indexOf("=");
-      return [label.slice(0, equals), label.slice(equals + 1)];
-    }),
-  );
+  const labels = labelsSet(argv);
   const id = `c${String(state.nextId++).padStart(63, "0")}`;
   const env = [
     imagePath,
@@ -447,11 +460,7 @@ function volumed(state, call) {
   if (argv[1] === "inspect") return volumesInspected(state, argv.slice(2));
   if (argv[1] === "create") {
     if (!state.volumes.has(name))
-      state.volumes.set(name, {
-        labels: Object.fromEntries(
-          flagValues(argv, "--label").map((label) => label.split("=")),
-        ),
-      });
+      state.volumes.set(name, { labels: labelsSet(argv) });
     return answered(`${name}\n`);
   }
   if (!state.volumes.has(name))
