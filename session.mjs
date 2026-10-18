@@ -60,12 +60,15 @@
  * than the drain is charged after any turn.
  */
 
+import { execFile } from "node:child_process";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
+import { promisify } from "node:util";
 
 import {
   agentReportedTurnFailures,
+  sessionCapabilities,
   sessionPlaneRoutes,
   sessionTurnModelCharsMax,
   sessionTurnResultCharsMax,
@@ -74,6 +77,7 @@ import {
 } from "@chuggy/worker-contract/sessionPlane";
 import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
 import {
+  mintedCredentialDirectory,
   sessionConfigDirectoryVariable,
   sessionModelVariable,
   sessionTaskVariable,
@@ -83,7 +87,7 @@ import {
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
-import { workerInheritedEnvironment } from "./checks.mjs";
+import { workerGitEnvironment, workerInheritedEnvironment } from "./checks.mjs";
 import {
   chuggyToolContext,
   chuggyToolServer,
@@ -97,10 +101,18 @@ import {
   rateLimitSightings,
   rateLimited,
 } from "./rateLimit.mjs";
-import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
+import {
+  planeCredential,
+  planeCredentialAnswered,
+  sessionCredentialPath,
+} from "./planeCredential.mjs";
+import { projectReadsServed } from "./projectReads.mjs";
 import { workerRepositories } from "./repository.mjs";
 import { credentialScrubbing } from "./runEvidence.mjs";
-import { sessionCheckout } from "./sessionCheckout.mjs";
+import {
+  sessionCheckout,
+  sessionCheckoutTimeoutMs,
+} from "./sessionCheckout.mjs";
 import { sessionLiveSender } from "./sessionLive.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
 import { sessionStopWatch } from "./sessionStop.mjs";
@@ -143,12 +155,17 @@ const agentSdkModule = "@anthropic-ai/claude-agent-sdk";
 const zodModule = "zod";
 const readStatus = 200;
 const acceptedStatus = 204;
+const executeFile = promisify(execFile);
+
+/** The capability that admits the runtime's shell. */
+const runCommands = rosterLabel(sessionCapabilities, "RunCommands");
 
 /** What each secret this session holds is. */
 const sessionSecretKinds = {
   token: "the runtime's token",
   bearer: "the session's bearer",
   minted: "the git credential the plane minted",
+  read: "a read the plane minted for another repository",
 };
 
 function unreffed(milliseconds) {
@@ -546,6 +563,9 @@ function sessionTakesStops(facts) {
  * from the sanitised `cwd` and `./sessionStore.mjs` discards it, so a session
  * resumed into a pod with a checkout finds the transcript a pod without one
  * wrote. `sessionStore.test.mjs` and this module's suite both hold that.
+ *
+ * `git` is the configuration every git the runtime starts is handed, which is
+ * nothing where the session serves no reads.
  */
 export function sessionQueryOptions(
   task,
@@ -553,7 +573,7 @@ export function sessionQueryOptions(
   store,
   environment,
   token,
-  { servers = {}, checkout } = {},
+  { servers = {}, checkout, git = [] } = {},
 ) {
   const workspace =
     environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
@@ -574,6 +594,7 @@ export function sessionQueryOptions(
         environment,
         workspace,
       ),
+      ...workerGitEnvironment(environment, git),
     },
     mcpServers: servers,
     systemPrompt: sessionSystemPrompt(facts),
@@ -979,7 +1000,7 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
  */
 async function sessionRuntime(
   context,
-  { facts, environment, token, checkout, services },
+  { facts, environment, token, checkout, services, git },
 ) {
   const sdk = services.sdk ?? (await sessionSdk());
   return sdk.query({
@@ -993,8 +1014,57 @@ async function sessionRuntime(
       {
         servers: sessionToolServers(context, facts, environment, services, sdk),
         ...(checkout === undefined ? {} : { checkout }),
+        git,
       },
     ),
+  });
+}
+
+/**
+ * Whether this session's agent has a shell, which is the one tool a session
+ * holds that runs git: a lead reads its tree through tools that run nothing,
+ * and an inquiry is placed with no tree.
+ */
+function sessionRunsCommands(facts) {
+  return (facts.capabilities ?? []).includes(runCommands);
+}
+
+/** What `git --version` prints for the git `environment` finds. */
+async function sessionGitVersion(environment) {
+  const { stdout } = await executeFile("git", ["--version"], {
+    env: environment,
+    timeout: sessionCheckoutTimeoutMs,
+  });
+  return stdout;
+}
+
+/**
+ * The reads every git this session's shell runs makes of the other
+ * repositories its project binds, served as a job's are (`./projectReads.mjs`)
+ * under `services.minted`, asked of the plane's session route under the
+ * session's own bearer, and each password kept in the scrub. A session whose
+ * agent has no shell, or that has no repository to name the forge, is served
+ * none.
+ */
+async function sessionReads(context, facts, { environment, services, warn }) {
+  const repository = context.task.repository?.reference;
+  if (repository === undefined || !sessionRunsCommands(facts))
+    return { git: [], close: async () => undefined };
+  return projectReadsServed({
+    repositoryId: repository,
+    directory: services.minted ?? mintedCredentialDirectory,
+    mint: (named) =>
+      planeCredentialAnswered({
+        task: context.task,
+        bearer: context.bearer,
+        path: sessionCredentialPath,
+        repository: named,
+        request: context.request,
+      }),
+    keep: (value) =>
+      context.keepSecret({ kind: sessionSecretKinds.read, value }),
+    gitVersion: () => sessionGitVersion(environment),
+    warn: (text) => warn(context.scrub(`${text}\n`)),
   });
 }
 
@@ -1068,14 +1138,20 @@ async function sessionRun(context, facts, opened) {
   if (opened.checkout?.refused !== undefined)
     return await refuseSession(context, warn, opened.checkout.refused);
   context.stops = sessionStops(context, facts, opened);
-  context.runtime = await sessionRuntime(context, { ...opened, facts });
-  context.reader = messageReader(context.runtime, pause);
-  context.live = sessionLive(context, facts, opened);
+  const reads = await sessionReads(context, facts, opened);
   try {
+    context.runtime = await sessionRuntime(context, {
+      ...opened,
+      facts,
+      git: reads.git,
+    });
+    context.reader = messageReader(context.runtime, pause);
+    context.live = sessionLive(context, facts, opened);
     return await runSessionTurns(context);
   } finally {
     context.stops?.released();
     context.live?.close();
+    await reads.close();
   }
 }
 
