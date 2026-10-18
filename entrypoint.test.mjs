@@ -941,15 +941,18 @@ const workAnswered = Object.fromEntries(
  * Catches a job's setup lines or its commands not told which job they are in,
  * told it as the pod held it, or told a stage other than the key a
  * configuration names it by: a work task's, and an evaluation's counted from
- * one where its document counts from zero.
+ * one where its document counts from zero; or told the mirror a site clones
+ * the repository from rather than the repository its bundle names.
  */
 test("a job's setup lines and commands are told which job they are in", async (t) => {
-  podHolds(
-    t,
-    Object.fromEntries(
+  podHolds(t, {
+    ...Object.fromEntries(
       Object.values(workerJobVariables).map((name) => [name, "the pod's"]),
     ),
-  );
+    [workerRepositoriesVariable]: JSON.stringify({
+      "repository-1": { url: "https://mirror.test/repository-1.git" },
+    }),
+  });
   const told = (stage) => ({
     printed: `tenant-1|project-1|repository-1|7|attempt-1|${stage}|`,
     setUp: `tenant-1|project-1|repository-1|7|attempt-1|${stage}|`,
