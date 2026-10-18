@@ -106,6 +106,9 @@ async function filledUnder(handed, url) {
  * printed, and the socket its reads were served at, which `during` says was
  * there when the runtime opened.
  */
+/** A script whose runtime throws as it is opened, before any turn is read. */
+const unopened = () => [];
+
 async function readingSession(t, plane, script, reference = own) {
   const minted = await mkdtemp(join(tmpdir(), "chuggy-session-reads-"));
   t.after(() => rm(minted, { recursive: true, force: true }));
@@ -113,11 +116,13 @@ async function readingSession(t, plane, script, reference = own) {
   const warned = [];
   const scripted = queryOf(script);
   let during;
+  const opened = script !== unopened;
   const code = await run({
     request: plane.request,
     requestOnce: plane.requestOnce,
     query: (asked) => {
       during = existsSync(socket);
+      if (!opened) throw new Error("the runtime would not open");
       return scripted.query(asked);
     },
     environment: {
@@ -356,7 +361,8 @@ test("a read minted mid-session is scrubbed out of what a failed session prints"
  * Catches a socket left behind a session, whose server keeps the pod's
  * process from exiting after its last turn. Each case is a way a session
  * ends: its mailbox idle, its budget spent, its turns run out, its account
- * held, the store refusing it, the plane stopping it, and its runtime failing.
+ * held, the store refusing it, the plane stopping it, its runtime failing, and
+ * its runtime never opening.
  */
 test("the reads end with the session on every path it ends by", async (t) => {
   const ending =
@@ -399,6 +405,7 @@ test("the reads end with the session on every path it ends by", async (t) => {
       }),
       code: 1,
     },
+    { name: "never opened", script: unopened, code: 1 },
   ];
 
   for (const ended of cases) {
