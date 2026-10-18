@@ -108,17 +108,31 @@ test("a tool the roster does not grant is never registered", () => {
 });
 
 /**
- * `brief` is an open object on the wire, so a session learns what one carries
- * from the description alone. A tool that takes one and does not name the title
- * is a tool that files untitled tickets.
+ * Every tool that takes a brief, each with what its `brief` parameter says. The
+ * brief is described there rather than in the tool's description, which
+ * Claude Code cuts.
  */
-test("every tool that takes a brief names the title it carries", () => {
-  const taking = chuggyToolDefinitions(
+function briefTakers() {
+  return chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
       staging: leadDecisionStaging(),
     }),
-  ).filter((definition) => "brief" in definition.shape(z));
+  )
+    .filter((definition) => "brief" in definition.shape(z))
+    .map(({ name, shape }) => ({
+      name,
+      description: shape(z).brief.description ?? "",
+    }));
+}
+
+/**
+ * `brief` is an open object on the wire, so a session learns what one carries
+ * from the parameter's description alone. A tool that takes one and does not
+ * name the title is a tool that files untitled tickets.
+ */
+test("every tool that takes a brief names the title it carries", () => {
+  const taking = briefTakers();
 
   assert.deepEqual(taking.map(({ name }) => name).sort(), [
     "create_draft",
@@ -140,12 +154,7 @@ test("every tool that takes a brief names the title it carries", () => {
  * has the model break sentences the door never asked it to break.
  */
 test("every tool that takes a brief says an intent is bounded as a whole, and gives it no line bound", () => {
-  const taking = chuggyToolDefinitions(
-    chuggyToolContext(task, bearer, {
-      capabilities: everyCapability,
-      staging: leadDecisionStaging(),
-    }),
-  ).filter((definition) => "brief" in definition.shape(z));
+  const taking = briefTakers();
 
   assert.notEqual(taking.length, 0, "no tool takes a brief");
   for (const { name, description } of taking) {
@@ -1051,38 +1060,54 @@ test("the configuration read says where the agent that does the work is named", 
 });
 
 /**
+ * What the server does with a brief that no answer shows until it is too late
+ * to act on: that its checks need a commanded Check stage and where the
+ * initialization says which one, where a brief naming no landing takes one and
+ * that the write says whose it took, and that a proposal's branch is never the
+ * default one. Every tool that takes a brief says it on its `brief` parameter.
+ */
+const briefClaims = [
+  /`commandedCheckStage`, counted from zero/,
+  /`commandedCheckStageNote` \(the stage counted from one and, for a catalog, its plan, or that none does and which plans would\)/,
+  /run only in a program that reaches that stage/,
+  /where it answers none a draft carrying checks is refused/,
+  /\(BriefChecksUncommanded\)/,
+  /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
+  /runs under sh -eu with the commit/,
+  /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
+  /a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default/,
+  /for a newly bound repository is a pull request/,
+  /`landing`, the mode and target it stored, and its `source`: Brief, Finalizer, Repository, or Default for a brief naming no repository/,
+  /never the default branch/,
+  /\(ProposalBaseIsHead\)/,
+];
+
+test("every tool that takes a brief says on its parameter what the server does with one", () => {
+  const taking = briefTakers();
+
+  assert.notEqual(taking.length, 0, "no tool takes a brief");
+  for (const { name, description } of taking)
+    for (const claim of briefClaims) assert.match(description, claim, name);
+});
+
+/**
  * What the server does that no answer shows until it is too late to act on:
- * that a brief's checks need a commanded Check stage, that a proposal's branch
- * is never the default one, that the refusal ledgers hold none of a command's
- * refusals, that a submission repeated in one turn answers the settled
- * operation, that a project has no lead before a release, and that stages run
- * in order. Each is said where the session reads it.
+ * that the refusal ledgers hold none of a command's refusals, that a
+ * submission repeated in one turn answers the settled operation, that a
+ * project has no lead before a release, that stages run in order and a stage's
+ * evaluators side by side, which stage a brief's checks join, what a ticket's
+ * run totals sum, and what a binding says of its repository. Each is said in
+ * the description of the tool the session reads it from.
  */
 test("the descriptions say what the server does where a session reads it", () => {
   const described = (tool) =>
     chuggyProjectTools.find(({ name }) => name === tool).description;
-  const brief = [
-    /`commandedCheckStage`, counted from zero/,
-    /run only in a program that reaches that stage/,
-    /where it answers none a draft carrying checks is refused/,
-    /\(BriefChecksUncommanded\)/,
-    /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
-    /runs under sh -eu with the commit/,
-    /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
-    /a brief naming none takes its repository's landing/,
-    /for a newly bound repository is a pull request/,
-    /never the default branch/,
-    /\(ProposalBaseIsHead\)/,
-  ];
   const ledger = [
     /refusals to dispatch a released ticket/,
     /and nothing else/,
     /read_operation/,
   ];
   const said = {
-    create_draft: brief,
-    file_dependent: brief,
-    revise_draft: brief,
     read_refusals: ledger,
     read_ticket_refusals: ledger,
     release_draft: [
@@ -1105,6 +1130,27 @@ test("the descriptions say what the server does where a session reads it", () =>
       /run in that order/,
       /a failed stage ends evaluation/,
       /`choices\.programStagesMax`/,
+      /`commandedCheckStage` is the stage a brief's `checks` join, counted from zero/,
+      /`commandedCheckStageNote` says it in words/,
+    ],
+    read_ticket: [
+      /`runTotals`, what every run of its executions reported, summed/,
+      /`costUsdMicros`, millionths of a dollar at the runtime's list price/,
+      /per model in `models`/,
+      /A ticket no run has reported for carries none/,
+    ],
+    read_configuration: [
+      /evaluation stages run in the order listed and a failed stage ends evaluation/,
+      /the evaluators of one stage run in parallel/,
+      /each evaluator of a plan stage names its own workload/,
+      /review lenses that should run side by side belong in one stage/,
+    ],
+    list_repositories: [
+      /oldest first/,
+      /`repository` is its clone URL/,
+      /`landing` is its landing default/,
+      /`configured`/,
+      /A retired binding carries `retiredAt`, and a draft naming it is refused/,
     ],
   };
 

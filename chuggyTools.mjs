@@ -113,14 +113,16 @@ import { leadDecisionStaging } from "./leadDecision.mjs";
 import { transcriptPageAnswer } from "./transcriptPage.mjs";
 import { routeFilled } from "./wire.mjs";
 
+const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?}, each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none.`;
+
 /**
  * What a session is told a brief carries, `brief` being an open object on the
  * wire. An intent is bounded as a whole and by nothing a line at a time, so a
- * session is told what bounds one and nothing about where its lines break.
+ * session is told what bounds one and nothing about where its lines break. It
+ * describes the `brief` parameter rather than each tool, since it is longer
+ * than the part of a tool's description Claude Code passes an agent.
  */
-const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?}, each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none.`;
-
-const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`checks\` are command lines added to the first Check stage the configuration runs as commands, which initialize_draft answers as \`commandedCheckStage\`, counted from zero, so they run only in a program that reaches that stage, and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes its repository's landing, which for a newly bound repository is a pull request; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke.`;
+const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`checks\` are command lines added to the first Check stage the configuration runs as commands, which initialize_draft answers as \`commandedCheckStage\`, counted from zero, and in words as \`commandedCheckStageNote\` (the stage counted from one and, for a catalog, its plan, or that none does and which plans would), so they run only in a program that reaches that stage, and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke.`;
 
 /**
  * What a submitted command answers: the operation, and what the same call made
@@ -449,7 +451,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring and its brief.",
+      "One ticket: its phase, its version, its authoring and its brief, and `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),
@@ -493,7 +495,7 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision, canonical, as a draft is authored against it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one.",
+      "One configuration revision, canonical, as a draft is authored against it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage.",
     shape: (z) => ({ revision: identity(z) }),
     call: (context, { revision }) =>
       read(context, projectPath(context, "configuration", { revision })),
@@ -652,7 +654,7 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection.",
+      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, counted from zero and absent where none takes them, and `commandedCheckStageNote` says it in words: the stage counted from one and, for a catalog, the plan and the stage's name, or that none does and which plans would.",
     shape: (z) => ({
       revision: identity(z),
       work: identity(z).optional(),
@@ -667,7 +669,8 @@ export const chuggyProjectTools = [
   },
   {
     name: "file_dependent",
-    description: `Files a new draft derived from an existing ticket. \`relation\` admits FollowUp only, and \`authoring.dependencies\` must carry the parent. The fence comes from initialize_draft. ${chuggyBriefDescription}`,
+    description:
+      "Files a new draft derived from an existing ticket. `relation` admits FollowUp only, and `authoring.dependencies` must carry the parent. The fence comes from initialize_draft.",
     shape: (z) => ({
       parent: ticket(z),
       relation: z.enum(allDependentRelations),
@@ -675,7 +678,7 @@ export const chuggyProjectTools = [
       configurationDigest: identity(z),
       expectedProjectSequence: count(z),
       authoring: anyObject(z),
-      brief: anyObject(z),
+      brief: anyObject(z).describe(chuggyBriefDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) => {
@@ -702,7 +705,8 @@ export const chuggyProjectTools = [
   },
   {
     name: "revise_draft",
-    description: `Replaces one open draft's authoring, brief and selection, fenced on \`expectedVersion\`. ${chuggyBriefDescription} The brief is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
+    description:
+      "Replaces one open draft's authoring, brief and selection, fenced on `expectedVersion`.",
     shape: (z) => ({
       ticket: ticket(z),
       expectedVersion: authoringVersion(z).describe(
@@ -710,7 +714,9 @@ export const chuggyProjectTools = [
       ),
       configurationRevision: identity(z),
       authoring: anyObject(z),
-      brief: anyObject(z),
+      brief: anyObject(z).describe(
+        `${chuggyBriefDescription} It is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
+      ),
       selection: anyObject(z)
         .optional()
         .describe(
@@ -765,13 +771,14 @@ export const chuggyProjectTools = [
   },
   {
     name: "create_draft",
-    description: `Files a new draft for work your owner asked for, derived from nothing. The fence comes from initialize_draft. ${chuggyBriefDescription}`,
+    description:
+      "Files a new draft for work your owner asked for, derived from nothing. The fence comes from initialize_draft.",
     shape: (z) => ({
       configurationRevision: identity(z),
       configurationDigest: identity(z),
       expectedProjectSequence: count(z),
       authoring: anyObject(z),
-      brief: anyObject(z),
+      brief: anyObject(z).describe(chuggyBriefDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) =>
