@@ -133,6 +133,12 @@ test("each variable a job is handed by the runner or its core is reserved", () =
       "CLAUDE_CODE_OAUTH_TOKEN",
       workerWorkspaceVariable,
       "CHUGGY_HOST_JOB",
+      "CHUG_TENANT",
+      "CHUG_PROJECT",
+      "CHUG_REPOSITORY",
+      "CHUG_TICKET",
+      "CHUG_ATTEMPT",
+      "CHUG_STAGE",
     ].toSorted(),
   );
 });

@@ -87,6 +87,7 @@ import {
   runChecks,
   workerAgentEnvironment,
   workerCheckCommands,
+  workerJobEnvironment,
   workerReportText,
   workerShellEnvironment,
   workerStageEnvironment,
@@ -382,6 +383,7 @@ async function runAgent(context) {
   const shell = await context.agent.prepareShell(
     workerShellEnvironment(process.env, {
       changeBase: context.changeBase,
+      job: context.job,
       git: context.git,
     }),
   );
@@ -703,6 +705,7 @@ export async function runWorkerTask(context, commands) {
     {
       directory: context.directory,
       changeBase: context.changeBase,
+      job: context.job,
       git: context.git,
     },
     commands,
@@ -923,11 +926,16 @@ function workerProjectReads({
 
 /**
  * What one attempt does in the workspace it cloned, every git it runs handed
- * `git`: its setup, its run, and what that run leaves behind.
+ * `git` and every shell told which job it is in: its setup, its run, and what
+ * that run leaves behind.
  */
 async function workerAttemptWorked(attempt, workspace, git) {
   const { task, bearer, evidence, scrub } = attempt;
-  const handed = { changeBase: workspace.changeBase, git };
+  const handed = {
+    changeBase: workspace.changeBase,
+    job: workerJobEnvironment(task, workspace.repositoryId),
+    git,
+  };
   await prepareWorker(task, workspace.directory, handed);
   const run = await runWorkerTask(
     {
