@@ -15,9 +15,10 @@
  * since a host carries no runtime tree of chuggy's.
  */
 
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 import {
+  mintedCredentialDirectory,
   workerRepositoryDirectory,
   workerTaskVariable,
   workerWorkspaceDirectory,
@@ -60,9 +61,18 @@ export function jobRepositoryDirectory(workspace) {
   );
 }
 
+/**
+ * Chuggy's own directory in a workload's container, which the credentials it
+ * mints and the token file it mounts are in.
+ */
+export const jobRunDirectory = dirname(mintedCredentialDirectory);
+
 /** Where the Claude token file is mounted, read-only. */
-export const jobProviderCredentialFile =
-  "/var/run/chuggy/credentials/claude-code";
+export const jobProviderCredentialFile = join(
+  jobRunDirectory,
+  "credentials",
+  "claude-code",
+);
 
 /**
  * Where a job run on its runner's host keeps what a container would mount,

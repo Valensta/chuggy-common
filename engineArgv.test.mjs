@@ -6,6 +6,8 @@ import {
   dockerInfoArgv,
   forcedRemoveArgv,
   imageInspectArgv,
+  ownerVolumeCreateArgv,
+  ownerVolumesOpenArgv,
   podmanRemoteArgv,
   podmanSocketArgv,
   podmanVersionArgv,
@@ -23,6 +25,7 @@ import {
   volumeInspectArgv,
   volumeListArgv,
   volumeRemoveArgv,
+  workloadMountTargets,
 } from "./engineArgv.mjs";
 
 const image = `registry.chuggy.example/worker@sha256:${"a".repeat(64)}`;
@@ -145,6 +148,133 @@ test("podman mounts a job's engine socket read-only where docker's clients look,
     { path: "/run/user/1000/podman/podman.sock", gid: 1000 },
     [],
   );
+});
+
+const ownerVolumes = [
+  { source: "/srv/chuggy-cache", target: "/cache/shared", readonly: true },
+  { source: "cargo", target: "/cache/cargo", readonly: false },
+  { source: "npm-cache", target: "/cache/npm", readonly: true },
+  { source: "/srv/scratch", target: "/cache/scratch", readonly: false },
+];
+
+test("a job mounts its owner's directories bound and named volumes uncopied, read-only where marked, after the engine's socket, on either engine", () => {
+  for (const engine of /** @type {const} */ (["docker", "podman"])) {
+    const socket = { path: "/var/run/docker.sock", gid: 0 };
+    const plain = runArgv(engine, { ...job, engineSocket: socket });
+    assert.deepEqual(
+      runArgv(engine, { ...job, engineSocket: socket, volumes: [] }),
+      plain,
+    );
+    const tmpfs = plain.indexOf("--tmpfs");
+    assert.deepEqual(
+      runArgv(engine, { ...job, engineSocket: socket, volumes: ownerVolumes }),
+      [
+        ...plain.slice(0, tmpfs),
+        "--mount",
+        "type=bind,source=/srv/chuggy-cache,target=/cache/shared,readonly",
+        "--volume",
+        "cargo:/cache/cargo:nocopy",
+        "--volume",
+        "npm-cache:/cache/npm:ro,nocopy",
+        "--mount",
+        "type=bind,source=/srv/scratch,target=/cache/scratch",
+        ...plain.slice(tmpfs),
+      ],
+    );
+  }
+});
+
+/**
+ * Where each mount of an argv is in the container: a `--mount`'s target, a
+ * `--volume`'s path, and a `--tmpfs`'s.
+ *
+ * @param {string[]} argv
+ */
+function mountTargets(argv) {
+  return argv.flatMap((value, index) => {
+    const flag = argv[index - 1];
+    if (flag === "--mount")
+      return value
+        .split(",")
+        .flatMap((field) =>
+          field.startsWith("target=") ? [field.slice("target=".length)] : [],
+        );
+    if (flag === "--volume")
+      return [value.startsWith("/") ? value : value.split(":")[1]];
+    if (flag === "--tmpfs") return [value.split(":")[0]];
+    return [];
+  });
+}
+
+test("every path a workload's container mounts, given all it can be, is among the targets runArgv names as its own", () => {
+  for (const engine of /** @type {const} */ (["docker", "podman"])) {
+    const targets = mountTargets(
+      runArgv(engine, {
+        ...job,
+        runtime: volumes,
+        engineSocket: { path: "/var/run/docker.sock", gid: 125 },
+      }),
+    );
+    assert.deepEqual([...targets].sort(), [...workloadMountTargets].sort());
+  }
+});
+
+test("an owner's volume is made labelled as one, and podman is told the owner to give it, so that no mount gives it another while it is empty", () => {
+  assert.deepEqual(ownerVolumeCreateArgv("docker", "cargo"), [
+    "volume",
+    "create",
+    "--label",
+    "io.chuggy.owner-volume",
+    "cargo",
+  ]);
+  assert.deepEqual(ownerVolumeCreateArgv("podman", "cargo"), [
+    "volume",
+    "create",
+    "--label",
+    "io.chuggy.owner-volume",
+    "--opt",
+    "o=uid=0,gid=0",
+    "cargo",
+  ]);
+});
+
+test("owner volumes are opened to the job's user by the runtime image's own node, as root holding only the capability chown takes, each mounted uncopied under chuggy's run directory, in the job's user namespace on podman", () => {
+  /** @type {[import("./engineArgv.mjs").EngineName, string[]][]} */
+  const userns = [
+    ["docker", []],
+    ["podman", ["--userns=keep-id:uid=1000,gid=1000"]],
+  ];
+  for (const [engine, mapped] of userns)
+    assert.deepEqual(
+      ownerVolumesOpenArgv(engine, ["cargo", "npm-cache"], runtime),
+      [
+        "run",
+        "--rm",
+        "--pull=never",
+        "--user",
+        "0:0",
+        ...mapped,
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "CHOWN",
+        "--security-opt",
+        "no-new-privileges",
+        "--network",
+        "none",
+        "--volume",
+        "cargo:/var/run/chuggy/volumes/cargo:nocopy",
+        "--volume",
+        "npm-cache:/var/run/chuggy/volumes/npm-cache:nocopy",
+        "--entrypoint",
+        "/opt/chuggy/bin/node",
+        runtime,
+        "--eval",
+        'for (const path of process.argv.slice(1)) require("node:fs").chownSync(path, 1000, 1000)',
+        "/var/run/chuggy/volumes/cargo",
+        "/var/run/chuggy/volumes/npm-cache",
+      ],
+    );
 });
 
 const runtime = `registry.chuggy.example/runtime@sha256:${"b".repeat(64)}`;
