@@ -359,11 +359,17 @@ async function readTranscript(context, path, cursor) {
 }
 
 function write(context, path, method, body, headers = {}) {
-  return relay(context, path, {
-    method,
-    headers: { "content-type": nativeHttpMediaType, ...headers },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  return relay(
+    context,
+    path,
+    body === undefined
+      ? { method, headers }
+      : {
+          method,
+          headers: { "content-type": nativeHttpMediaType, ...headers },
+          body: JSON.stringify(body),
+        },
+  );
 }
 
 /**

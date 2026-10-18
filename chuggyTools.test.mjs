@@ -804,6 +804,34 @@ test("a write is written in the versioned media type the API requires", async ()
   });
 });
 
+test("a write names the media type only when it sends a body", async () => {
+  const { api, call } = toolsOf();
+
+  await call("revise_draft", {
+    ticket: 4,
+    expectedVersion: 2,
+    configurationRevision: "r1",
+    authoring: { dependencies: [] },
+    brief: { title: "t" },
+  });
+  await call("delete_draft", { ticket: 4, expectedVersion: 2 });
+
+  const [withBody, withoutBody] = api.calls;
+  assert.equal(withBody.method, "PUT");
+  assert.equal(
+    withBody.init.headers["content-type"],
+    "application/vnd.chuggy.v1+json",
+  );
+  assert.equal(typeof withBody.init.body, "string");
+  assert.equal(withoutBody.method, "DELETE");
+  assert.equal("body" in withoutBody.init, false);
+  assert.equal(
+    "content-type" in withoutBody.init.headers,
+    false,
+    "a bodyless write names a JSON body it does not send",
+  );
+});
+
 const dependent = {
   parent: 7,
   relation: "FollowUp",
