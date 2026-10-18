@@ -129,6 +129,26 @@ test("a file a group or anyone else can open is refused, naming its mode", async
     );
 });
 
+test("a runner's own answer to who may open the file replaces the mode bits', and is named after the file", async () => {
+  const shared = await written(JSON.stringify(registration), 0o600, (file) =>
+    poolCredentials(file, (asked, stats) => {
+      assert.equal(asked, file);
+      assert.ok(stats.isFile());
+      return "is open to Everyone (icacls)";
+    }).then(
+      () => assert.fail("the file was read"),
+      (failure) => failure.message,
+    ),
+  );
+  assert.match(shared, /pool\.json is open to Everyone \(icacls\)$/u);
+  assert.deepEqual(
+    await written(JSON.stringify(registration), 0o644, (file) =>
+      poolCredentials(file, async () => undefined),
+    ),
+    registration,
+  );
+});
+
 test("a file that is not JSON is refused without quoting it", async () => {
   assert.match(
     await refusal(`{"clientSecret": ${secret}}`),
