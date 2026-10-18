@@ -869,14 +869,26 @@ export const ownerImagesSchema = z.array(
 );
 
 /**
+ * The link images make of `/var/run`, to `/run`, through which a mount under
+ * `/run` lands under `/var/run`.
+ */
+const runDirectoryLink = { link: "/var/run", to: "/run" };
+
+/**
  * The paths of chuggy's own in a job's container, which no owner's volume is
  * mounted at, in or above: each `runArgv` mounts, and chuggy's own run
- * directory, which the credentials it mints are in.
+ * directory, which the credentials it mints are in, each under `/var/run`
+ * also as `runDirectoryLink` reaches it.
  */
 export const ownerVolumeTargetsRefused = [
   ...workloadMountTargets,
   jobRunDirectory,
-];
+].flatMap((path) => {
+  const under = posix.relative(runDirectoryLink.link, path);
+  return under.startsWith("..")
+    ? [path]
+    : [path, posix.join(runDirectoryLink.to, under)];
+});
 
 /** A name both docker and podman give a volume. */
 const ownerVolumeNamePattern = /^[A-Za-z0-9][A-Za-z0-9_.-]+$/u;

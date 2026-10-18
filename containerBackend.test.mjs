@@ -340,15 +340,25 @@ const mountedAt = (target) => [{ source: "cargo", target }];
 const abnormalTarget =
   "0.target must be an absolute path in its normal form, with no '.' or '..' and no doubled or trailing '/'";
 
-test("an owner's volume is refused at, in, and above each path chuggy mounts or keeps in a job's container, and at each written otherwise", () => {
-  for (const path of [
+/**
+ * A path under `/var/run` as an image that links `/var/run` to `/run` also
+ * reaches it, or nothing for any other.
+ *
+ * @param {string} path
+ */
+const runLinked = (path) =>
+  path.startsWith("/var/run/") ? [path.replace(/^\/var\/run/u, "/run")] : [];
+
+test("an owner's volume is refused at, in, and above each path chuggy mounts or keeps in a job's container, each under /var/run also under /run, and at each written otherwise", () => {
+  const paths = [
     workerRuntimeDirectory,
     workerWorkspaceDirectory,
     mintedCredentialDirectory,
     jobRunDirectory,
     jobProviderCredentialFile,
     jobEngineSocket,
-  ]) {
+  ];
+  for (const path of paths.flatMap((path) => [path, ...runLinked(path)])) {
     assert.deepEqual(ownerVolumesRefused(mountedAt(path)), [
       `0.target is ${path}, chuggy's own`,
     ]);
@@ -366,6 +376,11 @@ test("an owner's volume is refused at, in, and above each path chuggy mounts or 
         abnormalTarget,
       ]);
   }
+  assert.match(
+    ownerVolumesRefused(mountedAt("/run"))[0] ?? "",
+    /^0\.target holds \/run\/\S+, chuggy's own$/u,
+  );
+  assert.deepEqual(ownerVolumesRefused(mountedAt("/run/cache")), []);
 });
 
 test("an owner's volume is refused at the container's root, a relative or abnormal path, or one no mount can name", () => {
