@@ -646,7 +646,7 @@ export const chuggyProjectTools = [
   {
     name: "list_repositories",
     description:
-      "Every repository this project binds, oldest first. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations from it, and `configurationsHeld` what: Imported with their `count`, or Bootstrapped with the `revision` its tickets are released under. A retired binding carries `retiredAt`, and a draft naming it is refused.",
+      "Every repository this project binds, oldest first. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. A retired binding carries `retiredAt`, and a draft write naming it is refused.",
     shape: () => ({}),
     call: (context) =>
       read(context, projectPath(context, "projectRepositories")),

@@ -1149,8 +1149,9 @@ test("the descriptions say what the server does where a session reads it", () =>
       /oldest first/,
       /`repository` is its clone URL/,
       /`landing` is its landing default/,
-      /`configured`/,
-      /A retired binding carries `retiredAt`, and a draft naming it is refused/,
+      /`configured` says whether the project holds configurations for it/,
+      /Bootstrapped, the project's bootstrap `revision`/,
+      /A retired binding carries `retiredAt`, and a draft write naming it is refused/,
     ],
   };
 
