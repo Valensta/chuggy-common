@@ -38,12 +38,17 @@
  * page is what is answered. The refusal is left for where nothing smaller can
  * be asked for, which is a tool with no limit and an item too large alone.
  *
- * THE TRANSCRIPT READS ARE THE ONE EXCEPTION, and `./transcriptPage.mjs` states
- * why: their route pages by store batch, a batch is bounded by the store's own
- * line bound, and one line is what a whole answer must fit inside. So no page
- * bound a caller could lower makes one of those pages answerable, and a refusal
- * there is a walk that cannot continue. They answer whole entries under the
- * bound and a cursor instead.
+ * THE TRANSCRIPT READS ARE ONE OF TWO EXCEPTIONS, and `./transcriptPage.mjs`
+ * states why: their route pages by store batch, a batch is bounded by the
+ * store's own line bound, and one line is what a whole answer must fit inside.
+ * So no page bound a caller could lower makes one of those pages answerable,
+ * and a refusal there is a walk that cannot continue. They answer whole entries
+ * under the bound and a cursor instead.
+ *
+ * THE OTHER IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
+ * bytes. Its route answers them as base64, bounded by the largest upload rather
+ * than by what one answer holds, so `fetch_image` writes them to a file of its
+ * own and answers where, and the agent's own Read opens it.
  *
  * AN ANSWER IS BOUNDED BY WHAT THE TRANSCRIPT HOLDS, and that is a much tighter
  * bound than the body drawn off the wire. Every answer becomes one `tool_result`
@@ -60,11 +65,6 @@
  * the entry escapes it rather than as it reads, because escaping is what the
  * line is charged for. The entry's shape is the runtime's and this image never
  * composes one, so the suite holds the bound against a captured entry.
- *
- * AN IMAGE IS ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its bytes. Its
- * route answers them as base64, bounded by the largest upload rather than by
- * what one answer holds, so `fetch_image` writes them to a file of its own and
- * answers where, and the agent's own Read opens it.
  *
  * A WRITE RELAYS THE API'S OUTCOME UNALTERED — the status and the error body, as
  * text. No retry, no repair, no hiding a 409. A tool that decided what a refusal
