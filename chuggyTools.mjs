@@ -631,6 +631,14 @@ export const chuggyProjectTools = [
       ),
   },
   {
+    name: "list_repositories",
+    description:
+      "Every repository this project binds, oldest first. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations from it, and `configurationsHeld` what: Imported with their `count`, or Bootstrapped with the `revision` its tickets are released under. A retired binding carries `retiredAt`, and a draft naming it is refused.",
+    shape: () => ({}),
+    call: (context) =>
+      read(context, projectPath(context, "projectRepositories")),
+  },
+  {
     name: "initialize_draft",
     description:
       "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection.",

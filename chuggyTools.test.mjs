@@ -624,6 +624,7 @@ test("each read reaches the route its roster names, and only it", async () => {
       ["read_thread_transcript", { session: "thread-1", after: 2, entry: 3 }],
       "/threads/thread-1/transcript?after=2&limit=1",
     ],
+    [["list_repositories", {}], "/repositories"],
   ];
   for (const [[name, args], suffix] of cases) {
     const api = apiOf();
@@ -636,6 +637,37 @@ test("each read reaches the route its roster names, and only it", async () => {
       name,
     );
   }
+});
+
+test("the project's repositories are read from its own repositories route, and the answer is relayed whole", async () => {
+  const body = JSON.stringify({
+    repositories: [
+      {
+        repository: "https://github.com/vteng/chuggy.git",
+        boundAt: "2026-10-01T00:00:00.000Z",
+        landing: { mode: "PullRequest" },
+        configured: true,
+        configurationsHeld: { result: "Imported", count: 2 },
+      },
+      {
+        repository: "https://github.com/vteng/chuggy-common.git",
+        boundAt: "2026-10-02T00:00:00.000Z",
+        landing: { mode: "Push" },
+        retiredAt: "2026-10-03T00:00:00.000Z",
+        configured: false,
+      },
+    ],
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("list_repositories", {});
+
+  assert.deepEqual(
+    api.calls.map(({ path, method }) => [method, path]),
+    [["GET", "/api/v1/tenants/vteng/projects/chuggy/repositories"]],
+  );
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.ok(answer.isError === undefined);
 });
 
 /**
@@ -1217,6 +1249,7 @@ const projectToolArguments = {
   list_threads: {},
   read_thread: { session: "t-1" },
   read_thread_transcript: { session: "t-1" },
+  list_repositories: {},
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
