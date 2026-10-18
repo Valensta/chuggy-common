@@ -38,12 +38,17 @@
  * page is what is answered. The refusal is left for where nothing smaller can
  * be asked for, which is a tool with no limit and an item too large alone.
  *
- * THE TRANSCRIPT READS ARE THE ONE EXCEPTION, and `./transcriptPage.mjs` states
- * why: their route pages by store batch, a batch is bounded by the store's own
- * line bound, and one line is what a whole answer must fit inside. So no page
- * bound a caller could lower makes one of those pages answerable, and a refusal
- * there is a walk that cannot continue. They answer whole entries under the
- * bound and a cursor instead.
+ * THE TRANSCRIPT READS ARE ONE OF TWO EXCEPTIONS, and `./transcriptPage.mjs`
+ * states why: their route pages by store batch, a batch is bounded by the
+ * store's own line bound, and one line is what a whole answer must fit inside.
+ * So no page bound a caller could lower makes one of those pages answerable,
+ * and a refusal there is a walk that cannot continue. They answer whole entries
+ * under the bound and a cursor instead.
+ *
+ * THE OTHER IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
+ * bytes. Its route answers them as base64, bounded by the largest upload rather
+ * than by what one answer holds, so `fetch_image` writes them to a file of its
+ * own and answers where, and the agent's own Read opens it.
  *
  * AN ANSWER IS BOUNDED BY WHAT THE TRANSCRIPT HOLDS, and that is a much tighter
  * bound than the body drawn off the wire. Every answer becomes one `tool_result`
@@ -86,6 +91,8 @@
 
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { URLSearchParams } from "node:url";
 
 import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
@@ -95,6 +102,7 @@ import {
   allDependentRelations,
   builtInToolCapabilities,
   chuggyToolCapabilities,
+  chuggyToolImageResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -102,14 +110,18 @@ import {
   chuggyToolServerName,
   chuggyToolTimeoutMs,
   dependentRelationsAdmitted,
+  imageMediaTypes,
   nativeHttpMediaType,
   nativeHttpPageItemsMax,
+  projectArtifactEncoding,
   selectorHistoryLimitMax,
   threadTurnsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
 
 import { chuggyBoundedBody, chuggyRequest } from "./chuggyApi.mjs";
+import { workerTemporaryFile } from "./checks.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
+import { ticketImageExtension } from "./ticketImages.mjs";
 import { transcriptPageAnswer } from "./transcriptPage.mjs";
 import { routeFilled } from "./wire.mjs";
 
@@ -360,6 +372,85 @@ async function readTranscript(context, path, cursor) {
       cursor,
       (composed) => chuggyToolAnswerBytes(composed) <= chuggyToolAnswerBytesMax,
     ),
+  );
+}
+
+/** What names the directory one context's images are written into. */
+const chuggyToolImageDirectoryPrefix = "chuggy-tool-images-";
+
+/**
+ * Where one context's images are written: each to a new file of its own,
+ * readable by this user alone and named for its bytes' format, in a directory
+ * made under the temporary directory at the first and written by nothing else.
+ */
+export function chuggyToolImageFiles(environment = process.env) {
+  let directory;
+  let written = 0;
+  return async (bytes) => {
+    directory ??= mkdtemp(
+      workerTemporaryFile(chuggyToolImageDirectoryPrefix, environment),
+    );
+    written += 1;
+    const file = resolve(
+      await directory,
+      `${String(written)}${ticketImageExtension(bytes)}`,
+    );
+    await writeFile(file, bytes, { flag: "wx", mode: 0o600 });
+    return file;
+  };
+}
+
+/** The image a route's body carries, decoded, or nothing where the body is not one as the route answers one. */
+function readImageDecoded(text) {
+  let answer;
+  try {
+    answer = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof answer?.content !== "string" ||
+    !imageMediaTypes.includes(answer.mediaType) ||
+    answer.encoding !== projectArtifactEncoding
+  )
+    return undefined;
+  // `Buffer` skips what is not base64 rather than refusing it, so content that
+  // is not its own bytes' encoding is not the image the route meant.
+  const bytes = Buffer.from(answer.content, projectArtifactEncoding);
+  if (bytes.toString(projectArtifactEncoding) !== answer.content)
+    return undefined;
+  return { mediaType: answer.mediaType, bytes };
+}
+
+/**
+ * One of the project's images, written to a new file whose path is answered in
+ * place of its bytes. A refusal is relayed as any read's is, and an answer past
+ * the route's bound or not in its shape is refused with nothing written.
+ */
+async function readImage(context, path) {
+  const response = await context.request(context.task, context.bearer, path, {
+    method: "GET",
+  });
+  const { text, cut } = await chuggyBoundedBody(
+    response,
+    chuggyToolImageResponseBytesMax,
+  );
+  if (response.status >= 400)
+    return answered(`HTTP ${String(response.status)}\n${text}`, true);
+  if (cut)
+    return answered(
+      `this image's answer is larger than the ${String(chuggyToolImageResponseBytesMax)} bytes one image read draws off the wire, so it cannot be read.`,
+      true,
+    );
+  const image = readImageDecoded(text);
+  if (image === undefined)
+    return answered(
+      `the image route answered HTTP ${String(response.status)} with a body that is not one base64 image of a media type the contract admits, so nothing was written.`,
+      true,
+    );
+  const file = await context.imageFile(image.bytes);
+  return answered(
+    `${image.mediaType}, ${String(image.bytes.byteLength)} bytes, written to ${file}. Open that file with Read to see the image.`,
   );
 }
 
@@ -652,6 +743,14 @@ export const chuggyProjectTools = [
       read(context, projectPath(context, "projectRepositories")),
   },
   {
+    name: "fetch_image",
+    description:
+      "One of this project's images, by the identity a message's images section or a brief names it by, written to a new file. Answers that file's path, its media type and its size in bytes; open the file with Read to see the image.",
+    shape: (z) => ({ artifact: identity(z) }),
+    call: (context, { artifact }) =>
+      readImage(context, projectPath(context, "projectArtifact", { artifact })),
+  },
+  {
     name: "initialize_draft",
     description:
       "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, counted from zero and absent where none takes them, and `commandedCheckStageNote` says it in words: the stage counted from one and, for a catalog, the plan and the stage's name, or that none does and which plans would.",
@@ -925,7 +1024,7 @@ export function chuggyToolServer(context, sdk) {
   });
 }
 
-/** What one session's tools are held in: its task, its bearer, and this turn's staging. */
+/** What one session's tools are held in: its task, its bearer, this turn's staging, and where its images are written. */
 export function chuggyToolContext(task, bearer, services = {}) {
   return {
     task,
@@ -935,5 +1034,6 @@ export function chuggyToolContext(task, bearer, services = {}) {
     request: services.request ?? chuggyRequest,
     turn: services.turn ?? (() => undefined),
     staging: services.staging ?? leadDecisionStaging(),
+    imageFile: services.imageFile ?? chuggyToolImageFiles(),
   };
 }

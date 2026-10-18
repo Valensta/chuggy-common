@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
 import { URL } from "node:url";
 
@@ -8,6 +11,7 @@ import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane"
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
+  chuggyToolImageResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
   chuggyToolTimeoutMs,
@@ -31,6 +35,7 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyToolImageFiles,
   chuggyToolServer,
   sessionAllowedTools,
   sessionBuiltInTools,
@@ -634,6 +639,10 @@ test("each read reaches the route its roster names, and only it", async () => {
       "/threads/thread-1/transcript?after=2&limit=1",
     ],
     [["list_repositories", {}], "/repositories"],
+    [
+      ["fetch_image", { artifact: "image/png:ce47" }],
+      "/artifacts/image%2Fpng%3Ace47",
+    ],
   ];
   for (const [[name, args], suffix] of cases) {
     const api = apiOf();
@@ -679,6 +688,167 @@ test("the project's repositories are read from its own repositories route, and t
   assert.ok(answer.isError === undefined);
 });
 
+/** An image's bytes, opening as a PNG does, and the route's answer carrying them. */
+const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+const pngAnswered = {
+  content: png.toString("base64"),
+  mediaType: "image/png",
+  encoding: "base64",
+};
+
+/** A temporary directory of the suite's own, removed when the test ends. */
+async function temporaryOf(t) {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-tools-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  return directory;
+}
+
+/** The tools with each image they read written under `temporary`, every route answering `answer`. */
+function imageToolsOf(temporary, answer) {
+  return toolsOf(
+    { imageFile: chuggyToolImageFiles({ TMPDIR: temporary }) },
+    answer,
+  );
+}
+
+/** Every file the tools wrote under `temporary`, named from it. */
+async function writtenUnder(temporary) {
+  const written = [];
+  for (const directory of await readdir(temporary))
+    for (const file of await readdir(join(temporary, directory)))
+      written.push(join(directory, file));
+  return written.sort();
+}
+
+test("an image is read from its project's artifact route into a new file of this user's alone, and the answer names the file", async (t) => {
+  const temporary = await temporaryOf(t);
+  const { api, call } = imageToolsOf(temporary, () => ({
+    status: 200,
+    body: JSON.stringify(pngAnswered),
+  }));
+
+  const first = await call("fetch_image", { artifact: "image/png:ce47" });
+  const second = await call("fetch_image", { artifact: "image/png:ce47" });
+
+  assert.deepEqual(
+    api.calls.map(({ path, method }) => [method, path]),
+    Array.from({ length: 2 }, () => [
+      "GET",
+      "/api/v1/tenants/vteng/projects/chuggy/artifacts/image%2Fpng%3Ace47",
+    ]),
+  );
+  const written = await writtenUnder(temporary);
+  assert.equal(written.length, 2, "a read did not write a new file");
+  for (const [at, answer] of [first, second].entries()) {
+    const file = join(temporary, written[at]);
+    assert.ok(answer.isError === undefined, textOf(answer));
+    assert.equal(
+      textOf(answer),
+      `image/png, ${String(png.byteLength)} bytes, written to ${file}. Open that file with Read to see the image.`,
+    );
+    assert.ok(isAbsolute(file));
+    assert.match(written[at], /^chuggy-tool-images-[^/]+\/\d+\.png$/u);
+    assert.deepEqual(await readFile(file), png);
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    assert.ok(!textOf(answer).includes(pngAnswered.content));
+  }
+  assert.equal(
+    dirname(written[0]),
+    dirname(written[1]),
+    "one context's reads were written to two directories",
+  );
+});
+
+test("a refused image read is relayed as its status and body, and writes nothing", async (t) => {
+  const temporary = await temporaryOf(t);
+  for (const status of [403, 404]) {
+    const body = JSON.stringify({ error: { code: "NotFound" } });
+    const { api, call } = imageToolsOf(temporary, () => ({ status, body }));
+
+    const answer = await call("fetch_image", { artifact: "image/png:ce47" });
+
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`);
+    assert.equal(answer.isError, true);
+    assert.equal(api.calls.length, 1, "a refused read was asked again");
+  }
+  assert.deepEqual(await readdir(temporary), []);
+});
+
+test("an image answer not in the route's shape is an error, and writes nothing", async (t) => {
+  const temporary = await temporaryOf(t);
+  for (const body of [
+    "not json",
+    "null",
+    JSON.stringify({}),
+    JSON.stringify({ ...pngAnswered, content: 7 }),
+    JSON.stringify({ ...pngAnswered, mediaType: "image/svg+xml" }),
+    JSON.stringify({ ...pngAnswered, encoding: "utf8" }),
+    JSON.stringify({ ...pngAnswered, content: "*not base64*" }),
+    JSON.stringify({ ...pngAnswered, content: "iVBORw0KGgoBAg" }),
+  ]) {
+    const { call } = imageToolsOf(temporary, () => ({ status: 200, body }));
+
+    const answer = await call("fetch_image", { artifact: "image/png:ce47" });
+
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /nothing was written\.$/u, body);
+    assert.ok(!textOf(answer).includes(body), body);
+  }
+  assert.deepEqual(await readdir(temporary), []);
+});
+
+/**
+ * The bound at its own edge. The image's answer is held to the contract's
+ * image bound rather than to an ordinary answer's, and is refused past it
+ * rather than decoded from what fit.
+ */
+test("an image answer at the route's bound is read, and one past it is refused rather than cut", async (t) => {
+  const temporary = await temporaryOf(t);
+  const body = JSON.stringify(pngAnswered);
+  const padded = (bytes) =>
+    `${body}${" ".repeat(bytes - Buffer.byteLength(body))}`;
+  assert.ok(chuggyToolImageResponseBytesMax > chuggyToolResponseBytesMax);
+
+  const at = await imageToolsOf(temporary, () => ({
+    status: 200,
+    body: padded(chuggyToolImageResponseBytesMax),
+  })).call("fetch_image", { artifact: "image/png:ce47" });
+  const over = await imageToolsOf(temporary, () => ({
+    status: 200,
+    body: padded(chuggyToolImageResponseBytesMax + 1),
+  })).call("fetch_image", { artifact: "image/png:ce47" });
+
+  assert.ok(at.isError === undefined, textOf(at));
+  assert.equal(over.isError, true);
+  assert.match(textOf(over), /larger than the/u);
+  assert.equal((await writtenUnder(temporary)).length, 1);
+});
+
+/**
+ * The capability that admits the read, which is the only thing that keeps it
+ * from a roster: a roster without ProjectRead neither registers nor allows it.
+ */
+test("fetch_image is registered and allowed under ProjectRead, and under nothing else", () => {
+  const registered = (capabilities) =>
+    chuggyToolDefinitions(
+      chuggyToolContext(task, bearer, {
+        capabilities,
+        staging: leadDecisionStaging(),
+      }),
+    ).map(({ name }) => name);
+  const others = everyCapability.filter((held) => held !== "ProjectRead");
+  const qualified = `${chuggyToolPrefix}fetch_image`;
+
+  assert.ok(registered(["ProjectRead"]).includes("fetch_image"));
+  assert.ok(
+    sessionAllowedTools(["ProjectRead"]).allowedTools.includes(qualified),
+  );
+  assert.ok(!registered(others).includes("fetch_image"));
+  assert.ok(sessionAllowedTools(others).disallowedTools.includes(qualified));
+  for (const roster of [leadRoster, threadRoster])
+    assert.ok(registered([...roster]).includes("fetch_image"));
+});
+
 /**
  * Every identity a tool puts in a path segment, given one that carries the
  * separator. A segment is model-chosen text bounded only by `identity(z)`, so
@@ -712,6 +882,7 @@ test("an identity carrying a separator stays inside the route its tool names", a
       ["read_thread_transcript", { session: escaping }],
       `/threads/${escaped}/transcript`,
     ],
+    [["fetch_image", { artifact: escaping }], `/artifacts/${escaped}`],
   ];
   for (const [[name, args], suffix] of cases) {
     const api = apiOf();
@@ -760,6 +931,8 @@ test("an argument past its bound is refused before any call is made", async () =
     ["read_refusals", { limit: 33 }],
     ["read_lead_transcript", { after: -1 }],
     ["read_execution", { execution: "" }],
+    ["fetch_image", { artifact: "" }],
+    ["fetch_image", { artifact: "x".repeat(257) }],
   ]) {
     const answer = await call(name, args);
 
@@ -1153,6 +1326,12 @@ test("the descriptions say what the server does where a session reads it", () =>
       /Bootstrapped, the project's bootstrap `revision`/,
       /A retired binding carries `retiredAt`, and a draft write naming it is refused/,
     ],
+    fetch_image: [
+      /by the identity a message's images section or a brief names it by/,
+      /written to a new file/,
+      /that file's path, its media type and its size in bytes/,
+      /open the file with Read/,
+    ],
   };
 
   for (const [tool, claims] of Object.entries(said))
@@ -1369,6 +1548,7 @@ const projectToolArguments = {
   read_thread: { session: "t-1" },
   read_thread_transcript: { session: "t-1" },
   list_repositories: {},
+  fetch_image: { artifact: "image/png:ce47" },
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
@@ -1446,9 +1626,13 @@ test("origination and revocation are registered for a thread's roster and for no
  * tool that answered without asking stood: a suite that drives the definition
  * passes whatever is between it and the session.
  */
-test("every project tool a session holds asks its route, and answers what the route did", async () => {
+test("every project tool a session holds asks its route, and answers what the route did", async (t) => {
+  const temporary = await temporaryOf(t);
   for (const { name } of chuggyProjectTools) {
-    const { api, call } = toolsOf();
+    const { api, call } = imageToolsOf(temporary, (path) => ({
+      status: 200,
+      body: path.includes("/artifacts/") ? JSON.stringify(pngAnswered) : "{}",
+    }));
 
     const answer = await call(name, projectToolArguments[name]);
 

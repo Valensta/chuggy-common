@@ -51,7 +51,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
@@ -92,6 +92,7 @@ import {
   workerShellEnvironment,
   workerStageEnvironment,
   workerSummaryText,
+  workerTemporaryFile,
 } from "./checks.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
@@ -671,14 +672,6 @@ export async function workerRun({
 
 function scrubbed(text) {
   return activeScrub === undefined ? text : activeScrub(text);
-}
-
-/**
- * Where a job keeps a file of its own: the temporary directory, named as the
- * job's `check.sh` names the one it found this user can write.
- */
-export function workerTemporaryFile(name, environment = process.env) {
-  return join(environment.TMPDIR || "/tmp", name);
 }
 
 /** What the task must grant before it runs, and what an agent-run task needs on disk. */

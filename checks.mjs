@@ -75,6 +75,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import {
@@ -274,6 +275,14 @@ function workerImageEnvironment(environment) {
  */
 export function workerAgentEnvironment(environment) {
   return workerUnkeptEnvironment(workerInheritedEnvironment(environment));
+}
+
+/**
+ * Where the core keeps a file of its own: the temporary directory, named as a
+ * job's `check.sh` names the one it found this user can write.
+ */
+export function workerTemporaryFile(name, environment = process.env) {
+  return join(environment.TMPDIR || "/tmp", name);
 }
 
 /** The variable git reads how many configuration entries the environment holds from. */
