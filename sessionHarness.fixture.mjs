@@ -10,6 +10,10 @@
  * one harness rather than one each.
  */
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   sessionTaskVariable,
   workerCredentialFilesVariable,
@@ -115,9 +119,10 @@ export function heldUntilLetGo(signal) {
 
 /**
  * The plane a case drives. `minted` is what the session credential route
- * answers; without one the plane mints nothing, which is the deployment every
- * case that is about something else runs under. `refuse(path)` names a status
- * to answer a path with instead, which must be one its route answers.
+ * answers, or what it answers for each repository named, nothing where it
+ * mints none; without one the plane mints nothing, which is the deployment
+ * every case that is about something else runs under. `refuse(path)` names a
+ * status to answer a path with instead, which must be one its route answers.
  * `stopped(turn, signal)` answers the watch on a turn, which without one is
  * held for as long as the turn is watched, as a plane holds it for a turn
  * nobody stopped. `live(post)` answers a post of live events, which without
@@ -143,10 +148,13 @@ export function planeOf(
     switch (route) {
       case "facts":
         return { status: 200, body: facts };
-      case "credential":
-        return minted === undefined
+      case "credential": {
+        const answered =
+          typeof minted === "function" ? minted(body.repository) : minted;
+        return answered === undefined
           ? { status: 404, body: { reason: "ForgeNotConfigured" } }
-          : { status: 200, body: minted };
+          : { status: 200, body: answered };
+      }
       case "turn": {
         const turn = turns[claims];
         claims += 1;
@@ -223,16 +231,27 @@ function sdkOf(query) {
   };
 }
 
-export function run(services) {
+/**
+ * One session run over `services`, launched as a pod is with a minted
+ * credential directory of its own, which is removed as the session ends.
+ */
+export async function run(services) {
   const { query, ...rest } = services;
-  return sessionMain({
-    environment,
-    read: async (path) => (path === bearerFile ? `${bearer}\n` : `${token}\n`),
-    ensureDirectory: async () => undefined,
-    warn: () => undefined,
-    ...(query === undefined ? {} : { sdk: sdkOf(query) }),
-    ...rest,
-  });
+  const minted = await mkdtemp(join(tmpdir(), "chuggy-session-minted-"));
+  try {
+    return await sessionMain({
+      environment,
+      read: async (path) =>
+        path === bearerFile ? `${bearer}\n` : `${token}\n`,
+      ensureDirectory: async () => undefined,
+      warn: () => undefined,
+      minted,
+      ...(query === undefined ? {} : { sdk: sdkOf(query) }),
+      ...rest,
+    });
+  } finally {
+    await rm(minted, { recursive: true, force: true });
+  }
 }
 
 export const turnOne = {

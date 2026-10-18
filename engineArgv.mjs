@@ -3,7 +3,7 @@
  * the engine's CLI. Nothing here runs anything.
  */
 
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import {
   mintedCredentialDirectory,
@@ -16,6 +16,7 @@ import {
   jobGid,
   jobPidsMax,
   jobProviderCredentialFile,
+  jobRunDirectory,
   jobUid,
   jobWorkspace,
 } from "./job.mjs";
@@ -38,6 +39,12 @@ import {
  * @property {string} image
  * @property {RuntimeVolumes} [runtime] the volumes of a job started through chuggy's runtime in place of its image's entrypoint; none, and the image's own entrypoint runs
  * @property {EngineSocket} [engineSocket] this machine's engine, handed to the workload through its socket; none, and it is handed nothing of the engine
+ * @property {readonly OwnerVolume[]} [volumes] what the runner's owner mounts into the workload; none, and nothing is
+ *
+ * @typedef {object} OwnerVolume a named volume or a directory of this machine that a runner's owner mounts into each job
+ * @property {string} source the volume's name, or the directory's absolute path, which no name can be
+ * @property {string} target where the job's container has it
+ * @property {boolean} readonly
  *
  * @typedef {object} EngineSocket this machine's container engine, as a workload is handed it
  * @property {string} path the socket's path on this machine
@@ -59,6 +66,43 @@ export const runtimeLabel = "io.chuggy.runtime";
 export const workspaceLabel = "io.chuggy.workspace";
 /** The label of each of a job's `RuntimeVolumes`, naming the container that fills them. */
 export const fillLabel = "io.chuggy.fill";
+/**
+ * The label of a named volume a runner made for its owner. Such a volume
+ * carries no pool's label, so no sweep of a pool's volumes lists it.
+ */
+export const ownerVolumeLabel = "io.chuggy.owner-volume";
+
+/**
+ * Every path `runArgv` mounts in a workload's container, whichever of them a
+ * workload is given.
+ */
+export const workloadMountTargets = [
+  jobProviderCredentialFile,
+  jobEngineSocket,
+  mintedCredentialDirectory,
+  jobWorkspace,
+  workerRuntimeDirectory,
+];
+
+/**
+ * Whether a bind mount's `source=` can name this absolute path: one with no
+ * comma, which would end it, and no line break.
+ *
+ * @param {string} path
+ */
+export function bindMountNameable(path) {
+  return !/[,\r\n]/u.test(path);
+}
+
+/**
+ * Whether an owner volume's source is a directory of this machine rather than
+ * a named volume: an absolute path, which no volume's name can be.
+ *
+ * @param {string} source
+ */
+export function ownerVolumeDirectory(source) {
+  return isAbsolute(source);
+}
 
 /**
  * What the container that fills a job's runtime volume runs with the
@@ -66,6 +110,12 @@ export const fillLabel = "io.chuggy.fill";
  * cluster's emptyDir is, since the job's user owns nothing an engine makes.
  */
 const workspaceOpened = `require("node:fs").chmodSync(process.argv[1], 0o777)`;
+
+/**
+ * What the container that opens owner volumes runs with the runtime's own
+ * node: each path it is given handed to the job's user.
+ */
+const ownerVolumesOpened = `for (const path of process.argv.slice(1)) require("node:fs").chownSync(path, ${String(jobUid)}, ${String(jobGid)})`;
 
 /** The file a pull's credential is written to, in the directory made for it. */
 export const registryAuthFile = "config.json";
@@ -183,13 +233,50 @@ function runArgvEngineSocket(engine, socket) {
 }
 
 /**
+ * What a job is run with of its owner's volumes. A directory is bind
+ * mounted, which refuses one that is not there where `--volume` would make
+ * it. A named volume is mounted uncopied: into an empty volume mounted over a
+ * directory its image holds, an engine otherwise copies what that directory
+ * holds and its owner and mode, which would undo the volume's opening and
+ * seed a volume every job here shares from whichever image mounted it first.
+ *
+ * @param {readonly OwnerVolume[]} volumes
+ */
+function runArgvOwnerVolumes(volumes) {
+  return volumes.flatMap(({ source, target, readonly }) =>
+    ownerVolumeDirectory(source)
+      ? [
+          "--mount",
+          `type=bind,source=${source},target=${target}${readonly ? ",readonly" : ""}`,
+        ]
+      : [
+          "--volume",
+          `${source}:${target}:${readonly ? "ro,nocopy" : "nocopy"}`,
+        ],
+  );
+}
+
+/**
+ * The user namespace a container of the job's user runs in: on podman,
+ * keep-id's, which maps the user running podman onto it; docker maps none.
+ *
+ * @param {EngineName} engine
+ */
+function jobUsernsArgv(engine) {
+  return engine === "podman"
+    ? [`--userns=keep-id:uid=${String(jobUid)},gid=${String(jobGid)}`]
+    : [];
+}
+
+/**
  * One workload's container, a job's and a session's alike but for the kind
  * it is labelled with. The mounts and the security options are the rig's pod
  * in container terms: the image's user, no capabilities, no privilege
  * escalation, the engine's default seccomp profile, the minted credential in
  * memory the image's user owns, and the workspace in a volume of its own. A
  * workload handed this machine's engine is also run with its socket, as
- * `runArgvEngineSocket` says.
+ * `runArgvEngineSocket` says, and one given its owner's volumes with those, as
+ * `runArgvOwnerVolumes` says.
  *
  * A JOB GIVEN RUNTIME VOLUMES STARTS THROUGH THEM, as the cluster starts one:
  * the runtime's mounted read-only at `workerRuntimeDirectory`, the workspace's
@@ -235,9 +322,7 @@ export function runArgv(engine, workload) {
     workload.envFile,
     "--user",
     `${String(jobUid)}:${String(jobGid)}`,
-    ...(engine === "podman"
-      ? [`--userns=keep-id:uid=${String(jobUid)},gid=${String(jobGid)}`]
-      : []),
+    ...jobUsernsArgv(engine),
     "--cap-drop",
     "ALL",
     "--security-opt",
@@ -251,6 +336,7 @@ export function runArgv(engine, workload) {
     "--mount",
     `type=bind,source=${workload.tokenFile},target=${jobProviderCredentialFile},readonly`,
     ...runArgvEngineSocket(engine, workload.engineSocket),
+    ...runArgvOwnerVolumes(workload.volumes ?? []),
     "--tmpfs",
     mintedTmpfs(engine),
     "--volume",
@@ -334,6 +420,80 @@ export function runtimeFillArgv(volumes, runtime) {
     "--eval",
     workspaceOpened,
     jobWorkspace,
+  ];
+}
+
+/**
+ * A named volume this runner makes for its owner, labelled as one. Podman is
+ * also told to give it the owner it would anyway, which is what stops podman,
+ * at each mount while the volume is empty and whether or not the mount
+ * copies, giving it the mounting container's user and then the owner and mode
+ * of the directory that container's image holds there. Docker does neither to
+ * a volume mounted uncopied.
+ *
+ * @param {EngineName} engine
+ * @param {string} volume
+ */
+export function ownerVolumeCreateArgv(engine, volume) {
+  return [
+    "volume",
+    "create",
+    "--label",
+    ownerVolumeLabel,
+    ...(engine === "podman" ? ["--opt", "o=uid=0,gid=0"] : []),
+    volume,
+  ];
+}
+
+/**
+ * Where the container opening owner volumes mounts each: in chuggy's own run
+ * directory, which no owner's target can be, so none hides what the runtime's
+ * node needs.
+ *
+ * @param {string} volume
+ */
+function ownerVolumesOpenArgvMount(volume) {
+  return join(jobRunDirectory, "volumes", volume);
+}
+
+/**
+ * The container that opens named volumes this runner made for its owner to
+ * the job's user, labelled with nothing, so no listing of a pool's containers
+ * finds it: the runtime image, whose own node gives each volume's root to the
+ * job's uid and gid. It runs as root with the one capability that takes, no
+ * privilege escalation and no network, and in the job's user namespace, so
+ * the owner it gives is the one the job runs as on either engine.
+ *
+ * @param {EngineName} engine
+ * @param {readonly string[]} volumes
+ * @param {string} runtime the runtime image
+ */
+export function ownerVolumesOpenArgv(engine, volumes, runtime) {
+  return [
+    "run",
+    "--rm",
+    "--pull=never",
+    "--user",
+    "0:0",
+    ...jobUsernsArgv(engine),
+    "--cap-drop",
+    "ALL",
+    "--cap-add",
+    "CHOWN",
+    "--security-opt",
+    "no-new-privileges",
+    "--network",
+    "none",
+    ...volumes.flatMap((volume) => [
+      "--volume",
+      `${volume}:${ownerVolumesOpenArgvMount(volume)}:nocopy`,
+    ]),
+    "--entrypoint",
+    `${workerRuntimeDirectory}/bin/node`,
+    runtime,
+    "--eval",
+    ownerVolumesOpened,
+    ...volumes.map(ownerVolumesOpenArgvMount),
   ];
 }
 

@@ -69,6 +69,17 @@ const stub = {
   interpreterAbsent: "#!/lib/ld-chuggy-suite-absent.so.1\n",
 };
 
+/**
+ * The runtime's init as this suite stands it in: it writes its arguments, one
+ * a line, beside itself, then runs what follows `--` and exits as that did.
+ */
+const standInTini = `#!/bin/sh
+printf '%s\\n' "$@" > "$0.argv"
+while [ "$1" != -- ]; do shift; done
+shift
+"$@"
+`;
+
 /** The core a passing check starts: it reports its environment, its argv and where it finds its runtime. */
 const startedCore = `import { coreRuntime } from "./coreRuntime.mjs";
 process.stdout.write(JSON.stringify({ environment: process.env, argv: process.argv.slice(1), coreRuntime }));
@@ -82,8 +93,8 @@ async function checkExecutable(path, text) {
 /**
  * A runtime tree as a site mounts it, with the image's PATH, HOME, workspace
  * and temporary directory beside it. `node` is this suite's own unless a stub is named;
- * `claude` and `git` answer unless a stub is named, and are absent where named
- * `null`.
+ * `claude` and `git` answer and `tini` is this suite's stand-in unless a stub
+ * is named, and each is absent where named `null`.
  */
 async function checkTree(t, binaries = {}) {
   const root = await mkdtemp(join(tmpdir(), "chuggy-check-"));
@@ -112,12 +123,14 @@ async function checkTree(t, binaries = {}) {
     node,
     claude = stub.answers("2.1.300 (Claude Code)"),
     git = stub.answers("git version 2.47.3"),
+    tini = standInTini,
   } = binaries;
   if (node === undefined)
     await symlink(process.execPath, join(runtime, "bin", "node"));
   else await checkExecutable(join(runtime, "bin", "node"), node);
   if (claude !== null)
     await checkExecutable(join(runtime, "bin", "claude"), claude);
+  if (tini !== null) await checkExecutable(join(runtime, "bin", "tini"), tini);
   if (git !== null) await checkExecutable(join(tree.path, "git"), git);
   return tree;
 }
@@ -449,6 +462,17 @@ function checkSameRuntime(tree, started) {
   });
 }
 
+/** What the stand-in tini was started with, one argument a line, or nothing where it never started. */
+function checkTiniArguments(tree) {
+  try {
+    return readFileSync(join(tree.runtime, "bin", "tini.argv"), "utf8")
+      .trimEnd()
+      .split("\n");
+  } catch {
+    return undefined;
+  }
+}
+
 /** What one runtime that is not whole says, which names the binary it lacks and blames no image. */
 async function checkRuntimeBroken(t, shell, tree, binary) {
   const ran = checked(shell, tree, {}, ["check"]);
@@ -544,11 +568,29 @@ const checkCases = [
   {
     name: "the check mode passes an image that can run a job and starts nothing",
     run: async (t, shell) => {
-      const ran = checked(shell, await checkTree(t), {}, ["check"]);
+      const tree = await checkTree(t);
+      const ran = checked(shell, tree, {}, ["check"]);
 
       assert.equal(ran.status, 0, ran.stderr);
       assert.equal(ran.stdout, "chuggy: this image can run a job\n");
       assert.equal(ran.stderr, "");
+      assert.equal(checkTiniArguments(tree), undefined);
+    },
+  },
+  {
+    name: "the core is started under the runtime's tini, as a subreaper",
+    run: async (t, shell) => {
+      const tree = await checkTree(t);
+      const ran = checked(shell, tree);
+
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.deepEqual(checkTiniArguments(tree), [
+        "-s",
+        "--",
+        join(tree.runtime, "bin", "node"),
+        join(tree.runtime, "lib", "chuggy", "worker.mjs"),
+      ]);
+      checkSameRuntime(tree, checkStarted(ran));
     },
   },
   ...imageFaults.map((fault) => ({
@@ -600,6 +642,11 @@ const checkCases = [
         await checkTree(t, { claude: null }),
         "claude",
       ),
+  },
+  {
+    name: "a runtime without its tini is no fault of the image's",
+    run: async (t, shell) =>
+      checkRuntimeBroken(t, shell, await checkTree(t, { tini: null }), "tini"),
   },
   {
     name: "a runtime whose node cannot be executed is no fault of the image's",

@@ -1,7 +1,7 @@
 /**
- * The reads every git a job runs makes of the other repositories its project
- * binds: a credential git asks this pod's own process for, and the
- * configuration that sends git to ask.
+ * The reads every git a job runs, or a session's shell does, makes of the
+ * other repositories its project binds: a credential git asks this pod's own
+ * process for, and the configuration that sends git to ask.
  *
  * GIT ASKS THROUGH ITS OWN CACHE CLIENT. Every git the attempt runs once its
  * workspace is cloned is configured to ask `git credential-cache` at a socket

@@ -108,17 +108,31 @@ test("a tool the roster does not grant is never registered", () => {
 });
 
 /**
- * `brief` is an open object on the wire, so a session learns what one carries
- * from the description alone. A tool that takes one and does not name the title
- * is a tool that files untitled tickets.
+ * Every tool that takes a brief, each with what its `brief` parameter says. The
+ * brief is described there rather than in the tool's description, which
+ * Claude Code cuts.
  */
-test("every tool that takes a brief names the title it carries", () => {
-  const taking = chuggyToolDefinitions(
+function briefTakers() {
+  return chuggyToolDefinitions(
     chuggyToolContext(task, bearer, {
       capabilities: everyCapability,
       staging: leadDecisionStaging(),
     }),
-  ).filter((definition) => "brief" in definition.shape(z));
+  )
+    .filter((definition) => "brief" in definition.shape(z))
+    .map(({ name, shape }) => ({
+      name,
+      description: shape(z).brief.description ?? "",
+    }));
+}
+
+/**
+ * `brief` is an open object on the wire, so a session learns what one carries
+ * from the parameter's description alone. A tool that takes one and does not
+ * name the title is a tool that files untitled tickets.
+ */
+test("every tool that takes a brief names the title it carries", () => {
+  const taking = briefTakers();
 
   assert.deepEqual(taking.map(({ name }) => name).sort(), [
     "create_draft",
@@ -140,12 +154,7 @@ test("every tool that takes a brief names the title it carries", () => {
  * has the model break sentences the door never asked it to break.
  */
 test("every tool that takes a brief says an intent is bounded as a whole, and gives it no line bound", () => {
-  const taking = chuggyToolDefinitions(
-    chuggyToolContext(task, bearer, {
-      capabilities: everyCapability,
-      staging: leadDecisionStaging(),
-    }),
-  ).filter((definition) => "brief" in definition.shape(z));
+  const taking = briefTakers();
 
   assert.notEqual(taking.length, 0, "no tool takes a brief");
   for (const { name, description } of taking) {
@@ -624,6 +633,7 @@ test("each read reaches the route its roster names, and only it", async () => {
       ["read_thread_transcript", { session: "thread-1", after: 2, entry: 3 }],
       "/threads/thread-1/transcript?after=2&limit=1",
     ],
+    [["list_repositories", {}], "/repositories"],
   ];
   for (const [[name, args], suffix] of cases) {
     const api = apiOf();
@@ -636,6 +646,37 @@ test("each read reaches the route its roster names, and only it", async () => {
       name,
     );
   }
+});
+
+test("the project's repositories are read from its own repositories route, and the answer is relayed whole", async () => {
+  const body = JSON.stringify({
+    repositories: [
+      {
+        repository: "https://github.com/vteng/chuggy.git",
+        boundAt: "2026-10-01T00:00:00.000Z",
+        landing: { mode: "PullRequest" },
+        configured: true,
+        configurationsHeld: { result: "Imported", count: 2 },
+      },
+      {
+        repository: "https://github.com/vteng/chuggy-common.git",
+        boundAt: "2026-10-02T00:00:00.000Z",
+        landing: { mode: "Push" },
+        retiredAt: "2026-10-03T00:00:00.000Z",
+        configured: false,
+      },
+    ],
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("list_repositories", {});
+
+  assert.deepEqual(
+    api.calls.map(({ path, method }) => [method, path]),
+    [["GET", "/api/v1/tenants/vteng/projects/chuggy/repositories"]],
+  );
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.ok(answer.isError === undefined);
 });
 
 /**
@@ -770,6 +811,78 @@ test("a write is written in the versioned media type the API requires", async ()
     authoring: { dependencies: [] },
     brief: { title: "t" },
   });
+});
+
+/** A draft's version starts at one, so a fence at zero is one no draft ever had. */
+test("a draft fenced at version zero is refused before any call, and one at version one is asked", async () => {
+  const revision = {
+    ticket: 4,
+    configurationRevision: "r1",
+    authoring: { dependencies: [] },
+    brief: { title: "t" },
+  };
+  for (const [name, args] of [
+    ["revise_draft", revision],
+    ["delete_draft", { ticket: 4 }],
+  ]) {
+    const refused = toolsOf();
+    const asked = toolsOf();
+
+    const answer = await refused.call(name, { ...args, expectedVersion: 0 });
+    await asked.call(name, { ...args, expectedVersion: 1 });
+
+    assert.equal(answer.isError, true, name);
+    assert.equal(refused.api.calls.length, 0, `${name} asked at version 0`);
+    assert.equal(asked.api.calls.length, 1, `${name} refused version 1`);
+  }
+});
+
+/**
+ * The fence is a value the session reads off an answer, so the parameter says
+ * which answer and which field: a session that fenced on the ticket's own
+ * `version` would be refused at every write.
+ */
+test("a draft write's expected version says it is the draft's authoringVersion, from one, and what a stale one answers", () => {
+  for (const name of ["revise_draft", "delete_draft"]) {
+    const tool = chuggyProjectTools.find((held) => held.name === name);
+    const described = tool?.shape(z).expectedVersion?.description ?? "";
+
+    for (const said of [
+      /draft's `authoringVersion`/,
+      /read_draft/,
+      /a new draft is at 1/,
+      /refused with the draft's `currentVersion`/,
+    ])
+      assert.match(described, said, name);
+  }
+});
+
+test("a write names the media type only when it sends a body", async () => {
+  const { api, call } = toolsOf();
+
+  await call("revise_draft", {
+    ticket: 4,
+    expectedVersion: 2,
+    configurationRevision: "r1",
+    authoring: { dependencies: [] },
+    brief: { title: "t" },
+  });
+  await call("delete_draft", { ticket: 4, expectedVersion: 2 });
+
+  const [withBody, withoutBody] = api.calls;
+  assert.equal(withBody.method, "PUT");
+  assert.equal(
+    withBody.init.headers["content-type"],
+    "application/vnd.chuggy.v1+json",
+  );
+  assert.equal(typeof withBody.init.body, "string");
+  assert.equal(withoutBody.method, "DELETE");
+  assert.equal("body" in withoutBody.init, false);
+  assert.equal(
+    "content-type" in withoutBody.init.headers,
+    false,
+    "a bodyless write names a JSON body it does not send",
+  );
 });
 
 const dependent = {
@@ -947,38 +1060,54 @@ test("the configuration read says where the agent that does the work is named", 
 });
 
 /**
+ * What the server does with a brief that no answer shows until it is too late
+ * to act on: that its checks need a commanded Check stage and where the
+ * initialization says which one, where a brief naming no landing takes one and
+ * that the write says whose it took, and that a proposal's branch is never the
+ * default one. Every tool that takes a brief says it on its `brief` parameter.
+ */
+const briefClaims = [
+  /`commandedCheckStage`, counted from zero/,
+  /`commandedCheckStageNote` \(the stage counted from one and, for a catalog, its plan, or that none does and which plans would\)/,
+  /run only in a program that reaches that stage/,
+  /where it answers none a draft carrying checks is refused/,
+  /\(BriefChecksUncommanded\)/,
+  /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
+  /runs under sh -eu with the commit/,
+  /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
+  /a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default/,
+  /for a newly bound repository is a pull request/,
+  /`landing`, the mode and target it stored, and its `source`: Brief, Finalizer, Repository, or Default for a brief naming no repository/,
+  /never the default branch/,
+  /\(ProposalBaseIsHead\)/,
+];
+
+test("every tool that takes a brief says on its parameter what the server does with one", () => {
+  const taking = briefTakers();
+
+  assert.notEqual(taking.length, 0, "no tool takes a brief");
+  for (const { name, description } of taking)
+    for (const claim of briefClaims) assert.match(description, claim, name);
+});
+
+/**
  * What the server does that no answer shows until it is too late to act on:
- * that a brief's checks need a commanded Check stage, that a proposal's branch
- * is never the default one, that the refusal ledgers hold none of a command's
- * refusals, that a submission repeated in one turn answers the settled
- * operation, that a project has no lead before a release, and that stages run
- * in order. Each is said where the session reads it.
+ * that the refusal ledgers hold none of a command's refusals, that a
+ * submission repeated in one turn answers the settled operation, that a
+ * project has no lead before a release, that stages run in order and a stage's
+ * evaluators side by side, which stage a brief's checks join, what a ticket's
+ * run totals sum, and what a binding says of its repository. Each is said in
+ * the description of the tool the session reads it from.
  */
 test("the descriptions say what the server does where a session reads it", () => {
   const described = (tool) =>
     chuggyProjectTools.find(({ name }) => name === tool).description;
-  const brief = [
-    /`commandedCheckStage`, counted from zero/,
-    /run only in a program that reaches that stage/,
-    /where it answers none a draft carrying checks is refused/,
-    /\(BriefChecksUncommanded\)/,
-    /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
-    /runs under sh -eu with the commit/,
-    /reads it as \$\{CHUG_CHANGE_BASE-\} and runs everything where that is empty/,
-    /a brief naming none takes its repository's landing/,
-    /for a newly bound repository is a pull request/,
-    /never the default branch/,
-    /\(ProposalBaseIsHead\)/,
-  ];
   const ledger = [
     /refusals to dispatch a released ticket/,
     /and nothing else/,
     /read_operation/,
   ];
   const said = {
-    create_draft: brief,
-    file_dependent: brief,
-    revise_draft: brief,
     read_refusals: ledger,
     read_ticket_refusals: ledger,
     release_draft: [
@@ -1001,6 +1130,28 @@ test("the descriptions say what the server does where a session reads it", () =>
       /run in that order/,
       /a failed stage ends evaluation/,
       /`choices\.programStagesMax`/,
+      /`commandedCheckStage` is the stage a brief's `checks` join, counted from zero/,
+      /`commandedCheckStageNote` says it in words/,
+    ],
+    read_ticket: [
+      /`runTotals`, what every run of its executions reported, summed/,
+      /`costUsdMicros`, millionths of a dollar at the runtime's list price/,
+      /per model in `models`/,
+      /A ticket no run has reported for carries none/,
+    ],
+    read_configuration: [
+      /evaluation stages run in the order listed and a failed stage ends evaluation/,
+      /the evaluators of one stage run in parallel/,
+      /each evaluator of a plan stage names its own workload/,
+      /review lenses that should run side by side belong in one stage/,
+    ],
+    list_repositories: [
+      /oldest first/,
+      /`repository` is its clone URL/,
+      /`landing` is its landing default/,
+      /`configured` says whether the project holds configurations for it/,
+      /Bootstrapped, the project's bootstrap `revision`/,
+      /A retired binding carries `retiredAt`, and a draft write naming it is refused/,
     ],
   };
 
@@ -1217,6 +1368,7 @@ const projectToolArguments = {
   list_threads: {},
   read_thread: { session: "t-1" },
   read_thread_transcript: { session: "t-1" },
+  list_repositories: {},
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {

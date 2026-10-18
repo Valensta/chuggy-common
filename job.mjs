@@ -15,14 +15,18 @@
  * since a host carries no runtime tree of chuggy's.
  */
 
-import { join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 import {
+  mintedCredentialDirectory,
+  workerRepositoryDirectory,
   workerTaskVariable,
+  workerWorkspaceDirectory,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
+import { workerJobVariables } from "./checks.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 
 /**
@@ -41,11 +45,34 @@ export const jobGid = 1000;
 export const jobPidsMax = 4096;
 
 /** An anonymous volume of the workload's own container. */
-export const jobWorkspace = "/workspace";
+export const jobWorkspace = workerWorkspaceDirectory;
+
+/**
+ * Where a workload's checkout is in the workspace it works in: where the
+ * contract puts it in a container's, and at the same place in the directory a
+ * job on its runner's host is given.
+ *
+ * @param {string} workspace
+ */
+export function jobRepositoryDirectory(workspace) {
+  return join(
+    workspace,
+    relative(workerWorkspaceDirectory, workerRepositoryDirectory),
+  );
+}
+
+/**
+ * Chuggy's own directory in a workload's container, which the credentials it
+ * mints and the token file it mounts are in.
+ */
+export const jobRunDirectory = dirname(mintedCredentialDirectory);
 
 /** Where the Claude token file is mounted, read-only. */
-export const jobProviderCredentialFile =
-  "/var/run/chuggy/credentials/claude-code";
+export const jobProviderCredentialFile = join(
+  jobRunDirectory,
+  "credentials",
+  "claude-code",
+);
 
 /**
  * Where a job run on its runner's host keeps what a container would mount,
@@ -101,15 +128,17 @@ export const jobEngineSocketVariables = [
 
 /**
  * The variables a workload's environment may not name: the envelope, the one
- * the core sets from the mounted token, which a value here would shadow, and
- * the workspace a job started through chuggy's runtime is checked at, which a
- * value here would move off the one its envelope names.
+ * the core sets from the mounted token, which a value here would shadow, the
+ * workspace a job started through chuggy's runtime is checked at, which a
+ * value here would move off the one its envelope names, and those the core
+ * tells a job's shells which job they are in by, over any value here.
  */
 export const reservedJobVariables = [
   workerTaskVariable,
   "CLAUDE_CODE_OAUTH_TOKEN",
   workerWorkspaceVariable,
   hostJobVariable,
+  ...Object.values(workerJobVariables),
 ];
 
 /**

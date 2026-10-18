@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
+  workerRepositoryDirectory,
   workerTaskVariable,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
@@ -12,6 +14,9 @@ import {
   jobEnvelope,
   jobEnvironmentAttempt,
   jobEnvironmentFile,
+  jobHostPlaces,
+  jobRepositoryDirectory,
+  jobWorkspace,
   reservedJobVariables,
 } from "./job.mjs";
 
@@ -26,6 +31,21 @@ const assignment = {
   bearer: "attempt-bearer-secret",
 };
 const bounds = { timeoutSecsMax: 3600, outputBytesMax: 65536 };
+
+/**
+ * An image may build against its checkout, so a container's is where the
+ * contract says, while a job on its runner's host keeps it in its own
+ * directory, at the same place under its workspace.
+ */
+test("a checkout is where the contract puts it in a container's workspace, and at the same place in a host job's", () => {
+  const { workspace } = jobHostPlaces("/srv/runner/jobs/job-1");
+
+  assert.equal(jobRepositoryDirectory(jobWorkspace), workerRepositoryDirectory);
+  assert.equal(
+    jobRepositoryDirectory(workspace),
+    join("/srv/runner/jobs/job-1", "workspace", "repository"),
+  );
+});
 
 test("the envelope is the assignment's callback and bearer with the runner's bounds and paths", () => {
   assert.deepEqual(JSON.parse(jobEnvelope(assignment, bounds)), {
@@ -113,6 +133,12 @@ test("each variable a job is handed by the runner or its core is reserved", () =
       "CLAUDE_CODE_OAUTH_TOKEN",
       workerWorkspaceVariable,
       "CHUGGY_HOST_JOB",
+      "CHUG_TENANT",
+      "CHUG_PROJECT",
+      "CHUG_REPOSITORY",
+      "CHUG_TICKET",
+      "CHUG_ATTEMPT",
+      "CHUG_STAGE",
     ].toSorted(),
   );
 });
