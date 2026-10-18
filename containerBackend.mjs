@@ -107,7 +107,6 @@ import {
   ownerVolumeDirectory,
   ownerVolumeLabel,
   ownerVolumesOpenArgv,
-  pullArgv,
   removeArgv,
   runArgv,
   runtimeFillArgv,
@@ -138,7 +137,7 @@ import {
   poolIdentityPersonal,
   poolLabelValue,
 } from "./poolIdentity.mjs";
-import { imageRegistryHost, withRegistryAuth } from "./registryAuth.mjs";
+import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
 
 /**
@@ -162,7 +161,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {PoolIdentity} pool
  * @property {string} tokenFile
  * @property {string | undefined} registryHost the one registry the pool's token is presented to
- * @property {string | undefined} dockerHost the endpoint docker's context names; docker's alone
+ * @property {string | undefined} dockerHost the endpoint docker's context names, which a pull of the pool's registry is told; docker's alone
  * @property {number} timeoutSecsMax
  * @property {number} outputBytesMax
  * @property {Readonly<Record<string, string>>} environment
@@ -1035,7 +1034,7 @@ async function imagePresent(state, image, named) {
 }
 
 /**
- * One pull, under the credential given or under none.
+ * One pull, made as `registryPull` makes it.
  *
  * @param {State} state
  * @param {string} image
@@ -1043,23 +1042,8 @@ async function imagePresent(state, image, named) {
  * @param {AbortSignal} signal
  */
 function pullAttempt(state, image, credential, signal) {
-  const { settings, seams } = state;
-  return withRegistryAuth(
-    settings.runtimeDir,
-    settings.engine,
-    credential,
-    (directory) => {
-      const pull = pullArgv(
-        settings.engine,
-        image,
-        directory,
-        settings.dockerHost,
-      );
-      return seams.engine.exec(pull.argv, {
-        environment: pull.environment,
-        signal,
-      });
-    },
+  return registryPull(state.settings, image, credential, (argv, environment) =>
+    state.seams.engine.exec(argv, { environment, signal }),
   );
 }
 
@@ -1084,8 +1068,9 @@ function placementSignal(state, placement, late) {
  * An image of the pool's own registry is pulled under the pool's token until
  * it is here, the registry refuses it for a reason a new token will not
  * change, or the deadline passes; a refused token is discarded so the next
- * attempt is made under a fresh one. Any other image is pulled once, under no
- * credential, and a refusal there says nothing about the pool's token.
+ * attempt is made under a fresh one. Any other image is pulled once, as the
+ * engine's own configuration pulls it, and a refusal there says nothing about
+ * the pool's token.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1101,7 +1086,7 @@ async function pulled(state, placement, image, named) {
     const answer = await pullAttempt(state, image, undefined, signal);
     if (answer.code === 0) return;
     throw new ImageCallFailed(
-      `${named} could not be pulled under no credential, as every image not of the pool's registry is: ${engineFailureLine(answer)}`,
+      `${named} could not be pulled: ${engineFailureLine(answer)}`,
       answer,
     );
   }

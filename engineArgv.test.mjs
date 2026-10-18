@@ -11,6 +11,7 @@ import {
   podmanRemoteArgv,
   podmanSocketArgv,
   podmanVersionArgv,
+  poolPullArgv,
   inspectArgv,
   killArgv,
   listArgv,
@@ -399,9 +400,9 @@ test("each engine is told the minted tmpfs's owner in the words it accepts, and 
   assert.ok(!options("podman").some((option) => /^[ug]id=/u.test(option)));
 });
 
-test("docker reads a pull's credential from DOCKER_CONFIG and its endpoint from DOCKER_HOST, podman from --authfile", () => {
+test("a pull of the pool's registry reads its credential from DOCKER_CONFIG, told docker's endpoint, or from podman's --authfile, and any other pull is the engine's own", () => {
   assert.deepEqual(
-    pullArgv(
+    poolPullArgv(
       "docker",
       image,
       "/run/user/1000/chuggy-runner/pull-x",
@@ -417,11 +418,11 @@ test("docker reads a pull's credential from DOCKER_CONFIG and its endpoint from 
     },
   );
   assert.throws(
-    () => pullArgv("docker", image, "/run/user/1000/chuggy-runner/pull-x"),
-    /a docker pull needs the endpoint its context names/u,
+    () => poolPullArgv("docker", image, "/run/user/1000/chuggy-runner/pull-x"),
+    /a docker pull under the pool's token needs the endpoint its context names/u,
   );
   assert.deepEqual(
-    pullArgv("podman", image, "/run/user/1000/chuggy-runner/pull-x"),
+    poolPullArgv("podman", image, "/run/user/1000/chuggy-runner/pull-x"),
     {
       argv: [
         "pull",
@@ -433,6 +434,11 @@ test("docker reads a pull's credential from DOCKER_CONFIG and its endpoint from 
       environment: {},
     },
   );
+  assert.deepEqual(pullArgv("ghcr.io/someone/private:1"), [
+    "pull",
+    "--quiet",
+    "ghcr.io/someone/private:1",
+  ]);
 });
 
 test("every other call is handed to either engine as this argv", () => {

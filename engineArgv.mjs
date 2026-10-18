@@ -117,7 +117,7 @@ const workspaceOpened = `require("node:fs").chmodSync(process.argv[1], 0o777)`;
  */
 const ownerVolumesOpened = `for (const path of process.argv.slice(1)) require("node:fs").chownSync(path, ${String(jobUid)}, ${String(jobGid)})`;
 
-/** The file a pull's credential is written to, in the directory made for it. */
+/** The file the pool's credential is written to, in the directory made for it. */
 export const registryAuthFile = "config.json";
 
 /** @param {string} image */
@@ -126,12 +126,23 @@ export function imageInspectArgv(image) {
 }
 
 /**
- * A pull, and the variables its engine is run with: docker reads its
- * credential from `DOCKER_CONFIG`, podman from `--authfile`. A fresh
- * `DOCKER_CONFIG` holds no CLI context either, so docker is also told the
- * endpoint its context resolved to, or the pull would reach another daemon
- * than every other call. `DOCKER_AUTH_CONFIG`, a login docker takes from the
- * environment over any file's, is emptied, which docker reads as unset.
+ * A pull as the engine's own configuration makes it, under whatever logins,
+ * credential helpers and endpoint the runner's user and environment give it.
+ *
+ * @param {string} image
+ */
+export function pullArgv(image) {
+  return ["pull", "--quiet", image];
+}
+
+/**
+ * A pull of the pool's registry, and the variables its engine is run with,
+ * under the pool's token alone: docker reads it from `DOCKER_CONFIG`, podman
+ * from `--authfile`. A fresh `DOCKER_CONFIG` holds no CLI context either, so
+ * docker is also told the endpoint its context resolved to, or the pull would
+ * reach another daemon than every other call. `DOCKER_AUTH_CONFIG`, a login
+ * docker takes from the environment over any file's, is emptied, which docker
+ * reads as unset.
  *
  * @param {EngineName} engine
  * @param {string} image
@@ -139,14 +150,14 @@ export function imageInspectArgv(image) {
  * @param {string | undefined} dockerHost the endpoint `dockerContextArgv` answered; docker's alone
  * @returns {{argv: string[], environment: Record<string, string>}}
  */
-export function pullArgv(engine, image, authDirectory, dockerHost) {
+export function poolPullArgv(engine, image, authDirectory, dockerHost) {
   if (engine === "docker") {
     if (dockerHost === undefined)
       throw new RangeError(
-        "a docker pull needs the endpoint its context names",
+        "a docker pull under the pool's token needs the endpoint its context names",
       );
     return {
-      argv: ["pull", "--quiet", image],
+      argv: pullArgv(image),
       environment: {
         DOCKER_CONFIG: authDirectory,
         DOCKER_HOST: dockerHost,
@@ -166,12 +177,15 @@ export function pullArgv(engine, image, authDirectory, dockerHost) {
   };
 }
 
-/** Podman's own version, which decides whether `--authfile` is all it reads. */
+/** Podman's own version. */
 export function podmanVersionArgv() {
   return ["version", "--format", "{{.Client.Version}}"];
 }
 
-/** Whether podman is a remote client, whose service does the pulling. */
+/**
+ * Whether podman is a remote client, whose service mounts a container's paths
+ * from its own machine.
+ */
 export function podmanRemoteArgv() {
   return ["info", "--format", "{{.Host.ServiceIsRemote}}"];
 }
