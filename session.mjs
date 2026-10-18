@@ -99,7 +99,7 @@ import {
 } from "./rateLimit.mjs";
 import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
 import { workerRepositories } from "./repository.mjs";
-import { credentialScrub, credentialScrubHead } from "./runEvidence.mjs";
+import { credentialScrubbing } from "./runEvidence.mjs";
 import { sessionCheckout } from "./sessionCheckout.mjs";
 import { sessionLiveSender } from "./sessionLive.mjs";
 import { sessionMailbox } from "./sessionMailbox.mjs";
@@ -143,6 +143,13 @@ const agentSdkModule = "@anthropic-ai/claude-agent-sdk";
 const zodModule = "zod";
 const readStatus = 200;
 const acceptedStatus = 204;
+
+/** What each secret this session holds is. */
+const sessionSecretKinds = {
+  token: "the runtime's token",
+  bearer: "the session's bearer",
+  minted: "the git credential the plane minted",
+};
 
 function unreffed(milliseconds) {
   return wait(milliseconds, undefined, { ref: false });
@@ -873,13 +880,11 @@ async function sessionMintedCredential(task, bearer, request, write) {
 }
 
 /**
- * Every secret this session holds: the runtime token behind the slot its
- * launcher mounted, the credential the plane minted for the repository it was
- * placed against, and the scrub covering both along with its own bearer.
- *
- * THE SCRUB IS BUILT HERE BECAUSE THE MINT IS THE LAST SECRET TO ARRIVE. One
- * built before it would leave the minted password in whatever this pod printed
- * or answered, and everything downstream takes the scrub once.
+ * Every secret this session holds as it starts — the runtime token behind the
+ * slot its launcher mounted, the credential the plane minted for the
+ * repository it was placed against, and its own bearer — and the scrub over
+ * them. `keepSecret` adds a secret arriving later to the scrub every holder of
+ * `scrub` and `scrubHead` already has.
  */
 async function sessionHeld(context, environment, read, write, facts) {
   const { task, bearer, request } = context;
@@ -889,17 +894,20 @@ async function sessionHeld(context, environment, read, write, facts) {
     facts.credentialSlot,
   );
   const minted = await sessionMintedCredential(task, bearer, request, write);
-  const secrets = [
-    token,
-    bearer,
-    ...(minted === undefined ? [] : [minted.password]),
-  ];
+  const { scrub, scrubHead, keepSecret } = credentialScrubbing([
+    { kind: sessionSecretKinds.token, value: token },
+    { kind: sessionSecretKinds.bearer, value: bearer },
+    ...(minted === undefined
+      ? []
+      : [{ kind: sessionSecretKinds.minted, value: minted.password }]),
+  ]);
   return {
     credentialFiles: files,
     token,
     minted,
-    scrub: credentialScrub(secrets),
-    scrubHead: credentialScrubHead(secrets),
+    scrub,
+    scrubHead,
+    keepSecret,
   };
 }
 
@@ -1147,10 +1155,9 @@ export async function sessionMain(services = {}) {
     };
     const facts = await sessionFacts(context);
     const held = await sessionHeld(context, environment, read, write, facts);
-    const { credentialFiles, token, minted } = held;
+    const { credentialFiles, token, minted, scrubHead, keepSecret } = held;
     scrub = held.scrub;
-    context.scrub = scrub;
-    context.scrubHead = held.scrubHead;
+    Object.assign(context, { scrub, scrubHead, keepSecret });
     const workspace =
       environment[workerWorkspaceVariable] ?? workerWorkspaceDirectory;
     await ensureDirectory(sessionConfigDirectory(environment, workspace));
