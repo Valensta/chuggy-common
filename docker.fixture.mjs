@@ -12,31 +12,50 @@ import { join } from "node:path";
 
 import { containerEngine } from "./engine.mjs";
 
-/** The login the machine's credential helpers hand docker. */
-export const machineLogin = { Username: "operator", Secret: "operator-secret" };
+/**
+ * The machine's logins, one for each place docker finds one: its credential
+ * helpers, its configuration file and `DOCKER_AUTH_CONFIG`.
+ */
+export const helperLogin = { Username: "operator", Secret: "helper-secret" };
+export const fileLogin = { Username: "operator", Secret: "file-secret" };
+export const environmentLogin = {
+  Username: "operator",
+  Secret: "environment-secret",
+};
 
-/** The same login as `DOCKER_AUTH_CONFIG` would hand it, for any registry. */
-export const machineAuthConfig = JSON.stringify({
-  auths: Object.fromEntries(
-    ["registry.chuggy.example", "ghcr.io", "https://index.docker.io/v1/"].map(
-      (host) => [
-        host,
-        {
-          auth: Buffer.from(
-            `${machineLogin.Username}:${machineLogin.Secret}`,
-          ).toString("base64"),
-        },
-      ],
-    ),
-  ),
-});
+/** Every registry the suites pull from, as docker keys a login to each. */
+const loginHosts = [
+  "registry.chuggy.example",
+  "ghcr.io",
+  "https://index.docker.io/v1/",
+];
 
-/** Docker's CLI, or nothing where it is not installed. */
+/**
+ * A configuration's `auths`, holding this login for every registry the
+ * suites pull from, as a configuration file or `DOCKER_AUTH_CONFIG` holds it.
+ *
+ * @param {{Username: string, Secret: string}} login
+ */
+export function loginDocument(login) {
+  const auth = Buffer.from(`${login.Username}:${login.Secret}`).toString(
+    "base64",
+  );
+  return JSON.stringify({
+    auths: Object.fromEntries(loginHosts.map((host) => [host, { auth }])),
+  });
+}
+
+/**
+ * Docker's CLI with its version, or nothing where it is not installed.
+ *
+ * @returns {Promise<{docker: import("./engine.mjs").Engine, version: [number, number]} | undefined>}
+ */
 export async function dockerCli() {
   const docker = containerEngine("docker", 30_000);
-  const version = await docker.exec(["--version"]);
-  return version.code === 0 && version.stdout.startsWith("Docker version")
-    ? docker
+  const answer = await docker.exec(["--version"]);
+  const version = /^Docker version (\d+)\.(\d+)\./u.exec(answer.stdout);
+  return answer.code === 0 && version !== null
+    ? { docker, version: [Number(version[1]), Number(version[2])] }
     : undefined;
 }
 
@@ -49,7 +68,7 @@ async function credentialHelpers(directory, asked) {
   const pass = join(directory, "pass");
   await mkdir(helpers);
   await mkdir(pass);
-  const login = JSON.stringify({ ServerURL: "", ...machineLogin });
+  const login = JSON.stringify({ ServerURL: "", ...helperLogin });
   for (const store of ["secretservice", "pass"])
     await writeFile(
       join(helpers, `docker-credential-${store}`),
@@ -90,6 +109,7 @@ export async function dockerDaemon(t) {
     server.listen(socket, () => resolve(undefined));
   });
   t.after(() => server.close());
+  let configurations = 0;
   return {
     host: `unix://${socket}`,
     /**
@@ -100,6 +120,19 @@ export async function dockerDaemon(t) {
      */
     path: (withPass) =>
       [helpers, ...(withPass ? [pass] : []), process.env.PATH].join(":"),
+    /**
+     * A configuration directory of the machine's, as `DOCKER_CONFIG` names
+     * one, whose `config.json` is this text.
+     *
+     * @param {string} text
+     */
+    machineConfig: async (text) => {
+      configurations += 1;
+      const configuration = join(directory, `config-${String(configurations)}`);
+      await mkdir(configuration);
+      await writeFile(join(configuration, "config.json"), text);
+      return configuration;
+    },
     /** Which helpers docker asked, in order. */
     asked: async () =>
       (await readFile(asked, "utf8").catch(() => ""))
