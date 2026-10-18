@@ -35,6 +35,9 @@ import {
   workerImageSteeringVariables,
   workerImageVariable,
   workerInheritedEnvironment,
+  workerJobEnvironment,
+  workerJobStage,
+  workerJobVariables,
   workerStageEnvironment,
   workerSummaryCharsMax,
   workerSummaryText,
@@ -330,6 +333,92 @@ test("a stage's commands are told the commit the change started from", async () 
   );
 });
 
+/** A command that prints what the stage told it of which job it is in, each `unset` where it told nothing. */
+const printsJob = `printf "%s|" ${Object.values(workerJobVariables)
+  .map((name) => `"\${${name}-unset}"`)
+  .join(" ")}`;
+
+/** An evaluation's task as its document names it, at its second stage. */
+const evaluationTask = {
+  tenant: "tenant-1",
+  project: "project-1",
+  ticket: 7,
+  attempt: "attempt-1",
+  taskKind: "Evaluation",
+  stage: 1,
+};
+
+/**
+ * Catches a job's identity not reaching a stage's shells, or reaching them as
+ * anything but its own values, over whatever the pod held under those names.
+ */
+test("a stage's commands are told which job they are in, over what the pod holds", async () => {
+  const pod = Object.fromEntries(
+    Object.values(workerJobVariables).map((name) => [name, "the pod's"]),
+  );
+  Object.assign(process.env, pod);
+  try {
+    const { output } = await runChecks(
+      {
+        ...workspace,
+        job: workerJobEnvironment(
+          evaluationTask,
+          "https://github.com/kasofsk/chuggy.git",
+        ),
+      },
+      [printsJob],
+      { write: () => undefined },
+    );
+
+    assert.equal(
+      output.checks[0].output,
+      "tenant-1|project-1|https://github.com/kasofsk/chuggy.git|7|attempt-1|Evaluation:2|",
+    );
+  } finally {
+    for (const name of Object.keys(pod)) delete process.env[name];
+  }
+});
+
+/**
+ * Catches a stage spelled other than a configuration keys it, or counted from
+ * zero as the document counts it: a line testing for the stage it was written
+ * under would never match.
+ */
+test("a job's stage is spelled as a configuration's keys spell it", () => {
+  const unstaged = { ...evaluationTask };
+  delete unstaged.stage;
+
+  assert.equal(workerJobStage({ taskKind: "Work" }), "Work");
+  assert.equal(workerJobStage({ ...evaluationTask, stage: 0 }), "Evaluation:1");
+  assert.equal(workerJobStage(evaluationTask), "Evaluation:2");
+  assert.equal(workerJobStage(unstaged), "Evaluation");
+});
+
+/** Catches a stage a shell's own tests cannot tell apart: by its kind, and by its number. */
+test("a stage's commands can test its stage by kind and by number", async () => {
+  const told = async (task) => {
+    const { output } = await runChecks(
+      { ...workspace, job: workerJobEnvironment(task, "repository-1") },
+      [
+        'case "$CHUG_STAGE" in Evaluation*) printf evaluation ;; *) printf work ;; esac',
+        '[ "$CHUG_STAGE" = Evaluation:2 ] && printf second || printf other',
+      ],
+      { write: () => undefined },
+    );
+    return output.checks.map((check) => check.output);
+  };
+
+  assert.deepEqual(await told(evaluationTask), ["evaluation", "second"]);
+  assert.deepEqual(await told({ ...evaluationTask, stage: 0 }), [
+    "evaluation",
+    "other",
+  ]);
+  assert.deepEqual(
+    await told({ ...evaluationTask, taskKind: "Work", stage: undefined }),
+    ["work", "other"],
+  );
+});
+
 /** An attempt's git configuration, each key one git reads more than one value of. */
 const attemptGit = [
   ["url.https://forge.test/.insteadOf", "git@forge.test:"],
@@ -518,6 +607,22 @@ test("what a pod's runtime inherits keeps the image's values aside", () => {
       [workerChangeBaseVariable]: "c".repeat(40),
     }),
     image.kept,
+  );
+});
+
+/**
+ * Catches a job's identity the pod held reaching what is not a stage's shell,
+ * an agent's own process or a hook git runs, as if it were the attempt's.
+ */
+test("what a pod's runtime inherits holds no job's identity", () => {
+  assert.deepEqual(
+    workerInheritedEnvironment({
+      PATH: "/bin",
+      ...Object.fromEntries(
+        Object.values(workerJobVariables).map((name) => [name, "the pod's"]),
+      ),
+    }),
+    { PATH: "/bin" },
   );
 });
 

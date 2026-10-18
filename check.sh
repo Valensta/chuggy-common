@@ -5,11 +5,16 @@
 # stderr and in an exit status kept for that fault alone, which is what a site
 # reads the fault from. Nothing else here exits with one of those statuses.
 #
-# THE RUNTIME IS WHERE THIS SCRIPT IS. Its `bin/` holds chuggy's node and
-# claude, and its `lib/chuggy/` the core, which finds the same `bin/` from
+# THE RUNTIME IS WHERE THIS SCRIPT IS. Its `bin/` holds chuggy's node, claude
+# and tini, and its `lib/chuggy/` the core, which finds the same `bin/` from
 # where it sits; that `bin/` is never put on PATH, so the node a project's
 # shells find is still the image's own. A runtime that is not whole is the
 # site's fault and not the image's, and exits with no fault's status.
+#
+# THE CORE RUNS UNDER TINI, so what is orphaned in the job is reaped and a
+# signal the container is sent ends node as it would any process; node as the
+# container's first process does neither. Tini is told to be a subreaper, so it
+# reaps them where an engine's own init is that first process instead.
 #
 # WHAT WOULD STEER CHUGGY'S OWN PROCESSES IS MOVED ASIDE FIRST: each variable
 # `workerImageSteeringVariables` in `checks.mjs` names is unset, and its value
@@ -60,7 +65,7 @@ writable() { # <directory>
 	[ -d "$1" ] && [ -w "$1" ] && [ -x "$1" ]
 }
 
-for chuggy_check_binary in node claude; do
+for chuggy_check_binary in node claude tini; do
 	if [ ! -f "$chuggy_check_runtime/bin/$chuggy_check_binary" ] ||
 		[ ! -x "$chuggy_check_runtime/bin/$chuggy_check_binary" ]; then
 		fault 1 "the runtime at $chuggy_check_runtime holds no $chuggy_check_binary this container can execute"
@@ -90,4 +95,5 @@ if [ "$chuggy_check_start" = no ]; then
 	printf 'chuggy: this image can run a job\n'
 	exit 0
 fi
-exec "$chuggy_check_runtime/bin/node" "$chuggy_check_runtime/lib/chuggy/worker.mjs"
+exec "$chuggy_check_runtime/bin/tini" -s -- \
+	"$chuggy_check_runtime/bin/node" "$chuggy_check_runtime/lib/chuggy/worker.mjs"

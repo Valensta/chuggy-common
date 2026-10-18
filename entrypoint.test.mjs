@@ -43,6 +43,7 @@ import {
   workerChangeBaseVariable,
   workerCheckCommands,
   workerImageVariable,
+  workerJobVariables,
   workerSummaryCharsMax,
 } from "./checks.mjs";
 import { claudeAgent, prepareClaudeShell } from "./claude.mjs";
@@ -809,13 +810,13 @@ test("a setup line sees the pod's environment but not the task document", async 
 const printsChangeBase = `printf "%s" "\${${workerChangeBaseVariable}-unset}"`;
 
 /**
- * One commanded evaluation run whole in a real checkout, over a plane answering
- * its input as the repository, the checkout's own commit, and whatever
- * `references` names given that commit; and what its setup line and its
- * command each printed. The pod holds a base of its own throughout, which no
- * run may pass on.
+ * One commanded attempt at `answered` run whole in a real checkout, over a
+ * plane answering its input as the repository, the checkout's own commit, and
+ * whatever `references` names given that commit; and what `prints` printed in
+ * its setup line and in its command, which then fails, so nothing is pushed.
+ * The pod holds a base of its own throughout, which no run may pass on.
  */
-async function evaluationPrinted(references) {
+async function attemptPrinted(answered, prints, references = () => []) {
   let printed;
   let setUp;
   process.env[workerChangeBaseVariable] = "f".repeat(40);
@@ -827,14 +828,13 @@ async function evaluationPrinted(references) {
             return {
               status: 200,
               body: workTaskAnswerSchema.parse({
-                ...fetchedAnswer,
-                taskKind: "Evaluation",
+                ...answered,
                 worker: {
                   mode: {
                     type: "Commands",
-                    commands: [`${printsChangeBase} > told`],
+                    commands: [`${prints} > told; false`],
                   },
-                  setup: [`${printsChangeBase} > set-up`],
+                  setup: [`${prints} > set-up`],
                   files: [],
                 },
               }),
@@ -877,6 +877,15 @@ async function evaluationPrinted(references) {
   return { printed, setUp };
 }
 
+/** What a commanded evaluation's setup line and command were told of the change's base. */
+function evaluationPrinted(references) {
+  return attemptPrinted(
+    { ...fetchedAnswer, taskKind: "Evaluation" },
+    printsChangeBase,
+    references,
+  );
+}
+
 /**
  * Catches the base the bundle pinned not reaching a check stage's commands or
  * the setup lines of its block, or reaching them as anything but the commit
@@ -916,6 +925,47 @@ test("a base the clone cannot hold as that very commit leaves the variable unset
 
     assert.equal(printed, "unset");
   }
+});
+
+/** A shell line that prints what its job was told of which job it is in, each `unset` where nothing was. */
+const printsJob = `printf "%s|" ${Object.values(workerJobVariables)
+  .map((name) => `"\${${name}-unset}"`)
+  .join(" ")}`;
+
+/** A work task as the task route answers one, which numbers no stage. */
+const workAnswered = Object.fromEntries(
+  Object.entries(fetchedAnswer).filter(([field]) => field !== "stage"),
+);
+
+/**
+ * Catches a job's setup lines or its commands not told which job they are in,
+ * told it as the pod held it, or told a stage other than the key a
+ * configuration names it by: a work task's, and an evaluation's counted from
+ * one where its document counts from zero; or told the mirror a site clones
+ * the repository from rather than the repository its bundle names.
+ */
+test("a job's setup lines and commands are told which job they are in", async (t) => {
+  podHolds(t, {
+    ...Object.fromEntries(
+      Object.values(workerJobVariables).map((name) => [name, "the pod's"]),
+    ),
+    [workerRepositoriesVariable]: JSON.stringify({
+      "repository-1": { url: "https://mirror.test/repository-1.git" },
+    }),
+  });
+  const told = (stage) => ({
+    printed: `tenant-1|project-1|repository-1|7|attempt-1|${stage}|`,
+    setUp: `tenant-1|project-1|repository-1|7|attempt-1|${stage}|`,
+  });
+
+  assert.deepEqual(await attemptPrinted(workAnswered, printsJob), told("Work"));
+  assert.deepEqual(
+    await attemptPrinted(
+      { ...workAnswered, taskKind: "Evaluation", stage: 1 },
+      printsJob,
+    ),
+    told("Evaluation:2"),
+  );
 });
 
 /**
@@ -1383,9 +1433,10 @@ function podHolds(t, variables) {
 
 /**
  * Catches an agent started without what its shell was prepared with, with a
- * name `check.sh` kept the image's value under, with the task document or the
- * change base the pod inherited, any of which would reach the agent's shell;
- * or its shell prepared without the image's value or the attempt's own base.
+ * name `check.sh` kept the image's value under, with the task document, the
+ * change base or a job's identity the pod inherited, any of which would reach
+ * the agent's shell; or its shell prepared without the image's value or the
+ * attempt's own base.
  */
 test("an agent is started as a check stage's shells inherit, and its shell prepared with the rest", async (t) => {
   const kept = workerImageVariable("NODE_PATH");
@@ -1393,10 +1444,16 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
     [kept]: "/image/node_modules",
     [workerTaskVariable]: "the task document",
     [workerChangeBaseVariable]: "e".repeat(40),
+    [workerJobVariables.stage]: "the pod's",
   });
   const changeBase = "a".repeat(40);
   const preparedWith = [];
-  const reads = [kept, workerTaskVariable, workerChangeBaseVariable]
+  const reads = [
+    kept,
+    workerTaskVariable,
+    workerChangeBaseVariable,
+    workerJobVariables.stage,
+  ]
     .map((name) => `\${${name}-dropped}`)
     .join(" ");
   const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s %s %s"}}\\n' "$CHUG_SUITE_SHELL" "$1" "${reads}"`;
@@ -1426,7 +1483,10 @@ test("an agent is started as a check stage's shells inherit, and its shell prepa
     },
   });
 
-  assert.equal(run.result.summary, "prepared argued dropped dropped dropped");
+  assert.equal(
+    run.result.summary,
+    "prepared argued dropped dropped dropped dropped",
+  );
   assert.deepEqual(preparedWith, [
     {
       NODE_PATH: "/image/node_modules",
@@ -2504,6 +2564,61 @@ test("an agent's attempt reads the images its bundle pins with its bearer before
     const file = briefedFile(started[0].briefing.text, "image/png:one");
     assert.equal(dirname(dirname(file)), temporary);
     assert.deepEqual(await readFile(file), briefImage.bytes);
+  });
+});
+
+/**
+ * Catches an agent's shell not told which job it is in, or told it as the pod
+ * held it: what its checks read is what a check stage's would.
+ */
+test("an agent's shell is told which job it is in", async (t) => {
+  podHolds(t, { [workerJobVariables.project]: "the pod's" });
+  await inCheckout(async ({ remote, directory, base }) => {
+    const plane = await imagePlane(
+      {
+        status: 200,
+        body: workTaskAnswerSchema.parse({
+          ...workAnswered,
+          taskKind: "Evaluation",
+          stage: 0,
+          authority: {
+            ...fetchedAnswer.authority,
+            credentials: ["forge", claudeAgent.credential],
+          },
+        }),
+      },
+      remote,
+      base,
+    );
+    t.after(() => plane.close());
+    const preparedWith = [];
+    const { agent } = briefedAgent();
+
+    await imageAttempt(t, plane, directory, {
+      ...agent,
+      prepareShell: async (handed) => {
+        preparedWith.push(handed);
+        return { environment: {}, arguments: [] };
+      },
+    });
+
+    assert.equal(preparedWith.length, 1);
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.values(workerJobVariables).map((name) => [
+          name,
+          preparedWith[0][name],
+        ]),
+      ),
+      {
+        CHUG_TENANT: "tenant-1",
+        CHUG_PROJECT: "project-1",
+        CHUG_REPOSITORY: remote,
+        CHUG_TICKET: "7",
+        CHUG_ATTEMPT: "attempt-1",
+        CHUG_STAGE: "Evaluation:1",
+      },
+    );
   });
 });
 

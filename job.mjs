@@ -25,6 +25,7 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
+import { workerJobVariables } from "./checks.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 
 /**
@@ -117,15 +118,17 @@ export const jobEngineSocketVariables = [
 
 /**
  * The variables a workload's environment may not name: the envelope, the one
- * the core sets from the mounted token, which a value here would shadow, and
- * the workspace a job started through chuggy's runtime is checked at, which a
- * value here would move off the one its envelope names.
+ * the core sets from the mounted token, which a value here would shadow, the
+ * workspace a job started through chuggy's runtime is checked at, which a
+ * value here would move off the one its envelope names, and those the core
+ * tells a job's shells which job they are in by, over any value here.
  */
 export const reservedJobVariables = [
   workerTaskVariable,
   "CLAUDE_CODE_OAUTH_TOKEN",
   workerWorkspaceVariable,
   hostJobVariable,
+  ...Object.values(workerJobVariables),
 ];
 
 /**

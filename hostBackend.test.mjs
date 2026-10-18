@@ -14,6 +14,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 
+import { workerJobVariables } from "./checks.mjs";
 import {
   checkedHostBackendSettings,
   hostBackend,
@@ -294,6 +295,18 @@ test("an owner's environment naming what a host job's core or places set is refu
     String(hostEnvironmentRefusal({ TMPDIR: "/var/tmp" })),
     /^TMPDIR is set for every host job/u,
   );
+});
+
+/**
+ * Catches an owner's environment naming a variable a host job's shells are
+ * told which job they are in by, which the core would set over it unseen.
+ */
+test("an owner's environment naming a job's identity is refused by name", () => {
+  for (const name of Object.values(workerJobVariables))
+    assert.equal(
+      hostEnvironmentRefusal({ CI: "1", [name]: "the owner's" }),
+      `${name} is set for every host job, and the owner's environment cannot name it`,
+    );
 });
 
 test("a job past its deadline is killed and named so", async (t) => {
