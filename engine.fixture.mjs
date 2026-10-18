@@ -415,6 +415,9 @@ function labelFilters(argv) {
 }
 
 /**
+ * A `volume inspect`, which answers `null` for the labels of a volume made
+ * with none, as docker does.
+ *
  * @param {FakeEngineState} state
  * @param {string[]} names
  */
@@ -425,7 +428,14 @@ function volumesInspected(state, names) {
       const volume = state.volumes.get(name);
       return volume === undefined
         ? []
-        : [{ Driver: "local", Labels: volume.labels, Name: name }];
+        : [
+            {
+              Driver: "local",
+              Labels:
+                Object.keys(volume.labels).length === 0 ? null : volume.labels,
+              Name: name,
+            },
+          ];
     }),
   )}\n`;
   return absent === undefined

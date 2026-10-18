@@ -2351,20 +2351,43 @@ test("a named volume not there is made labelled as the owner's, and opened to th
   }
 });
 
-test("named volumes their owner made are mounted as they are, and nothing makes or opens one", async (t) => {
-  const context = await harness(t, { volumes: ownerMounts });
-  context.state.volumes.set("cargo", { labels: { "owner.label": "kept" } });
+test("named volumes their owner made, labelled or not, are mounted as they are, and nothing makes or opens one", async (t) => {
+  const context = await harness(t, {
+    volumes: [
+      ...ownerMounts,
+      { source: "npm-cache", target: "/cache/npm", readonly: false },
+    ],
+  });
+  context.state.volumes.set("cargo", { labels: {} });
+  context.state.volumes.set("npm-cache", { labels: { "owner.label": "kept" } });
   const container = await placedThroughRuntime(context);
   assert.ok(container?.volumes?.includes("cargo:/cache/cargo:nocopy"));
+  assert.ok(container?.volumes?.includes("npm-cache:/cache/npm:nocopy"));
   assert.deepEqual(openings(context.state), []);
   assert.ok(
     !context.state.calls.some(
-      ({ argv }) => argv[1] === "create" && argv.at(-1) === "cargo",
+      ({ argv }) =>
+        argv[1] === "create" && argv.includes("io.chuggy.owner-volume"),
     ),
   );
-  assert.deepEqual(context.state.volumes.get("cargo"), {
+  assert.deepEqual(context.state.volumes.get("cargo"), { labels: {} });
+  assert.deepEqual(context.state.volumes.get("npm-cache"), {
     labels: { "owner.label": "kept" },
   });
+});
+
+test("a session mounts no owner's volume and readies none, so one that is not there fails no session", async (t) => {
+  const { backend, state } = await harness(t, { volumes: ownerMounts });
+  state.images.add(image);
+  await backend.place(assignment({ assignment: "ses-1" }), "Session");
+  await backend.settled();
+  assert.ok(state.containers.has(containerName(pool, "ses-1")));
+  assert.ok(
+    !state.calls.some(({ argv }) => argv[0] === "volume"),
+    JSON.stringify(state.calls.map(({ argv }) => argv)),
+  );
+  assert.deepEqual(openings(state), []);
+  assert.equal(state.volumes.size, 0);
 });
 
 test("a job started through no runtime mounts a named volume that is there as it is, and its placement fails, making nothing, where one is not", async (t) => {
