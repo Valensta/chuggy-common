@@ -398,7 +398,12 @@ test("an owner's volume is refused at the container's root, a relative or abnorm
     "/cache/../cargo",
   ])
     assert.deepEqual(ownerVolumesRefused(mountedAt(target)), [abnormalTarget]);
-  for (const target of ["/cache:cargo", "/cache,cargo", "/cache\ncargo"])
+  for (const target of [
+    "/cache:cargo",
+    "/cache,cargo",
+    "/cache\ncargo",
+    "/cache\rcargo",
+  ])
     assert.deepEqual(ownerVolumesRefused(mountedAt(target)), [
       "0.target cannot be named in a mount: it has a comma, a colon or a line break",
     ]);
@@ -421,7 +426,14 @@ test("an owner's volume is a named volume by a name both engines give one, or a 
     ownerVolumesRefused([{ source, target: "/cache/cargo" }]);
   for (const source of ["cargo", "npm.cache-2", "/srv/cargo", "/srv/a b"])
     assert.deepEqual(sourced(source), [], source);
-  for (const source of ["c", "-cargo", "cargo cache", "srv/cargo", "./cargo"])
+  for (const source of [
+    "c",
+    "-cargo",
+    "cargo cache",
+    "cargo:cache",
+    "srv/cargo",
+    "./cargo",
+  ])
     assert.deepEqual(
       sourced(source),
       [
@@ -429,7 +441,7 @@ test("an owner's volume is a named volume by a name both engines give one, or a 
       ],
       source,
     );
-  for (const source of ["/srv/a,b", "/srv/a\nb"])
+  for (const source of ["/srv/a,b", "/srv/a\nb", "/srv/a\rb"])
     assert.deepEqual(sourced(source), [
       "0.source cannot be named in a bind mount: it has a comma or a line break",
     ]);
