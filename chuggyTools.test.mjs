@@ -804,6 +804,50 @@ test("a write is written in the versioned media type the API requires", async ()
   });
 });
 
+/** A draft's version starts at one, so a fence at zero is one no draft ever had. */
+test("a draft fenced at version zero is refused before any call, and one at version one is asked", async () => {
+  const revision = {
+    ticket: 4,
+    configurationRevision: "r1",
+    authoring: { dependencies: [] },
+    brief: { title: "t" },
+  };
+  for (const [name, args] of [
+    ["revise_draft", revision],
+    ["delete_draft", { ticket: 4 }],
+  ]) {
+    const refused = toolsOf();
+    const asked = toolsOf();
+
+    const answer = await refused.call(name, { ...args, expectedVersion: 0 });
+    await asked.call(name, { ...args, expectedVersion: 1 });
+
+    assert.equal(answer.isError, true, name);
+    assert.equal(refused.api.calls.length, 0, `${name} asked at version 0`);
+    assert.equal(asked.api.calls.length, 1, `${name} refused version 1`);
+  }
+});
+
+/**
+ * The fence is a value the session reads off an answer, so the parameter says
+ * which answer and which field: a session that fenced on the ticket's own
+ * `version` would be refused at every write.
+ */
+test("a draft write's expected version says it is the draft's authoringVersion, from one, and what a stale one answers", () => {
+  for (const name of ["revise_draft", "delete_draft"]) {
+    const tool = chuggyProjectTools.find((held) => held.name === name);
+    const described = tool?.shape(z).expectedVersion?.description ?? "";
+
+    for (const said of [
+      /draft's `authoringVersion`/,
+      /read_draft/,
+      /a new draft is at 1/,
+      /refused with the draft's `currentVersion`/,
+    ])
+      assert.match(described, said, name);
+  }
+});
+
 test("a write names the media type only when it sends a body", async () => {
   const { api, call } = toolsOf();
 

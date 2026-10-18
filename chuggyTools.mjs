@@ -128,6 +128,9 @@ const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, re
  */
 const chuggySubmissionDescription = `Answers the operation's id and its \`state\`; read_operation answers what it did, a refusal's \`code\` included. The same call again in the same turn is the same operation, answered as it now stands: a \`state\` other than Pending is the outcome it already settled on, not a new attempt.`;
 
+/** What a draft write is fenced on, which is a field of the draft and not of its ticket. */
+const chuggyExpectedVersionDescription = `The draft's \`authoringVersion\`, as read_draft answers it or as the write that last changed the draft did; a new draft is at 1. A stale one is refused with the draft's \`currentVersion\`.`;
+
 /** What a refusal ledger holds, which is what an empty one is read against. */
 const chuggyRefusalLedgerDescription = `A refusal ledger holds the lead's refusals to dispatch a released ticket and their lifts, and nothing else, so it is empty until the lead refuses one. A refused command is never in it: read_operation answers a refused release or revocation, and a refused draft write is answered by that write itself.`;
 
@@ -405,6 +408,8 @@ function submit(context, mutation) {
 const ticket = (z) => z.number().int().min(1);
 const limit = (z, max) => z.number().int().min(1).max(max).optional();
 const count = (z) => z.number().int().min(0);
+/** A draft's authoring version, which a new draft starts at. */
+const authoringVersion = (z) => z.number().int().min(1);
 const identity = (z) => z.string().min(1).max(256);
 /** A position in a mailbox, which is counted from one and never from zero. */
 const ordinal = (z) => z.number().int().min(1);
@@ -697,10 +702,12 @@ export const chuggyProjectTools = [
   },
   {
     name: "revise_draft",
-    description: `Replaces one open draft's authoring, brief and selection, fenced on the version read. ${chuggyBriefDescription} The brief is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
+    description: `Replaces one open draft's authoring, brief and selection, fenced on \`expectedVersion\`. ${chuggyBriefDescription} The brief is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
     shape: (z) => ({
       ticket: ticket(z),
-      expectedVersion: count(z),
+      expectedVersion: authoringVersion(z).describe(
+        chuggyExpectedVersionDescription,
+      ),
       configurationRevision: identity(z),
       authoring: anyObject(z),
       brief: anyObject(z),
@@ -726,8 +733,13 @@ export const chuggyProjectTools = [
   },
   {
     name: "delete_draft",
-    description: "Deletes one open draft, fenced on the version read.",
-    shape: (z) => ({ ticket: ticket(z), expectedVersion: count(z) }),
+    description: "Deletes one open draft, fenced on `expectedVersion`.",
+    shape: (z) => ({
+      ticket: ticket(z),
+      expectedVersion: authoringVersion(z).describe(
+        chuggyExpectedVersionDescription,
+      ),
+    }),
     call: (context, args) =>
       write(
         context,
