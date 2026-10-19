@@ -18,6 +18,7 @@ export const decidingVariables = [
   "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
   "ANTHROPIC_AWS_API_KEY",
   "CLAUDE_CODE_HOST_CREDS_FILE",
+  "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
   // The providers' selectors and the names they are addressed by.
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",

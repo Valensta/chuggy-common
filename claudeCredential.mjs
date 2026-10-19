@@ -46,11 +46,12 @@ export const claudeCredentialVariable = "CHUG_WORKER_CLAUDE_CREDENTIAL";
 
 /**
  * Every variable Claude Code chooses a provider, a credential or an endpoint
- * by: the credentials, and the file a host may name more of them in, which
- * Claude Code reads into its own environment at start; the providers'
- * selectors and the names they are addressed by; the switches that skip a
- * provider's own authentication; and the endpoints a request is sent to and
- * the headers and socket it is sent with.
+ * by: the credentials, the variable a host names its own in, and the file a
+ * host may name more of them in, which Claude Code reads into its own
+ * environment at start; the providers' selectors and the names they are
+ * addressed by; the switches that skip a provider's own authentication; and
+ * the endpoints a request is sent to and the headers and socket it is sent
+ * with.
  */
 export const claudeCredentialVariables = [
   claudeCredentialVariable,
@@ -62,6 +63,7 @@ export const claudeCredentialVariables = [
   "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
   "ANTHROPIC_AWS_API_KEY",
   "CLAUDE_CODE_HOST_CREDS_FILE",
+  "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
