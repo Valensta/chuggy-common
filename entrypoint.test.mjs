@@ -53,11 +53,12 @@ import {
   claudeEnvironment,
   prepareClaudeShell,
 } from "./claude.mjs";
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
-  claudeCredentialProviderVariables,
-  claudeCredentialVariable,
-  claudeCredentialVariables,
-} from "./claudeCredential.mjs";
+  decidingFor,
+  strayEnvironment,
+  strayLeftFor,
+} from "./claudeCredential.fixture.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
   envelopeLaunch,
@@ -2468,13 +2469,6 @@ async function credentialAttempt(t, credential, holds, summary) {
   };
 }
 
-/** A runner's environment that names a credential and a provider of its own. */
-const strayProvider = {
-  ANTHROPIC_API_KEY: "sk-ant-api03-a-key-the-runner-left-set",
-  CLAUDE_CODE_USE_BEDROCK: "1",
-  AWS_ACCESS_KEY_ID: "AKIARUNNERLEFTTHISSET",
-};
-
 /**
  * Catches a site pool's agent, whose runner names no kind of credential,
  * started on anything but the environment every agent was before a kind
@@ -2486,7 +2480,7 @@ test("an agent whose runner names no kind of credential is started as every agen
   const run = await credentialAttempt(
     t,
     `${secret}\n`,
-    strayProvider,
+    strayEnvironment,
     "CLAUDE_CODE_OAUTH_TOKEN",
   );
 
@@ -2495,8 +2489,9 @@ test("an agent whose runner names no kind of credential is started as every agen
     ...claudeEnvironment,
     CLAUDE_CODE_OAUTH_TOKEN: secret,
   });
-  for (const [name, value] of Object.entries(strayProvider))
-    assert.equal(run.environment[name], value, name);
+  for (const [name, value] of Object.entries(strayEnvironment))
+    if (name !== "CLAUDE_CODE_OAUTH_TOKEN")
+      assert.equal(run.environment[name], value, name);
   assert.ok(run.reported);
   assert.ok(!run.sent.includes(secret));
 });
@@ -2513,8 +2508,7 @@ test("an agent whose runner names its kind is started on that credential alone, 
     t,
     `[chuggy]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = ${awsSecret}\n`,
     {
-      ...strayProvider,
-      CLAUDE_CODE_OAUTH_TOKEN: secret,
+      ...strayEnvironment,
       [claudeCredentialVariable]: JSON.stringify({
         kind: "Bedrock",
         region: "us-west-2",
@@ -2526,10 +2520,10 @@ test("an agent whose runner names its kind is started on that credential alone, 
   );
 
   const expected = {
-    ...workerEnvironmentWithout(workerAgentEnvironment(process.env), [
-      ...claudeCredentialVariables,
-      ...claudeCredentialProviderVariables("Bedrock"),
-    ]),
+    ...workerEnvironmentWithout(
+      workerAgentEnvironment(process.env),
+      decidingFor("Bedrock"),
+    ),
     ...claudeEnvironment,
     CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
     CLAUDE_CODE_USE_BEDROCK: "1",
@@ -2539,13 +2533,8 @@ test("an agent whose runner names its kind is started on that credential alone, 
     DISABLE_TELEMETRY: "1",
   };
   assert.deepEqual(run.environment, expected);
-  for (const name of [
-    "ANTHROPIC_API_KEY",
-    "AWS_ACCESS_KEY_ID",
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    claudeCredentialVariable,
-  ])
-    assert.ok(!Object.hasOwn(run.environment, name), name);
+  assert.deepEqual(strayLeftFor("Bedrock", run.environment), []);
+  assert.ok(!Object.hasOwn(run.environment, claudeCredentialVariable));
   assert.ok(run.reported);
   assert.ok(!run.sent.includes(awsSecret));
   assert.ok(run.sent.includes("[redacted credential]"));

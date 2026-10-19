@@ -14,6 +14,10 @@ import {
   claudeCredentialVariable,
   claudeCredentialVariables,
 } from "./claudeCredential.mjs";
+import {
+  decidingFor,
+  providerDecidingVariables,
+} from "./claudeCredential.fixture.mjs";
 import { credentialScrub } from "./runEvidence.mjs";
 
 /** AWS's own documented example keys, which no account holds. */
@@ -300,6 +304,84 @@ test("every key of every profile of an AWS credentials file is a secret", () => 
 });
 
 /**
+ * Catches an AWS credentials file read otherwise than Claude Code's AWS client
+ * reads it: a comment after a value kept in the value, so the secret the
+ * client uses is never scrubbed; a key whose name is not in lower case
+ * accepted, though the client finds no key there and falls through to
+ * whatever else the machine holds; or a `[profile name]` heading read as
+ * the profile `name`, which in a credentials file it is not: the client names
+ * it `profile.name`; or a key indented under one with no value read as the
+ * profile's own, which the client reads as that key's.
+ */
+test("an AWS credentials file is read as Claude Code's AWS client reads it", () => {
+  const setting = { kind: "Bedrock", region: "us-west-2", profile: "chuggy" };
+  const commented = [
+    "[chuggy]",
+    `aws_access_key_id = ${awsKeyId} ; the owner's`,
+    `aws_secret_access_key = ${awsSecret} # rotated 2026-10`,
+    `aws_session_token = ${awsSessionToken}#not-a-comment`,
+  ].join("\n");
+  assert.equal(claudeCredentialRefusal(setting, commented, "/f"), undefined);
+  assert.deepEqual(
+    claudeCredentialSecrets(setting, commented).toSorted(),
+    [awsKeyId, awsSecret, `${awsSessionToken}#not-a-comment`].toSorted(),
+  );
+  assert.equal(
+    credentialScrub(claudeCredentialSecrets(setting, commented))(
+      `printed ${awsSecret}`,
+    ),
+    "printed [redacted credential]",
+  );
+
+  const upper = `[chuggy]\nAWS_ACCESS_KEY_ID = ${awsKeyId}\nAWS_SECRET_ACCESS_KEY = ${awsSecret}`;
+  assert.equal(
+    claudeCredentialRefusal(setting, upper, "/f"),
+    "the AWS credentials file /f gives its [chuggy] profile no aws_access_key_id; give its [chuggy] profile an access key's aws_access_key_id and aws_secret_access_key",
+  );
+  assert.deepEqual(
+    claudeCredentialSecrets(setting, upper).toSorted(),
+    [awsKeyId, awsSecret].toSorted(),
+  );
+
+  for (const heading of [
+    "[profile chuggy]",
+    "[ chuggy ]",
+    "[__proto__]\n[chuggy]",
+  ])
+    assert.match(
+      claudeCredentialRefusal(
+        setting,
+        `${heading}\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
+        "/f",
+      ) ?? "",
+      /^the AWS credentials file \/f has no \[chuggy\] profile; /u,
+      heading,
+    );
+  const nested = `[chuggy]\naws_access_key_id = ${awsKeyId}\nservice =\n  aws_secret_access_key = ${awsSecret}`;
+  assert.match(
+    claudeCredentialRefusal(setting, nested, "/f") ?? "",
+    /gives its \[chuggy\] profile no aws_secret_access_key; /u,
+  );
+  assert.ok(claudeCredentialSecrets(setting, nested).includes(awsSecret));
+  assert.equal(
+    claudeCredentialRefusal(
+      setting,
+      `[chuggy]\nservice =\n  region = us-west-2\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
+      "/f",
+    ),
+    undefined,
+  );
+  assert.equal(
+    claudeCredentialRefusal(
+      { ...setting, profile: "profile.chuggy" },
+      `[profile chuggy]\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
+      "/f",
+    ),
+    undefined,
+  );
+});
+
+/**
  * Catches a service account's key surviving a scrub where it is printed as the
  * file writes it, as JSON escapes it, or as its PEM, whole or a line at a time.
  */
@@ -376,17 +458,30 @@ test("each kind sets its provider's selector, where it is, and its secret where 
   });
 });
 
-/** Catches a kind setting a variable it does not also withhold, which a runner's environment could then name first. */
-test("every variable a kind sets is one withheld beside it", () => {
+/**
+ * Catches a variable that decides which credential Claude Code runs on, or
+ * where it sends it, left out of what a named kind withholds: a credential, a
+ * selector, a switch, a base URL, a header or a socket the runner's
+ * environment named would then be in force beside the kind. The names are the
+ * fixture's, written out apart from this module's.
+ */
+test("a kind named withholds every variable that decides, and a cloud provider's own only where it is the kind", () => {
   for (const { setting } of configured) {
     const withheld = [
       ...claudeCredentialVariables,
       ...claudeCredentialProviderVariables(setting.kind),
     ];
-    for (const name of Object.keys(
-      claudeCredentialEnvironment(setting, apiKey, "/mounted"),
-    ))
-      if (name !== "DISABLE_TELEMETRY")
-        assert.ok(withheld.includes(name), `${setting.kind} sets ${name}`);
+    assert.deepEqual(
+      decidingFor(setting.kind).filter((name) => !withheld.includes(name)),
+      [],
+      setting.kind,
+    );
+    for (const [provider, names] of Object.entries(providerDecidingVariables))
+      if (provider !== setting.kind)
+        assert.deepEqual(
+          names.filter((name) => withheld.includes(name)),
+          [],
+          `${setting.kind} withholds ${provider}'s`,
+        );
   }
 });

@@ -13,13 +13,16 @@
  * none, and a core told none runs Claude Code as it always has: on the file as
  * a subscription's token, over its environment untouched.
  *
- * A KIND NAMED IS THE ONLY ONE IN FORCE. Claude Code takes the first credential
- * it finds of a cloud provider's, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`,
- * and `CLAUDE_CODE_OAUTH_TOKEN`, so a variable a runner's environment left in
- * would outrank the kind named or be outranked by it. Every variable Claude
- * Code chooses a provider or a credential by is withheld, and the kind's own
- * are set. The names are Claude Code's own lists at the version chuggy pins;
- * a provider a later version adds is one more to withhold.
+ * A KIND NAMED IS THE ONLY ONE IN FORCE, AT ITS PROVIDER'S OWN ENDPOINT.
+ * Claude Code takes the first credential it finds of a cloud provider's,
+ * `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, and `CLAUDE_CODE_OAUTH_TOKEN`,
+ * so a variable a runner's environment left in would outrank the kind named or
+ * be outranked by it, and it sends that credential wherever a base URL, a
+ * socket or a header the environment names sends it. Every variable Claude Code
+ * chooses a provider, a credential or an endpoint by is withheld, and the
+ * kind's own are set. The names are Claude Code's own lists at the version
+ * chuggy pins; a provider or endpoint a later version adds is one more to
+ * withhold.
  *
  * `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` IS SET BESIDE EVERY KIND. It is
  * Claude Code's own for a host that embeds it and routes its provider, and
@@ -42,9 +45,11 @@ import { z } from "zod";
 export const claudeCredentialVariable = "CHUG_WORKER_CLAUDE_CREDENTIAL";
 
 /**
- * Every variable Claude Code chooses a provider or a credential by: the
- * credentials, the providers' selectors and the names they are addressed by,
- * and the switches that skip a provider's own authentication.
+ * Every variable Claude Code chooses a provider, a credential or an endpoint
+ * by: the credentials, the providers' selectors and the names they are
+ * addressed by, the switches that skip a provider's own authentication, and
+ * the endpoints a request is sent to and the headers and socket it is sent
+ * with.
  */
 export const claudeCredentialVariables = [
   claudeCredentialVariable,
@@ -75,12 +80,30 @@ export const claudeCredentialVariables = [
   "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
   "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
   "CLAUDE_CODE_SKIP_MANTLE_AUTH",
+  "ANTHROPIC_BASE_URL",
+  "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+  "ANTHROPIC_BEDROCK_BASE_URL",
+  "ANTHROPIC_VERTEX_BASE_URL",
+  "ANTHROPIC_FOUNDRY_BASE_URL",
+  "ANTHROPIC_AWS_BASE_URL",
+  "ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
+  "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+  "CLAUDE_CODE_ARTIFACTS_API_BASE_URL",
+  "CLAUDE_CODE_ARTIFACTS_API_TOKEN",
+  "CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
+  "CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL",
+  "CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL",
+  "CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
+  "CLAUDE_CODE_MEMORY_API_BASE_URL",
+  "CLAUDE_CODE_MEMORY_API_TOKEN",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_UNIX_SOCKET",
 ];
 
 /**
- * The variables a cloud provider's own client reads its credential and its
- * place by, which are a project's as much as Claude Code's, so they are
- * withheld only where that provider is the kind named.
+ * The variables a cloud provider's own client reads its credential, its place
+ * and its endpoints by, which are a project's as much as Claude Code's, so
+ * they are withheld only where that provider is the kind named.
  */
 const claudeCredentialSharedVariables = {
   Bedrock: [
@@ -94,10 +117,25 @@ const claudeCredentialSharedVariables = {
     "AWS_ROLE_ARN",
     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
     "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_BEDROCK",
+    "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+    "AWS_ENDPOINT_URL_STS",
+    "AWS_ENDPOINT_URL_SSO",
+    "AWS_ENDPOINT_URL_SSO_OIDC",
   ],
-  Vertex: ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT"],
+  Vertex: [
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_QUOTA_PROJECT",
+    "GCLOUD_PROJECT",
+  ],
 };
 
 /**
@@ -381,32 +419,54 @@ const awsKeyNames = [
   "aws_security_token",
 ];
 
+/** A section heading an AWS file's type prefixes, as `[profile name]` does. */
+const awsPrefixedSection = /^([\w-]+)\s(["'])?([\w@+.%:/-]+)\2$/u;
+
 /**
- * Each profile of an AWS credentials file and its keys, read as the AWS
- * clients read one: `[name]` heads a profile, `key = value` sets a key in it,
- * and a line beginning `#` or `;` is a comment.
+ * Each section of an AWS credentials file and its keys, read by the rules of
+ * the parser Claude Code's AWS client reads one by, which are not every INI
+ * parser's: a line is cut at a `;` or `#` that begins it or follows a space;
+ * `[name]` heads a section named exactly what is between the brackets, `[]`
+ * none, and a heading prefixed `profile`, `sso-session` or `services` one
+ * named `type.name`; a key's name keeps its case; a key with no value opens a
+ * subsection, whose indented keys are named `key.name`; and a file naming a
+ * `__proto__` profile is read as holding none.
  *
  * @param {string} text
  * @returns {Map<string, Map<string, string>>}
  */
 function awsProfiles(text) {
   const profiles = new Map();
-  let current;
+  let section;
+  let subsection;
   for (const raw of text.split(/\r?\n/u)) {
-    const line = raw.trim();
-    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
-    const section = /^\[\s*(.*?)\s*\]$/u.exec(line);
-    if (section !== null) {
-      current = profiles.get(section[1]) ?? new Map();
-      profiles.set(section[1], current);
+    const line = raw.split(/(?:^|\s)[;#]/u)[0].trim();
+    if (line.startsWith("[") && line.endsWith("]")) {
+      const name = line.slice(1, -1);
+      if (["__proto__", "profile __proto__"].includes(name)) return new Map();
+      const prefixed = awsPrefixedSection.exec(name);
+      section =
+        prefixed === null
+          ? name
+          : ["profile", "sso-session", "services"].includes(prefixed[1])
+            ? `${prefixed[1]}.${prefixed[3]}`
+            : undefined;
+      subsection = undefined;
       continue;
     }
     const equals = line.indexOf("=");
-    if (current !== undefined && equals > 0)
-      current.set(
-        line.slice(0, equals).trim().toLowerCase(),
-        line.slice(equals + 1).trim(),
-      );
+    if (section === undefined || section === "" || equals <= 0) continue;
+    const key = line.slice(0, equals).trim();
+    const value = line.slice(equals + 1).trim();
+    if (value === "") {
+      subsection = key;
+      continue;
+    }
+    if (subsection !== undefined && raw.trimStart() === raw)
+      subsection = undefined;
+    const keys = profiles.get(section) ?? new Map();
+    profiles.set(section, keys);
+    keys.set(subsection === undefined ? key : `${subsection}.${key}`, value);
   }
   return profiles;
 }
@@ -483,9 +543,9 @@ export function claudeCredentialRefusal(setting, text, file) {
 
 /**
  * Every secret a setting's file holds, each as it would be written: the value
- * of a file that is one; each key of every profile of an AWS credentials file;
- * and a service account's private key, whole, as its JSON writes it, line by
- * line, and its ID.
+ * of a file that is one; each access key in every section of an AWS
+ * credentials file, whatever the case of its name; and a service account's
+ * private key, whole, as its JSON writes it, line by line, and its ID.
  *
  * @param {ClaudeCredentialSetting} setting
  * @param {string} text the file's contents, trimmed
@@ -507,10 +567,11 @@ export function claudeCredentialSecrets(setting, text) {
     ];
   }
   return [...awsProfiles(text).values()].flatMap((keys) =>
-    awsKeyNames.flatMap((name) => {
-      const value = keys.get(name);
-      return value === undefined || value === "" ? [] : [value];
-    }),
+    [...keys].flatMap(([name, value]) =>
+      awsKeyNames.includes(name.slice(name.lastIndexOf(".") + 1).toLowerCase())
+        ? [value]
+        : [],
+    ),
   );
 }
 

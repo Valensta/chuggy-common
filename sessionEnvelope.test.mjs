@@ -13,6 +13,7 @@ import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 import { workerImageVariable } from "./checks.mjs";
 import { claudeEnvironment } from "./claude.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
+import { strayEnvironment, strayLeftFor } from "./claudeCredential.fixture.mjs";
 import { poolHeldSessionAnswer as answer } from "./envelope.fixture.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { sessionEnvelopeServices } from "./session.mjs";
@@ -170,13 +171,6 @@ test("an envelope's session leaves the envelope out of the runtime's environment
   );
 });
 
-/** A runner's environment that names a credential and a provider of its own. */
-const strayProvider = {
-  ANTHROPIC_API_KEY: "sk-ant-api03-a-key-the-runner-left-set",
-  CLAUDE_CODE_USE_BEDROCK: "1",
-  AWS_ACCESS_KEY_ID: "AKIARUNNERLEFTTHISSET",
-};
-
 /**
  * Catches a site pool's session, whose runner names no kind of credential,
  * opened on anything but the environment every session was before a kind
@@ -184,7 +178,7 @@ const strayProvider = {
  * the run's switches over it, and where its configuration is.
  */
 test("an envelope's session whose runner names no kind of credential is opened as every session was before one could be named", async () => {
-  const runner = { ...site, ...strayProvider };
+  const runner = { ...site, ...strayEnvironment };
   const ran = await envelopeRun(answer, runner);
 
   assert.equal(ran.code, 0, ran.warned.join(""));
@@ -208,8 +202,7 @@ test("an envelope's session whose runner names its kind is opened on that creden
     answer,
     {
       ...site,
-      ...strayProvider,
-      CLAUDE_CODE_OAUTH_TOKEN: token,
+      ...strayEnvironment,
       [claudeCredentialVariable]: JSON.stringify({ kind: "ApiKey" }),
     },
     `${key}\n`,
@@ -219,14 +212,15 @@ test("an envelope's session whose runner names its kind is opened on that creden
   const { env } = ran.seen.options;
   assert.equal(env.ANTHROPIC_API_KEY, key);
   assert.equal(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST, "1");
+  assert.deepEqual(strayLeftFor("ApiKey", env), []);
   for (const name of [
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
+    "ANTHROPIC_BASE_URL",
     claudeCredentialVariable,
   ])
     assert.ok(!Object.hasOwn(env, name), name);
   assert.equal(env.SITE_VARIABLE, site.SITE_VARIABLE);
-  assert.equal(env.AWS_ACCESS_KEY_ID, strayProvider.AWS_ACCESS_KEY_ID);
+  assert.equal(env.AWS_ACCESS_KEY_ID, strayEnvironment.AWS_ACCESS_KEY_ID);
 });
 
 /** Catches a named kind's file of the wrong shape opened as a session rather than refused, naming the file. */

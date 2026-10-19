@@ -25,11 +25,12 @@ import {
   claudeShellScript,
   prepareClaudeShell,
 } from "./claude.mjs";
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
-  claudeCredentialProviderVariables,
-  claudeCredentialVariable,
-  claudeCredentialVariables,
-} from "./claudeCredential.mjs";
+  decidingVariables,
+  strayEnvironment,
+  strayLeftFor,
+} from "./claudeCredential.fixture.mjs";
 import { agentShells, posixShells } from "./shells.fixture.mjs";
 
 /** Catches a job's agent moving a long command to the background, where the headless run kills it unseen. */
@@ -273,20 +274,6 @@ test("a Claude run's shell script is under HOME where none is named", async (t) 
 const token = "sk-ant-oat01-exampleexampleexample";
 const key = "sk-ant-api03-exampleexampleexample";
 
-/**
- * A runner's environment holding a stray value of every variable Claude Code
- * picks a provider or a credential by, and of each provider's own.
- */
-const stray = Object.fromEntries(
-  [
-    ...claudeCredentialVariables,
-    ...claudeCredentialProviderVariables("Bedrock"),
-    ...claudeCredentialProviderVariables("Vertex"),
-  ]
-    .filter((name) => name !== claudeCredentialVariable)
-    .map((name) => [name, `stray-value-of-${name}`]),
-);
-
 /** Claude Code's environment as a run composes it: the inherited less what is withheld, then the credential's. */
 function composed(inherited, prepared) {
   return {
@@ -307,7 +294,7 @@ function composed(inherited, prepared) {
 test("where no kind is named, a Claude run's credential is a subscription's token over an untouched environment", () => {
   const prepared = claudeCredentialPrepared(token, {
     path: "/var/run/chuggy/credentials/claude-code",
-    environment: stray,
+    environment: strayEnvironment,
   });
 
   assert.deepEqual(prepared, {
@@ -364,34 +351,28 @@ const namedKinds = [
 
 /**
  * Catches a variable a runner's environment left in deciding which credential
- * Claude Code runs on: a token beside a key, which the key would outrank, a
- * key beside a token, which would outrank it, and a provider's selector beside
- * either.
+ * Claude Code runs on or where it sends it: a token beside a key, which the
+ * key would outrank, a key beside a token, which would outrank it, a
+ * provider's selector beside either, and a base URL, a header or a socket
+ * that would send the kind's credential elsewhere. The names are the
+ * fixture's, written out apart from the module's.
  */
-test("a kind named is the only credential in force, whatever the runner's environment left", () => {
+test("a kind named is the only credential in force, at its provider's own endpoint, whatever the runner's environment left", () => {
   for (const [setting, text, set] of namedKinds) {
     const environment = composed(
-      { ...stray, PATH: "/usr/bin" },
+      { ...strayEnvironment, PATH: "/usr/bin" },
       claudeCredentialPrepared(text, {
         path: "/mounted",
         environment: {
-          ...stray,
+          ...strayEnvironment,
           [claudeCredentialVariable]: JSON.stringify(setting),
         },
       }),
     );
-    const decides = [
-      ...claudeCredentialVariables,
-      ...claudeCredentialProviderVariables(setting.kind),
-    ];
-    const leftover = Object.entries(environment).filter(
-      ([name, value]) =>
-        decides.includes(name) && value.startsWith("stray-value-of-"),
-    );
-    assert.deepEqual(leftover, [], setting.kind);
+    assert.deepEqual(strayLeftFor(setting.kind, environment), [], setting.kind);
     for (const [name, value] of Object.entries(set))
       assert.equal(environment[name], value, `${setting.kind} ${name}`);
-    for (const name of claudeCredentialVariables)
+    for (const name of decidingVariables)
       if (!Object.hasOwn(set, name))
         assert.ok(!(name in environment), `${setting.kind} kept ${name}`);
     assert.equal(environment.PATH, "/usr/bin");
