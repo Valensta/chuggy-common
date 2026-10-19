@@ -8,6 +8,7 @@ import {
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   jobEngineSocketEnvironment,
   jobEngineSocketVariables,
@@ -131,6 +132,7 @@ test("each variable a job is handed by the runner or its core is reserved", () =
     [
       workerTaskVariable,
       "CLAUDE_CODE_OAUTH_TOKEN",
+      claudeCredentialVariable,
       workerWorkspaceVariable,
       "CHUGGY_HOST_JOB",
       "CHUG_TENANT",

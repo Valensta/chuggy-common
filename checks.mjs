@@ -278,6 +278,18 @@ export function workerAgentEnvironment(environment) {
 }
 
 /**
+ * `environment` less each of `names`.
+ *
+ * @param {Readonly<Record<string, string | undefined>>} environment
+ * @param {readonly string[]} names
+ */
+export function workerEnvironmentWithout(environment, names) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !names.includes(name)),
+  );
+}
+
+/**
  * Where the core keeps a file of its own: the temporary directory, named as a
  * job's `check.sh` names the one it found this user can write.
  */

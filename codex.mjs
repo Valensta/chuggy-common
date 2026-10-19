@@ -236,7 +236,7 @@ export const codexAgent = {
   credential: "codex-auth",
   invocation: codexInvocation,
   result: codexResult,
-  prepareCredential: prepareCodexCredential,
+  prepareCredential: (auth) => prepareCodexCredential(auth),
   prepareShell: prepareCodexShell,
   prepareEnvironment: prepareCodexEnvironment,
   configuration: codexConfiguration,

@@ -42,6 +42,7 @@ import {
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
+import { credentialScrub } from "./runEvidence.mjs";
 import { leadRoster, threadRoster } from "./sessionHarness.fixture.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 
@@ -1480,6 +1481,63 @@ test("an origination without the fence the route requires never reaches it", asy
 
 /** A catalog selection, which a draft on a catalog carries to the route as it was given. */
 const selection = { work: "build-sonnet", evaluation: "standard" };
+
+/**
+ * Catches a secret the model read in its shell sent onward by a project tool:
+ * in a body, a path, a query or a key the shape lets through, or the
+ * operation minted from what was asked rather than from what was sent, so two
+ * calls the API sees as one would be two operations.
+ */
+test("what a project tool sends is scrubbed of the session's secrets, and its operation minted from what is sent", async () => {
+  const held = "AKIAIOSFODNN7EXAMPLE-wJalrXUtnFEMI";
+  const scrub = credentialScrub([held]);
+  const { api, call, context } = toolsOf({ scrub });
+  const redacted = scrub(held);
+
+  await call("release_draft", {
+    ticket: 4,
+    authoringVersion: 3,
+    configurationRevision: `r-${held}`,
+  });
+  await call("release_draft", {
+    ticket: 4,
+    authoringVersion: 3,
+    configurationRevision: `r-${redacted}`,
+  });
+  await call("read_configuration", { revision: held });
+  await call("list_tickets", { phase: [held] });
+  await chuggyToolDefinitions(context)
+    .find(({ name }) => name === "create_draft")
+    .call({ ...origination, brief: { title: "t", [held]: held } });
+
+  assert.equal(api.calls.length, 5);
+  for (const { path, init } of api.calls) {
+    assert.ok(!path.includes(held), path);
+    assert.ok(!String(init?.body ?? "").includes(held), path);
+  }
+  const [sent, again] = api.calls.map(({ init }) =>
+    JSON.parse(init?.body ?? "{}"),
+  );
+  assert.equal(
+    sent.mutation.configurationRevision,
+    `r-${redacted}`,
+    "the release sent was not the scrubbed one",
+  );
+  assert.equal(sent.operation, again.operation);
+  assert.ok(
+    api.calls[2].path.endsWith(
+      `/configurations/${encodeURIComponent(redacted)}`,
+    ),
+  );
+  assert.deepEqual(
+    new URL(api.calls[3].path, "https://api.test").searchParams.getAll("phase"),
+    [redacted],
+  );
+  assert.deepEqual(JSON.parse(api.calls[4].init.body).brief, {
+    title: "t",
+    [redacted]: redacted,
+  });
+});
 
 test("a draft filed or revised with a selection carries it to the route, and one without carries none", async () => {
   const { api, call } = toolsOf();

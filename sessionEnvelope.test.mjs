@@ -11,6 +11,9 @@ import {
 import { poolEnvelopeSchema } from "@chuggy/worker-contract/workerTask";
 
 import { workerImageVariable } from "./checks.mjs";
+import { claudeEnvironment } from "./claude.mjs";
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
+import { strayEnvironment, strayLeftFor } from "./claudeCredential.fixture.mjs";
 import { poolHeldSessionAnswer as answer } from "./envelope.fixture.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { sessionEnvelopeServices } from "./session.mjs";
@@ -75,8 +78,16 @@ function sessionPlane() {
   };
 }
 
-/** The envelope's session run to its end, with what it read, reached and was opened with. */
-async function envelopeRun(launched = answer) {
+/**
+ * The envelope's session run to its end from `runner`'s environment, its
+ * credential file holding `mounted`, with what it read, reached and was opened
+ * with.
+ */
+async function envelopeRun(
+  launched = answer,
+  runner = site,
+  mounted = `${token}\n`,
+) {
   const plane = sessionPlane();
   const reads = [];
   const api = [];
@@ -90,10 +101,10 @@ async function envelopeRun(launched = answer) {
     result("success", { result: "read" }),
   ]);
   const code = await run({
-    ...sessionEnvelopeServices(envelope, launched, site),
+    ...sessionEnvelopeServices(envelope, launched, runner),
     read: async (path) => {
       reads.push(path);
-      return `${token}\n`;
+      return mounted;
     },
     warn: (text) => warned.push(text),
     request: plane.request,
@@ -157,6 +168,77 @@ test("an envelope's session leaves the envelope out of the runtime's environment
   assert.equal(
     options.env[sessionConfigDirectoryVariable],
     join(envelope.workspace, ".claude"),
+  );
+});
+
+/**
+ * Catches a site pool's session, whose runner names no kind of credential,
+ * opened on anything but the environment every session was before a kind
+ * could be named: everything the pod inherited, a subscription's token and
+ * the run's switches over it, and where its configuration is.
+ */
+test("an envelope's session whose runner names no kind of credential is opened as every session was before one could be named", async () => {
+  const runner = { ...site, ...strayEnvironment };
+  const ran = await envelopeRun(answer, runner);
+
+  assert.equal(ran.code, 0, ran.warned.join(""));
+  assert.deepEqual(ran.seen.options.env, {
+    ...sessionEnvelopeServices(envelope, answer, runner).environment,
+    ...claudeEnvironment,
+    CLAUDE_CODE_OAUTH_TOKEN: token,
+    [sessionConfigDirectoryVariable]: join(envelope.workspace, ".claude"),
+  });
+});
+
+/**
+ * Catches a credential the runner's environment left reaching a session whose
+ * runner named its kind, or the kind's own secret not where Claude Code reads
+ * it. An AWS key stays, the runner's for its own tools: with no provider
+ * selected, Claude Code reads none.
+ */
+test("an envelope's session whose runner names its kind is opened on that credential alone", async () => {
+  const key = "sk-ant-api03-the-owner-s-own-key-0123";
+  const ran = await envelopeRun(
+    answer,
+    {
+      ...site,
+      ...strayEnvironment,
+      [claudeCredentialVariable]: JSON.stringify({ kind: "ApiKey" }),
+    },
+    `${key}\n`,
+  );
+
+  assert.equal(ran.code, 0, ran.warned.join(""));
+  const { env } = ran.seen.options;
+  assert.equal(env.ANTHROPIC_API_KEY, key);
+  assert.equal(env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST, "1");
+  assert.deepEqual(strayLeftFor("ApiKey", env), []);
+  for (const name of [
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    claudeCredentialVariable,
+  ])
+    assert.ok(!Object.hasOwn(env, name), name);
+  assert.equal(env.SITE_VARIABLE, site.SITE_VARIABLE);
+  assert.equal(env.AWS_ACCESS_KEY_ID, strayEnvironment.AWS_ACCESS_KEY_ID);
+});
+
+/** Catches a named kind's file of the wrong shape opened as a session rather than refused, naming the file. */
+test("an envelope's session whose credential file is not its kind's is refused before it opens", async () => {
+  const ran = await envelopeRun(
+    answer,
+    {
+      ...site,
+      [claudeCredentialVariable]: JSON.stringify({ kind: "ApiKey" }),
+    },
+    "",
+  );
+
+  assert.equal(ran.code, 1);
+  assert.equal(ran.seen.options, undefined);
+  assert.match(
+    ran.warned.join(""),
+    /the Anthropic API key file \/pool\/credentials\/claude-code is empty; /u,
   );
 });
 

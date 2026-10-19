@@ -70,6 +70,11 @@
  * text. No retry, no repair, no hiding a 409. A tool that decided what a refusal
  * meant would be deciding something the API decided.
  *
+ * WHAT A PROJECT TOOL SENDS IS SCRUBBED. Its arguments are the model's, and the
+ * model has read whatever its shell could, so every string of them, a key's
+ * included, has the session's secrets replaced before a path, a query or a
+ * body is made of it, and a command's operation is minted from what is sent.
+ *
  * DERIVED WORK ONLY IS WHAT `DraftAuthor` ADMITS. `file_dependent` files
  * against a parent that already exists and carries it in the draft's
  * dependencies; a roster holding `DraftAuthor` alone cannot originate work.
@@ -913,10 +918,24 @@ export function chuggyToolDefinitions(context) {
   );
   const project = chuggyProjectTools.map((definition) => ({
     ...definition,
-    call: (args) => definition.call(context, args),
+    call: (args) => definition.call(context, scrubbedArguments(args, context)),
   }));
   return [...project, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
+  );
+}
+
+/** `value` with every string in it, each key included, scrubbed of the session's secrets. */
+function scrubbedArguments(value, context) {
+  if (typeof value === "string") return context.scrub(value);
+  if (Array.isArray(value))
+    return value.map((each) => scrubbedArguments(each, context));
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, each]) => [
+      context.scrub(key),
+      scrubbedArguments(each, context),
+    ]),
   );
 }
 
@@ -1024,11 +1043,12 @@ export function chuggyToolServer(context, sdk) {
   });
 }
 
-/** What one session's tools are held in: its task, its bearer, this turn's staging, and where its images are written. */
+/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, and the scrub of what they send. */
 export function chuggyToolContext(task, bearer, services = {}) {
   return {
     task,
     bearer,
+    scrub: services.scrub ?? ((text) => text),
     capabilities: services.capabilities ?? [],
     version: services.version ?? "1",
     request: services.request ?? chuggyRequest,

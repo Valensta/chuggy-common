@@ -87,13 +87,17 @@ import {
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
 
-import { workerGitEnvironment, workerInheritedEnvironment } from "./checks.mjs";
+import {
+  workerEnvironmentWithout,
+  workerGitEnvironment,
+  workerInheritedEnvironment,
+} from "./checks.mjs";
 import {
   chuggyToolContext,
   chuggyToolServer,
   sessionAllowedTools,
 } from "./chuggyTools.mjs";
-import { claudeEnvironment } from "./claude.mjs";
+import { claudeCredentialPrepared } from "./claude.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -162,7 +166,8 @@ const runCommands = rosterLabel(sessionCapabilities, "RunCommands");
 
 /** What each secret this session holds is. */
 const sessionSecretKinds = {
-  token: "the runtime's token",
+  credential: "the runtime's credential",
+  mounted: "a credential the launcher mounted",
   bearer: "the session's bearer",
   minted: "the git credential the plane minted",
   read: "a read the plane minted for another repository",
@@ -565,14 +570,15 @@ function sessionTakesStops(facts) {
  * wrote. `sessionStore.test.mjs` and this module's suite both hold that.
  *
  * `git` is the configuration every git the runtime starts is handed, which is
- * nothing where the session serves no reads.
+ * nothing where the session serves no reads, and `credential` is the runtime's
+ * as `claudeCredentialPrepared` makes it.
  */
 export function sessionQueryOptions(
   task,
   facts,
   store,
   environment,
-  token,
+  credential,
   { servers = {}, checkout, git = [] } = {},
 ) {
   const workspace =
@@ -587,9 +593,8 @@ export function sessionQueryOptions(
     sessionStoreFlush: "eager",
     cwd: checkout?.directory ?? workspace,
     env: {
-      ...environment,
-      ...claudeEnvironment,
-      CLAUDE_CODE_OAUTH_TOKEN: token,
+      ...workerEnvironmentWithout(environment, credential.withheld),
+      ...credential.environment,
       [sessionConfigDirectoryVariable]: sessionConfigDirectory(
         environment,
         workspace,
@@ -844,9 +849,10 @@ async function sessionFacts(context) {
 }
 
 /**
- * Every credential file this pod was mounted, and the agent token among them.
- * The map is read once and handed on, because the checkout resolves its git
- * credential out of the same mounting the runtime's own token came from.
+ * Every credential file this pod was mounted, and the runtime's own among
+ * them, read and prepared as a job's Claude Code's is. The map is read once and
+ * handed on, because the checkout resolves its git credential out of the same
+ * mounting the runtime's own credential came from.
  */
 async function sessionCredentials(environment, read, slot) {
   const files = JSON.parse(
@@ -855,7 +861,12 @@ async function sessionCredentials(environment, read, slot) {
   const path = files[slot];
   if (typeof path !== "string")
     throw new Error(`the session credential ${slot} is not mounted`);
-  return { files, token: (await read(path)).trim() };
+  const text = (await read(path)).trim();
+  return {
+    files,
+    text,
+    credential: claudeCredentialPrepared(text, { path, environment }),
+  };
 }
 
 /**
@@ -901,22 +912,27 @@ async function sessionMintedCredential(task, bearer, request, write) {
 }
 
 /**
- * Every secret this session holds as it starts — the runtime token behind the
- * slot its launcher mounted, the credential the plane minted for the
- * repository it was placed against, and its own bearer — and the scrub over
- * them. `keepSecret` adds a secret arriving later to the scrub every holder of
- * `scrub` and `scrubHead` already has.
+ * Every secret this session holds as it starts — each the runtime's credential
+ * holds and the whole of the file its launcher mounted it in, as a job holds
+ * its own, the credential the plane minted for the repository it was placed
+ * against, and its own bearer — and the scrub over them. `keepSecret` adds a
+ * secret arriving later to the scrub every holder of `scrub` and `scrubHead`
+ * already has.
  */
 async function sessionHeld(context, environment, read, write, facts) {
   const { task, bearer, request } = context;
-  const { files, token } = await sessionCredentials(
+  const { files, text, credential } = await sessionCredentials(
     environment,
     read,
     facts.credentialSlot,
   );
   const minted = await sessionMintedCredential(task, bearer, request, write);
   const { scrub, scrubHead, keepSecret } = credentialScrubbing([
-    { kind: sessionSecretKinds.token, value: token },
+    ...credential.secrets.map((value) => ({
+      kind: sessionSecretKinds.credential,
+      value,
+    })),
+    { kind: sessionSecretKinds.mounted, value: text },
     { kind: sessionSecretKinds.bearer, value: bearer },
     ...(minted === undefined
       ? []
@@ -924,7 +940,7 @@ async function sessionHeld(context, environment, read, write, facts) {
   ]);
   return {
     credentialFiles: files,
-    token,
+    credential,
     minted,
     scrub,
     scrubHead,
@@ -964,6 +980,7 @@ function sessionToolServers(context, facts, environment, services, sdk) {
         version: environment.CHUG_SESSION_IMAGE_VERSION ?? "1",
         turn: () => context.mailbox.claimed()?.turn,
         staging: context.staging,
+        scrub: context.scrub,
         ...(services.chuggyRequest === undefined
           ? {}
           : { request: services.chuggyRequest }),
@@ -1000,7 +1017,7 @@ function sessionStagedMailbox(context, { request, wait: pause, now }) {
  */
 async function sessionRuntime(
   context,
-  { facts, environment, token, checkout, services, git },
+  { facts, environment, credential, checkout, services, git },
 ) {
   const sdk = services.sdk ?? (await sessionSdk());
   return sdk.query({
@@ -1010,7 +1027,7 @@ async function sessionRuntime(
       facts,
       context.store,
       environment,
-      token,
+      credential,
       {
         servers: sessionToolServers(context, facts, environment, services, sdk),
         ...(checkout === undefined ? {} : { checkout }),
@@ -1231,7 +1248,7 @@ export async function sessionMain(services = {}) {
     };
     const facts = await sessionFacts(context);
     const held = await sessionHeld(context, environment, read, write, facts);
-    const { credentialFiles, token, minted, scrubHead, keepSecret } = held;
+    const { credentialFiles, credential, minted, scrubHead, keepSecret } = held;
     scrub = held.scrub;
     Object.assign(context, { scrub, scrubHead, keepSecret });
     const workspace =
@@ -1251,7 +1268,7 @@ export async function sessionMain(services = {}) {
     );
     return await sessionRun(context, facts, {
       environment,
-      token,
+      credential,
       checkout,
       services,
       pause,

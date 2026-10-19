@@ -91,6 +91,7 @@ import {
 } from "@chuggy/worker-contract/workerPool";
 import { z } from "zod";
 
+import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import {
   assignmentLabel,
   bindMountNameable,
@@ -159,7 +160,8 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} ContainerBackendSettings
  * @property {"docker" | "podman"} engine
  * @property {PoolIdentity} pool
- * @property {string} tokenFile
+ * @property {string} tokenFile the Claude credential file, which each workload mounts
+ * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a workload's core reads it as a subscription's token, as it does a site pool's
  * @property {string | undefined} registryHost the one registry the pool's token is presented to
  * @property {string | undefined} dockerHost the endpoint docker's context names, which a pull of the pool's registry is told; docker's alone
  * @property {number} timeoutSecsMax
@@ -387,6 +389,7 @@ export function checkedContainerBackendSettings(settings) {
     throw new RangeError(
       `pool ${segment} cannot name a container; register it under a name of letters, digits, '_', '.' and '-'`,
     );
+  claudeCredentialCarried(settings.claudeCredential);
   return settings;
 }
 
@@ -1432,9 +1435,10 @@ function workloadOwnerVolumes(settings, placement) {
 
 /**
  * The environment a workload's env file carries beside its envelope: the
- * runner's, then what a job handed this machine's engine is told of it, and
- * for a job started through chuggy's runtime the workspace its check is to
- * find writable, which is the one its envelope names.
+ * runner's, then the kind of Claude credential it mounts where the runner
+ * names one, what a job handed this machine's engine is told of it, and for a
+ * job started through chuggy's runtime the workspace its check is to find
+ * writable, which is the one its envelope names.
  *
  * @param {ContainerBackendSettings} settings
  * @param {Placement} placement
@@ -1443,6 +1447,7 @@ function workloadEnvironment(settings, placement) {
   const socket = workloadEngineSocket(settings, placement);
   return {
     ...settings.environment,
+    ...claudeCredentialCarried(settings.claudeCredential),
     ...(socket === undefined
       ? {}
       : jobEngineSocketEnvironment(settings.engine, socket.path)),
