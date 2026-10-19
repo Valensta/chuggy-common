@@ -46,10 +46,11 @@ export const claudeCredentialVariable = "CHUG_WORKER_CLAUDE_CREDENTIAL";
 
 /**
  * Every variable Claude Code chooses a provider, a credential or an endpoint
- * by: the credentials, the providers' selectors and the names they are
- * addressed by, the switches that skip a provider's own authentication, and
- * the endpoints a request is sent to and the headers and socket it is sent
- * with.
+ * by: the credentials, and the file a host may name more of them in, which
+ * Claude Code reads into its own environment at start; the providers'
+ * selectors and the names they are addressed by; the switches that skip a
+ * provider's own authentication; and the endpoints a request is sent to and
+ * the headers and socket it is sent with.
  */
 export const claudeCredentialVariables = [
   claudeCredentialVariable,
@@ -60,6 +61,7 @@ export const claudeCredentialVariables = [
   "ANTHROPIC_FOUNDRY_API_KEY",
   "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
   "ANTHROPIC_AWS_API_KEY",
+  "CLAUDE_CODE_HOST_CREDS_FILE",
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
   "CLAUDE_CODE_USE_FOUNDRY",
@@ -173,7 +175,18 @@ function claudeCredentialPath(what) {
 }
 
 const region = claudeCredentialName("the region the provider is called in");
-const profile = claudeCredentialName("a profile of the credentials file");
+
+/**
+ * A profile's name, which may not be one every JavaScript object has: the AWS
+ * client reads its profiles into an object, and finds no keys under such a
+ * name whatever the file holds.
+ */
+const profile = claudeCredentialName(
+  "a profile of the credentials file",
+).refine(
+  (name) => !Object.hasOwn(Object.prototype, name),
+  "is a name every JavaScript object has, under which the AWS client finds no profile",
+);
 const kindRefused = {
   error: (issue) =>
     issue.code === "invalid_union"
@@ -422,6 +435,9 @@ const awsKeyNames = [
 /** A section heading an AWS file's type prefixes, as `[profile name]` does. */
 const awsPrefixedSection = /^([\w-]+)\s(["'])?([\w@+.%:/-]+)\2$/u;
 
+/** The types a section heading's prefix may name; a heading prefixed otherwise heads none. */
+const awsSectionTypes = ["profile", "sso-session", "services"];
+
 /**
  * Each section of an AWS credentials file and its keys, read by the rules of
  * the parser Claude Code's AWS client reads one by, which are not every INI
@@ -448,7 +464,7 @@ function awsProfiles(text) {
       section =
         prefixed === null
           ? name
-          : ["profile", "sso-session", "services"].includes(prefixed[1])
+          : awsSectionTypes.includes(prefixed[1])
             ? `${prefixed[1]}.${prefixed[3]}`
             : undefined;
       subsection = undefined;
@@ -469,6 +485,34 @@ function awsProfiles(text) {
     keys.set(subsection === undefined ? key : `${subsection}.${key}`, value);
   }
   return profiles;
+}
+
+/**
+ * The profiles Claude Code's AWS client finds in an AWS credentials file. With
+ * the host flag set and no config file named, as a kind names none, its
+ * Bedrock client reads the one file twice: as a config file, which keeps
+ * `default` and the sections of a type, a `profile.name` section being the
+ * profile `name`; then as a credentials file, merged over the first profile by
+ * profile, key by key.
+ *
+ * @param {string} text
+ * @returns {Map<string, Map<string, string>>}
+ */
+function awsKnownProfiles(text) {
+  const sections = awsProfiles(text);
+  const config = new Map();
+  const defaultProfile = sections.get("default");
+  if (defaultProfile !== undefined) config.set("default", defaultProfile);
+  for (const [name, keys] of sections) {
+    const type = name.slice(0, Math.max(name.indexOf("."), 0));
+    if (awsSectionTypes.includes(type))
+      config.set(type === "profile" ? name.slice(type.length + 1) : name, keys);
+  }
+  const known = new Map();
+  for (const reading of [config, sections])
+    for (const [name, keys] of reading)
+      known.set(name, new Map([...(known.get(name) ?? []), ...keys]));
+  return known;
 }
 
 /**
@@ -530,7 +574,7 @@ export function claudeCredentialRefusal(setting, text, file) {
       return `the ${label} ${file} holds no private_key; ${remedy}`;
     return undefined;
   }
-  const keys = awsProfiles(text).get(setting.profile);
+  const keys = awsKnownProfiles(text).get(setting.profile);
   if (keys === undefined)
     return `the ${label} ${file} has no [${setting.profile}] profile; name the profile its keys are under, or ${remedy}`;
   const missing = awsKeyNames

@@ -173,6 +173,19 @@ test("a credential missing what its kind needs is refused, naming what is missin
     refusals({ kind: "Bedrock", region: "us west 2", apiKeyFile: "/key" }),
     ["region is not the region the provider is called in"],
   );
+  for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty"])
+    assert.deepEqual(
+      refusals({
+        kind: "Bedrock",
+        region: "us-west-2",
+        credentialsFile: "/aws",
+        profile: name,
+      }),
+      [
+        "profile is a name every JavaScript object has, under which the AWS client finds no profile",
+      ],
+      name,
+    );
   for (const kind of ["Login", undefined])
     assert.deepEqual(refusals({ kind, tokenFile: "/token" }), [
       "kind names no kind of Claude credential: Subscription, ApiKey, Bedrock, Vertex or Foundry",
@@ -308,10 +321,8 @@ test("every key of every profile of an AWS credentials file is a secret", () => 
  * reads it: a comment after a value kept in the value, so the secret the
  * client uses is never scrubbed; a key whose name is not in lower case
  * accepted, though the client finds no key there and falls through to
- * whatever else the machine holds; or a `[profile name]` heading read as
- * the profile `name`, which in a credentials file it is not: the client names
- * it `profile.name`; or a key indented under one with no value read as the
- * profile's own, which the client reads as that key's.
+ * whatever else the machine holds; or a key indented under one with no value
+ * read as the profile's own, which the client reads as that key's.
  */
 test("an AWS credentials file is read as Claude Code's AWS client reads it", () => {
   const setting = { kind: "Bedrock", region: "us-west-2", profile: "chuggy" };
@@ -343,20 +354,6 @@ test("an AWS credentials file is read as Claude Code's AWS client reads it", () 
     [awsKeyId, awsSecret].toSorted(),
   );
 
-  for (const heading of [
-    "[profile chuggy]",
-    "[ chuggy ]",
-    "[__proto__]\n[chuggy]",
-  ])
-    assert.match(
-      claudeCredentialRefusal(
-        setting,
-        `${heading}\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
-        "/f",
-      ) ?? "",
-      /^the AWS credentials file \/f has no \[chuggy\] profile; /u,
-      heading,
-    );
   const nested = `[chuggy]\naws_access_key_id = ${awsKeyId}\nservice =\n  aws_secret_access_key = ${awsSecret}`;
   assert.match(
     claudeCredentialRefusal(setting, nested, "/f") ?? "",
@@ -371,14 +368,59 @@ test("an AWS credentials file is read as Claude Code's AWS client reads it", () 
     ),
     undefined,
   );
-  assert.equal(
-    claudeCredentialRefusal(
-      { ...setting, profile: "profile.chuggy" },
+});
+
+/**
+ * Catches a profile looked for otherwise than Claude Code's host-managed AWS
+ * client looks: it reads the file as its config file too, where
+ * `[profile name]` and `[profile.name]` are the profile `name`, and merges
+ * that reading's keys under the credentials file's, so it authenticates by
+ * profiles the core would refuse; and a heading of another type, or a
+ * spaced one, read as the profile it does not name.
+ */
+test("an AWS profile is found where Claude Code's host-managed client finds it", () => {
+  const setting = { kind: "Bedrock", region: "us-west-2", profile: "chuggy" };
+  for (const [profile, text] of [
+    [
+      "chuggy",
       `[profile chuggy]\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
-      "/f",
-    ),
-    undefined,
-  );
+    ],
+    [
+      "chuggy",
+      `[profile.chuggy]\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
+    ],
+    [
+      "chuggy",
+      `[chuggy]\naws_access_key_id = ${awsKeyId}\n[profile chuggy]\naws_secret_access_key = ${awsSecret}`,
+    ],
+    [
+      "profile.chuggy",
+      `[profile chuggy]\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
+    ],
+  ])
+    assert.equal(
+      claudeCredentialRefusal({ ...setting, profile }, text, "/f"),
+      undefined,
+      `${profile} in ${text
+        .split("\n")
+        .filter((line) => line.startsWith("["))
+        .join(" ")}`,
+    );
+  for (const heading of [
+    "[ chuggy ]",
+    "[sso-session chuggy]",
+    "[other chuggy]",
+    "[__proto__]\n[chuggy]",
+  ])
+    assert.match(
+      claudeCredentialRefusal(
+        setting,
+        `${heading}\naws_access_key_id = ${awsKeyId}\naws_secret_access_key = ${awsSecret}`,
+        "/f",
+      ) ?? "",
+      /^the AWS credentials file \/f has no \[chuggy\] profile; /u,
+      heading,
+    );
 });
 
 /**

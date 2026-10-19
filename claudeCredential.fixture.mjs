@@ -9,7 +9,7 @@
 /** Every variable Claude Code chooses a provider, a credential or an endpoint by, whatever the kind. */
 export const decidingVariables = [
   "CHUG_WORKER_CLAUDE_CREDENTIAL",
-  // The credentials.
+  // The credentials, and the file a host may name more in.
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
@@ -17,6 +17,7 @@ export const decidingVariables = [
   "ANTHROPIC_FOUNDRY_API_KEY",
   "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
   "ANTHROPIC_AWS_API_KEY",
+  "CLAUDE_CODE_HOST_CREDS_FILE",
   // The providers' selectors and the names they are addressed by.
   "CLAUDE_CODE_USE_BEDROCK",
   "CLAUDE_CODE_USE_VERTEX",
