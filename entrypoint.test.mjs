@@ -40,13 +40,24 @@ import {
   remoteRefs,
 } from "./checkout.fixture.mjs";
 import {
+  workerAgentEnvironment,
   workerChangeBaseVariable,
   workerCheckCommands,
+  workerEnvironmentWithout,
   workerImageVariable,
   workerJobVariables,
   workerSummaryCharsMax,
 } from "./checks.mjs";
-import { claudeAgent, prepareClaudeShell } from "./claude.mjs";
+import {
+  claudeAgent,
+  claudeEnvironment,
+  prepareClaudeShell,
+} from "./claude.mjs";
+import {
+  claudeCredentialProviderVariables,
+  claudeCredentialVariable,
+  claudeCredentialVariables,
+} from "./claudeCredential.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
   envelopeLaunch,
@@ -2368,6 +2379,176 @@ test("a work attempt whose commit carries its Claude credential fails and pushes
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+/**
+ * A stand-in for Claude Code that writes its process's whole environment to
+ * `dump` and fails with `summary` read from the variable it names, so nothing
+ * is pushed and the plane is told what it printed.
+ */
+function environmentDumpingAgent(dump, summary) {
+  const script = [
+    `const { writeFileSync } = await import("node:fs");`,
+    `writeFileSync(process.argv[1], JSON.stringify(process.env));`,
+    `const summary = String(process.env[process.argv[2]]);`,
+    `console.log(JSON.stringify({ type: "result", structured_output: { verdict: "Fail", summary } }));`,
+  ].join("\n");
+  return {
+    ...claudeAgent,
+    executable: process.execPath,
+    prepareShell: async () => ({ environment: {}, arguments: [] }),
+    invocation: () => ["--input-type=module", "--eval", script, dump, summary],
+  };
+}
+
+/**
+ * One agent work attempt launched from an envelope mounting `credential` as
+ * its Claude credential file, the pod holding `holds`: the environment its
+ * agent was started with, as the agent read it, and everything the plane was
+ * sent, as text.
+ */
+async function credentialAttempt(t, credential, holds, summary) {
+  const root = await suiteDirectory(t, "chuggy-credential-attempt-");
+  const providerCredentialFile = join(root, "claude-code");
+  await writeFile(providerCredentialFile, credential);
+  const temporary = join(root, "temporary");
+  await mkdir(temporary);
+  podHolds(t, { ...holds, TMPDIR: temporary });
+  const plane = await servedPlane((route) => {
+    switch (route) {
+      case "task":
+        return {
+          status: 200,
+          body: workTaskAnswerSchema.parse({
+            ...fetchedAnswer,
+            authority: {
+              ...fetchedAnswer.authority,
+              credentials: ["forge", claudeAgent.credential],
+            },
+          }),
+        };
+      case "input":
+        return inputAnswer("repository-1", "0".repeat(40));
+      case "credential":
+        return {
+          status: 200,
+          body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+        };
+      case "report":
+        return { status: 202, body: { action: "stop" } };
+      default:
+        return { status: 204 };
+    }
+  });
+  t.after(() => plane.close());
+  const served = {
+    ...envelope,
+    callbackUrl: plane.url,
+    providerCredentialFile,
+  };
+  const { task: answered } = await envelopeTask(served);
+  const dump = join(root, "agent.json");
+  await inCheckout(({ directory }) =>
+    workerAttempt(envelopeLaunch(served, answered), {
+      minted: root,
+      write: async () => undefined,
+      clone: async () => directory,
+      agent: environmentDumpingAgent(dump, summary),
+    }),
+  );
+  return {
+    providerCredentialFile,
+    environment: JSON.parse(await readFile(dump, "utf8")),
+    sent: plane.requests
+      .map(({ body }) =>
+        Buffer.isBuffer(body) ? body.toString("utf8") : JSON.stringify(body),
+      )
+      .join("\n"),
+    reported: plane.requests.some(({ route }) => route === "report"),
+  };
+}
+
+/** A runner's environment that names a credential and a provider of its own. */
+const strayProvider = {
+  ANTHROPIC_API_KEY: "sk-ant-api03-a-key-the-runner-left-set",
+  CLAUDE_CODE_USE_BEDROCK: "1",
+  AWS_ACCESS_KEY_ID: "AKIARUNNERLEFTTHISSET",
+};
+
+/**
+ * Catches a site pool's agent, whose runner names no kind of credential,
+ * started on anything but the environment every agent was before a kind
+ * could be named: the pod's, a subscription's token and the run's switches
+ * over it, and its shell's, nothing the pod holds withheld beyond what it
+ * always was.
+ */
+test("an agent whose runner names no kind of credential is started as every agent was before one could be named", async (t) => {
+  const run = await credentialAttempt(
+    t,
+    `${secret}\n`,
+    strayProvider,
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  );
+
+  assert.deepEqual(run.environment, {
+    ...workerAgentEnvironment(process.env),
+    ...claudeEnvironment,
+    CLAUDE_CODE_OAUTH_TOKEN: secret,
+  });
+  for (const [name, value] of Object.entries(strayProvider))
+    assert.equal(run.environment[name], value, name);
+  assert.ok(run.reported);
+  assert.ok(!run.sent.includes(secret));
+});
+
+/**
+ * Catches a credential the runner's environment left reaching an agent whose
+ * runner named its kind, a variable that kind is read by left out, or one of
+ * the secrets its file holds sent to the plane: an AWS key is in the mounted
+ * file but is not the file, so only reading the file finds it.
+ */
+test("an agent whose runner names its kind is started on that credential alone, and every secret of its file is scrubbed", async (t) => {
+  const awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+  const run = await credentialAttempt(
+    t,
+    `[chuggy]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = ${awsSecret}\n`,
+    {
+      ...strayProvider,
+      CLAUDE_CODE_OAUTH_TOKEN: secret,
+      [claudeCredentialVariable]: JSON.stringify({
+        kind: "Bedrock",
+        region: "us-west-2",
+        profile: "chuggy",
+      }),
+      CHUG_SUITE_PROBE: awsSecret,
+    },
+    "CHUG_SUITE_PROBE",
+  );
+
+  const expected = {
+    ...workerEnvironmentWithout(workerAgentEnvironment(process.env), [
+      ...claudeCredentialVariables,
+      ...claudeCredentialProviderVariables("Bedrock"),
+    ]),
+    ...claudeEnvironment,
+    CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_REGION: "us-west-2",
+    AWS_SHARED_CREDENTIALS_FILE: run.providerCredentialFile,
+    AWS_PROFILE: "chuggy",
+    DISABLE_TELEMETRY: "1",
+  };
+  assert.deepEqual(run.environment, expected);
+  for (const name of [
+    "ANTHROPIC_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    claudeCredentialVariable,
+  ])
+    assert.ok(!Object.hasOwn(run.environment, name), name);
+  assert.ok(run.reported);
+  assert.ok(!run.sent.includes(awsSecret));
+  assert.ok(run.sent.includes("[redacted credential]"));
 });
 
 /**

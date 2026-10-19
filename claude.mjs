@@ -2,6 +2,14 @@ import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import {
+  claudeCredentialEnvironment,
+  claudeCredentialNamed,
+  claudeCredentialProviderVariables,
+  claudeCredentialRefusal,
+  claudeCredentialSecrets,
+  claudeCredentialVariables,
+} from "./claudeCredential.mjs";
 import { coreRuntime } from "./coreRuntime.mjs";
 import { agentResult, agentResultSchema } from "./result.mjs";
 
@@ -120,6 +128,43 @@ export function claudeResult(events) {
   return { output, result };
 }
 
+/**
+ * What Claude Code is started with of its credential, read as `text` from the
+ * file at `path`: the variables set, the ones withheld from what it would
+ * otherwise inherit, and every secret the file holds. Where `environment`
+ * names no kind the file is a subscription's token and nothing is withheld,
+ * which is every Claude run there was before a kind could be named; where it
+ * names one, that kind is the only one in force (`./claudeCredential.mjs`).
+ *
+ * @param {string} text
+ * @param {{path?: string, environment?: Readonly<Record<string, string | undefined>>}} [given]
+ * @returns {{environment: Record<string, string>, withheld: readonly string[], secrets: string[]}}
+ */
+export function claudeCredentialPrepared(text, given = {}) {
+  const { path = "", environment = {} } = given;
+  const setting = claudeCredentialNamed(environment);
+  if (setting === undefined)
+    return {
+      environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: text },
+      withheld: [],
+      secrets: [text],
+    };
+  const refused = claudeCredentialRefusal(setting, text, path);
+  if (refused !== undefined) throw new Error(refused);
+  return {
+    environment: {
+      ...claudeEnvironment,
+      CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: "1",
+      ...claudeCredentialEnvironment(setting, text, path),
+    },
+    withheld: [
+      ...claudeCredentialVariables,
+      ...claudeCredentialProviderVariables(setting.kind),
+    ],
+    secrets: claudeCredentialSecrets(setting, text),
+  };
+}
+
 export const claudeAgent = {
   name: "Claude",
   runtime: "Claude Code",
@@ -127,10 +172,7 @@ export const claudeAgent = {
   credential: "claude-code",
   invocation: claudeInvocation,
   result: claudeResult,
-  prepareCredential: (token) => ({
-    environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
-    secrets: [token],
-  }),
+  prepareCredential: claudeCredentialPrepared,
   prepareShell: prepareClaudeShell,
   configurationEvent: (event) =>
     event?.type === "system" && event.subtype === "init",

@@ -15,6 +15,7 @@ import test from "node:test";
 import { setTimeout as wait } from "node:timers/promises";
 
 import { workerJobVariables } from "./checks.mjs";
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedHostBackendSettings,
   hostBackend,
@@ -307,6 +308,72 @@ test("an owner's environment naming a job's identity is refused by name", () => 
       hostEnvironmentRefusal({ CI: "1", [name]: "the owner's" }),
       `${name} is set for every host job, and the owner's environment cannot name it`,
     );
+});
+
+/**
+ * Catches a kind of Claude credential the runner's own environment or the
+ * owner's names reaching a host job's core, which would read the file as that
+ * kind and not the one the host names; or any other variable of the runner's
+ * withheld from a job, which its core withholds from Claude Code itself where
+ * a kind is named and leaves as it always has where none is.
+ */
+test("a job is handed no kind of Claude credential the runner's environment names, and the owner's cannot name one", () => {
+  assert.deepEqual(
+    hostJobEnvironment(
+      {
+        PATH: "/bin",
+        [claudeCredentialVariable]: '{"kind":"ApiKey"}',
+        ANTHROPIC_API_KEY: "the runner's",
+      },
+      {},
+      "/jobs/job-1",
+      "{}",
+    ),
+    {
+      PATH: "/bin",
+      ANTHROPIC_API_KEY: "the runner's",
+      HOME: "/jobs/job-1/home",
+      TMPDIR: "/jobs/job-1/tmp",
+      CHUGGY_HOST_JOB: "/jobs/job-1",
+      CHUG_WORKER_TASK: "{}",
+    },
+  );
+  assert.equal(
+    hostEnvironmentRefusal({ [claudeCredentialVariable]: '{"kind":"ApiKey"}' }),
+    `${claudeCredentialVariable} is set for every host job, and the owner's environment cannot name it`,
+  );
+});
+
+/**
+ * Catches the kind of a host's Claude credential not reaching its job's core,
+ * which would read a key as a subscription's token; one reaching a job whose
+ * host named none, which a core reads as a token today; or one no core could
+ * read accepted rather than refused when the host is made.
+ */
+test("a job is told the kind of its host's Claude credential, and only where the host names one", async (t) => {
+  const named = await harness(t, "sleep", {
+    claudeCredential: { kind: "Bedrock", region: "us-west-2" },
+  });
+  await named.backend.place(assignment(), "Job");
+  assert.equal(
+    (await named.seen()).env[claudeCredentialVariable],
+    '{"kind":"Bedrock","region":"us-west-2"}',
+  );
+
+  const unnamed = await harness(t, "sleep");
+  await unnamed.backend.place(assignment(), "Job");
+  assert.ok(
+    !Object.hasOwn((await unnamed.seen()).env, claudeCredentialVariable),
+  );
+
+  assert.throws(
+    () =>
+      checkedHostBackendSettings({
+        ...unnamed.settings,
+        claudeCredential: /** @type {any} */ ({ kind: "Bedrock" }),
+      }),
+    /^RangeError: the Claude credential's setting cannot be carried: region is required/u,
+  );
 });
 
 test("a job past its deadline is killed and named so", async (t) => {

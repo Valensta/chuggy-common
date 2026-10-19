@@ -30,6 +30,7 @@
     "chuggyApi.mjs",
     "chuggyTools.mjs",
     "claude.mjs",
+    "claudeCredential.mjs",
     "codex.mjs",
     "containerBackend.mjs",
     "contractProbe.mjs",

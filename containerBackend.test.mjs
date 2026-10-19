@@ -15,6 +15,7 @@ import {
   workerWorkspaceDirectory,
 } from "@chuggy/worker-contract/workerEnvironment";
 
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedContainerBackendSettings,
   containerBackend,
@@ -1672,6 +1673,43 @@ test("a runtime job's workspace variable is the workspace its envelope names, wh
       .split("\n")
       .filter((line) => line.startsWith("CHUG_WORKER_WORKSPACE=")),
     ["CHUG_WORKER_WORKSPACE=/workspace"],
+  );
+});
+
+/**
+ * Catches the kind of a runner's Claude credential not reaching a workload's
+ * core, which would read a key as a subscription's token; one reaching a
+ * workload whose runner named none, which a core reads as a token today, as
+ * it does a site pool's; or one no core could read accepted rather than
+ * refused when the backend is made.
+ */
+test("a job and a session are told the kind of their runner's Claude credential, and only where the runner names one", async (t) => {
+  const carried = (state) =>
+    state.calls
+      .filter(({ argv }) => argv[0] === "run")
+      .map(({ envFile }) =>
+        (envFile ?? "")
+          .split("\n")
+          .filter((line) => line.startsWith(`${claudeCredentialVariable}=`)),
+      );
+  const setting = { kind: "Vertex", region: "global", project: "p" };
+  for (const [overrides, expected] of [
+    [
+      { claudeCredential: setting },
+      [`${claudeCredentialVariable}=${JSON.stringify(setting)}`],
+    ],
+    [{}, []],
+  ]) {
+    const { backend, state } = await harness(t, overrides);
+    state.images.add(image);
+    await backend.place(assignment(), "Job");
+    await backend.place(assignment({ assignment: "asg-2" }), "Session");
+    await backend.settled();
+    assert.deepEqual(carried(state), [expected, expected]);
+  }
+  await assert.rejects(
+    harness(t, { claudeCredential: { kind: "Vertex", region: "global" } }),
+    /^RangeError: the Claude credential's setting cannot be carried: project is required/u,
   );
 });
 

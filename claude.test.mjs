@@ -18,11 +18,18 @@ import {
 } from "./checks.mjs";
 import {
   claudeAgent,
+  claudeCredentialPrepared,
+  claudeEnvironment,
   claudeInvocation,
   claudeResult,
   claudeShellScript,
   prepareClaudeShell,
 } from "./claude.mjs";
+import {
+  claudeCredentialProviderVariables,
+  claudeCredentialVariable,
+  claudeCredentialVariables,
+} from "./claudeCredential.mjs";
 import { agentShells, posixShells } from "./shells.fixture.mjs";
 
 /** Catches a job's agent moving a long command to the background, where the headless run kills it unseen. */
@@ -261,4 +268,172 @@ test("a Claude run's shell script is under HOME where none is named", async (t) 
   const prepared = await prepareClaudeShell({});
 
   assert.equal(dirname(prepared.environment.CLAUDE_ENV_FILE), home);
+});
+
+const token = "sk-ant-oat01-exampleexampleexample";
+const key = "sk-ant-api03-exampleexampleexample";
+
+/**
+ * A runner's environment holding a stray value of every variable Claude Code
+ * picks a provider or a credential by, and of each provider's own.
+ */
+const stray = Object.fromEntries(
+  [
+    ...claudeCredentialVariables,
+    ...claudeCredentialProviderVariables("Bedrock"),
+    ...claudeCredentialProviderVariables("Vertex"),
+  ]
+    .filter((name) => name !== claudeCredentialVariable)
+    .map((name) => [name, `stray-value-of-${name}`]),
+);
+
+/** Claude Code's environment as a run composes it: the inherited less what is withheld, then the credential's. */
+function composed(inherited, prepared) {
+  return {
+    ...Object.fromEntries(
+      Object.entries(inherited).filter(
+        ([name]) => !prepared.withheld.includes(name),
+      ),
+    ),
+    ...prepared.environment,
+  };
+}
+
+/**
+ * Catches a site pool's Claude Code, whose runner names no kind, given any
+ * environment but the one every run had before a kind could be named: a token
+ * and the two switches over everything inherited, a stray key included.
+ */
+test("where no kind is named, a Claude run's credential is a subscription's token over an untouched environment", () => {
+  const prepared = claudeCredentialPrepared(token, {
+    path: "/var/run/chuggy/credentials/claude-code",
+    environment: stray,
+  });
+
+  assert.deepEqual(prepared, {
+    environment: { ...claudeEnvironment, CLAUDE_CODE_OAUTH_TOKEN: token },
+    withheld: [],
+    secrets: [token],
+  });
+  assert.deepEqual(claudeAgent.prepareCredential(token), prepared);
+});
+
+/** Each kind as its setting, its file, and what it sets that decides the credential Claude Code runs on. */
+const namedKinds = [
+  [{ kind: "Subscription" }, token, { CLAUDE_CODE_OAUTH_TOKEN: token }],
+  [{ kind: "ApiKey" }, key, { ANTHROPIC_API_KEY: key }],
+  [
+    { kind: "Foundry", resource: "example" },
+    key,
+    {
+      CLAUDE_CODE_USE_FOUNDRY: "1",
+      ANTHROPIC_FOUNDRY_RESOURCE: "example",
+      ANTHROPIC_FOUNDRY_API_KEY: key,
+    },
+  ],
+  [
+    { kind: "Bedrock", region: "us-west-2" },
+    key,
+    {
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_REGION: "us-west-2",
+      AWS_BEARER_TOKEN_BEDROCK: key,
+    },
+  ],
+  [
+    { kind: "Bedrock", region: "us-west-2", profile: "chuggy" },
+    `[chuggy]\naws_access_key_id = ${key}\naws_secret_access_key = ${token}`,
+    {
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      AWS_REGION: "us-west-2",
+      AWS_SHARED_CREDENTIALS_FILE: "/mounted",
+      AWS_PROFILE: "chuggy",
+    },
+  ],
+  [
+    { kind: "Vertex", region: "us-east5", project: "example" },
+    JSON.stringify({ type: "service_account", private_key: key }),
+    {
+      CLAUDE_CODE_USE_VERTEX: "1",
+      CLOUD_ML_REGION: "us-east5",
+      ANTHROPIC_VERTEX_PROJECT_ID: "example",
+      GOOGLE_APPLICATION_CREDENTIALS: "/mounted",
+    },
+  ],
+];
+
+/**
+ * Catches a variable a runner's environment left in deciding which credential
+ * Claude Code runs on: a token beside a key, which the key would outrank, a
+ * key beside a token, which would outrank it, and a provider's selector beside
+ * either.
+ */
+test("a kind named is the only credential in force, whatever the runner's environment left", () => {
+  for (const [setting, text, set] of namedKinds) {
+    const environment = composed(
+      { ...stray, PATH: "/usr/bin" },
+      claudeCredentialPrepared(text, {
+        path: "/mounted",
+        environment: {
+          ...stray,
+          [claudeCredentialVariable]: JSON.stringify(setting),
+        },
+      }),
+    );
+    const decides = [
+      ...claudeCredentialVariables,
+      ...claudeCredentialProviderVariables(setting.kind),
+    ];
+    const leftover = Object.entries(environment).filter(
+      ([name, value]) =>
+        decides.includes(name) && value.startsWith("stray-value-of-"),
+    );
+    assert.deepEqual(leftover, [], setting.kind);
+    for (const [name, value] of Object.entries(set))
+      assert.equal(environment[name], value, `${setting.kind} ${name}`);
+    for (const name of claudeCredentialVariables)
+      if (!Object.hasOwn(set, name))
+        assert.ok(!(name in environment), `${setting.kind} kept ${name}`);
+    assert.equal(environment.PATH, "/usr/bin");
+  }
+});
+
+/**
+ * Catches a named kind run without Claude Code's routing held by its host,
+ * under which a checkout's settings could send the credential elsewhere, or a
+ * cloud provider's telemetry left on by it.
+ */
+test("a named kind is run as a host's, with a cloud provider's telemetry left off", () => {
+  for (const [setting, text, telemetry] of [
+    [{ kind: "Subscription" }, token, undefined],
+    [{ kind: "ApiKey" }, key, undefined],
+    [{ kind: "Bedrock", region: "us-west-2" }, key, "1"],
+    [{ kind: "Foundry", resource: "example" }, key, "1"],
+  ]) {
+    const { environment } = claudeCredentialPrepared(text, {
+      path: "/mounted",
+      environment: { [claudeCredentialVariable]: JSON.stringify(setting) },
+    });
+    assert.equal(environment.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST, "1");
+    assert.equal(environment.DISABLE_TELEMETRY, telemetry, setting.kind);
+    assert.equal(environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+    assert.equal(environment.DISABLE_AUTOUPDATER, "1");
+  }
+});
+
+/** Catches a file of the wrong shape handed to Claude Code rather than refused before it runs. */
+test("a named kind's file of the wrong shape is refused before Claude Code is started on it", () => {
+  assert.throws(
+    () =>
+      claudeCredentialPrepared(`${key}\n${key}`, {
+        path: "/mounted",
+        environment: {
+          [claudeCredentialVariable]: JSON.stringify({ kind: "ApiKey" }),
+        },
+      }),
+    {
+      message:
+        "the Anthropic API key file /mounted holds more than one line; save a key from the Claude Console there, alone",
+    },
+  );
 });

@@ -20,8 +20,9 @@
  * EACH JOB HAS A DIRECTORY OF ITS OWN, where a container has mounts: its
  * workspace, its home, its temporary files and the credentials it mints, as
  * `jobHostPlaces` names them. It inherits the runner's environment, then the
- * owner's, then the job's own places, and the directory goes when the job
- * does. Any a predecessor left are removed the first time `held` is asked.
+ * owner's and the kind of its Claude credential, then the job's own places,
+ * and the directory goes when the job does. Any a predecessor left are removed
+ * the first time `held` is asked.
  *
  * WHAT ENDED OF ITSELF IS NAMED ONCE, after `held` stopped naming it, with this
  * backend's own reason and never the job's output, which is saved to the log
@@ -37,6 +38,7 @@ import { fileURLToPath, URL } from "node:url";
 
 import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 
+import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
 
@@ -55,7 +57,8 @@ import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
  * @property {readonly string[]} platforms the platform tokens this host is
  * @property {string} directory where each job's directory is made, this pool's alone
  * @property {string} logDir where each ended job's output is kept
- * @property {string} tokenFile the Claude token file, which a job reads where it is
+ * @property {string} tokenFile the Claude credential file, which a job reads where it is
+ * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a job's core reads it as a subscription's token
  * @property {number} timeoutSecsMax
  * @property {number} outputBytesMax
  * @property {Readonly<Record<string, string>>} environment the owner's, over the runner's own
@@ -134,6 +137,7 @@ export function checkedHostBackendSettings(settings) {
     throw new RangeError(
       `a host job's timeout is at most ${String(hostTimeoutSecsMax)} seconds`,
     );
+  claudeCredentialCarried(settings.claudeCredential);
   for (const platform of settings.platforms)
     if (!/^Platform:[A-Za-z0-9]+:[A-Za-z0-9]+$/u.test(platform))
       throw new RangeError(`${platform} is no platform token`);
@@ -424,7 +428,10 @@ async function hostJobSpawned(state, name, made) {
       detached: true,
       env: hostJobEnvironment(
         state.inherited,
-        state.settings.environment,
+        {
+          ...state.settings.environment,
+          ...claudeCredentialCarried(state.settings.claudeCredential),
+        },
         made.directory,
         made.envelope,
       ),

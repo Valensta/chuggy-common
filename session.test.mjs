@@ -16,6 +16,7 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 
 import { sessionBuiltInTools, sessionCapabilityTools } from "./chuggyTools.mjs";
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   checkedSessionBounds,
   sessionBoundNames,
@@ -487,6 +488,41 @@ test("the answer a turn carries is scrubbed of what the pod was handed", async (
   ).body.result;
   assert.ok(!answered.includes(token));
   assert.ok(!answered.includes(bearer));
+  assert.ok(answered.includes("[redacted credential]"));
+});
+
+/**
+ * Catches a secret of a named kind's file that is not the whole file, an AWS
+ * profile's key among other lines, answered unscrubbed.
+ */
+test("the answer a turn carries is scrubbed of every secret the credential's file holds", async () => {
+  const awsSecret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+  const plane = planeOf([turnOne], facts);
+  const { query } = queryOf(() => [
+    result("success", { result: `the key is ${awsSecret}` }),
+  ]);
+
+  await run({
+    request: plane.request,
+    query,
+    environment: {
+      ...environment,
+      [claudeCredentialVariable]: JSON.stringify({
+        kind: "Bedrock",
+        region: "us-west-2",
+        profile: "default",
+      }),
+    },
+    read: async (path) =>
+      path === credentialFile
+        ? `[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = ${awsSecret}\n`
+        : `${bearer}\n`,
+  });
+
+  const answered = plane.calls.find(
+    ({ path }) => path === "/v1/session/turn/answer",
+  ).body.result;
+  assert.ok(!answered.includes(awsSecret));
   assert.ok(answered.includes("[redacted credential]"));
 });
 

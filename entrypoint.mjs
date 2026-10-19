@@ -87,6 +87,7 @@ import {
   runChecks,
   workerAgentEnvironment,
   workerCheckCommands,
+  workerEnvironmentWithout,
   workerJobEnvironment,
   workerReportText,
   workerShellEnvironment,
@@ -356,12 +357,16 @@ async function agentImages(context) {
 
 /**
  * What an agent's own process is started with: the pod's inherited
- * environment, the agent's credential's and its shell's, and what the agent
- * adds to them once it has seen the whole of it.
+ * environment less what the agent's credential withholds, the credential's
+ * environment and its shell's, and what the agent adds to them once it has
+ * seen the whole of it.
  */
 async function runAgentEnvironment(context, shell) {
   const environment = {
-    ...workerAgentEnvironment(process.env),
+    ...workerEnvironmentWithout(
+      workerAgentEnvironment(process.env),
+      context.agentWithheld ?? [],
+    ),
     ...context.agentEnvironment,
     ...shell.environment,
   };
@@ -623,12 +628,16 @@ async function credentialValues(mounted) {
   return values;
 }
 
+/** The agent's credential as its file and the pod's environment prepare it. */
 async function agentCredential(credentialFiles, agent) {
   const credentialFile = credentialFiles[agent.credential];
   if (typeof credentialFile !== "string")
     throw new Error(`worker credential ${agent.credential} is not mounted`);
   const token = (await readFile(credentialFile, "utf8")).trim();
-  return agent.prepareCredential(token);
+  return agent.prepareCredential(token, {
+    path: credentialFile,
+    environment: process.env,
+  });
 }
 
 /**
@@ -663,6 +672,7 @@ export async function workerRun({
   activeEvidence = evidence;
   return {
     agentEnvironment: prepared.environment,
+    agentWithheld: prepared.withheld ?? [],
     scrub,
     keepSecret,
     held,
@@ -938,6 +948,7 @@ async function workerAttemptWorked(attempt, workspace, git) {
       ...handed,
       images: workspace.images,
       agentEnvironment: attempt.agentEnvironment,
+      agentWithheld: attempt.agentWithheld,
       scrub,
       evidence,
       agent: attempt.agent,
