@@ -3,7 +3,8 @@
  * the attempts of workloads that ended without reporting, polls the plane for
  * the room left, stops what it is told to and places what it is offered.
  * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
- * TypeScript, and a change to one is a change to both.
+ * TypeScript, and a change to one is a change to both, but for a runner's
+ * update of itself, which that cluster client never makes.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
@@ -20,9 +21,19 @@
  * so a restarted loop reconciles the work its predecessor placed, and a
  * settlement is never retried because the next poll's `held` renews the lease.
  * A denial ends the run; an outage backs off and comes back.
+ *
+ * A RUNNER UPDATES ITSELF BETWEEN JOBS. Once a poll names a release above the
+ * runner's own, a run that updates asks for no more work, and once nothing it
+ * holds would end with its process it installs the release behind its passes,
+ * which go on renewing what it holds; the pass after the install ends the run
+ * for the restart. A run that does not update says once per release that one
+ * is out. A refused or failed update is logged and not tried again before
+ * `workerPoolUpdateBackoffMs` has passed.
  */
 
 import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
+
+import { runnerVersionAbove } from "./runnerUpdate.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
@@ -31,8 +42,14 @@ import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
  * @typedef {import("@chuggy/worker-contract/sessionPlane").SessionContainerEnd} SessionContainerEnd
  * @typedef {import("@chuggy/worker-contract/workerEnvironment").WorkerImageFault} WorkerImageFault
  *
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerRunnerRelease} WorkerRunnerRelease
+ * @typedef {import("./runnerUpdate.mjs").RunnerUpdater} RunnerUpdater
+ *
  * @typedef {"Job" | "Session"} WorkerPoolWorkloadKind
- * @typedef {{assignment: string, kind: WorkerPoolWorkloadKind}} WorkerPoolHeld
+ * @typedef {object} WorkerPoolHeld
+ * @property {string} assignment
+ * @property {WorkerPoolWorkloadKind} kind
+ * @property {true} [outlivesRunner] where the workload runs on once this process ends and a runner started after it holds it again; one that does not say ends with the process
  * @typedef {Pick<WorkerPoolAssignment, "assignment" | "callbackUrl" | "bearer">} WorkerPoolAttempt what an assignment's own plane is reached at, and under
  *
  * @typedef {{placed: "Placed"} | {placed: "Refused", evidence: string} | {placed: "Unavailable"}} WorkerPoolPlacement
@@ -62,7 +79,7 @@ import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
- *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[]}
+ *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease}
  *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled
  * @typedef {"Settled" | "Lost" | "Stale" | "Denied" | "Unavailable"} WorkerPoolSettled
  *
@@ -93,7 +110,17 @@ import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
  * @property {number} passesMax the passes one run makes
  *
  * @typedef {{passed: "Reconciled", placed: number, stopped: number, refused: number, ended: number}
- *   | {passed: "Denied", evidence: string} | {passed: "Unavailable", evidence: string}} WorkerPoolPass
+ *   | {passed: "Denied", evidence: string} | {passed: "Unavailable", evidence: string}
+ *   | {passed: "Updated", version: string}} WorkerPoolPass `Updated` is a runner installed at `version`, to restart on
+ *
+ * @typedef {object} WorkerPoolUpdates what a run is told of its runner's update of itself
+ * @property {boolean} on whether it updates, or only says a release is out
+ * @property {RunnerUpdater} updater
+ *
+ * @typedef {object} WorkerPoolUpdating a run's update, from the release a poll names to the restart
+ * @property {() => boolean} draining whether the pool asks for no work, a release being wanted
+ * @property {(held: readonly WorkerPoolHeld[]) => string | undefined} restart the version installed to restart on, if any; otherwise starts the install where one is wanted and nothing held ends with this process
+ * @property {(release: WorkerRunnerRelease | undefined) => Promise<void>} named takes what a reconciled poll named
  *
  * @typedef {object} WorkerPoolClient
  * @property {WorkerPoolTokens} tokens
@@ -354,17 +381,20 @@ function workerPoolClientOutcome(placement) {
  * Places what there is room for of one kind and settles the rest as
  * `Unavailable`: the poll asked for no more than the room, so the rest is a
  * plane that offered past it. Room is the kind's ceiling less what is running
- * of it and what this pass has placed of it.
+ * of it and what this pass has placed of it, and none while the pool drains.
  *
  * @param {WorkerPoolClient} client
  * @param {string} token
  * @param {readonly WorkerPoolAssignment[]} offered
  * @param {WorkerPoolWorkloadKind} kind
- * @param {number} running
+ * @param {{running: number, draining: boolean}} room
  */
-async function workerPoolClientPlaced(client, token, offered, kind, running) {
+async function workerPoolClientPlaced(client, token, offered, kind, room) {
   const tally = { placed: 0, refused: 0 };
-  const ceiling = workerPoolClientCeiling(client.settings, kind);
+  const { running } = room;
+  const ceiling = room.draining
+    ? 0
+    : workerPoolClientCeiling(client.settings, kind);
   for (const assignment of offered) {
     const placement =
       running + tally.placed < ceiling
@@ -383,25 +413,172 @@ async function workerPoolClientPlaced(client, token, offered, kind, running) {
   return tally;
 }
 
+/** How long a runner whose update was refused or failed waits before it tries one again. */
+export const workerPoolUpdateBackoffMs = 60 * 60 * 1000;
+
+/**
+ * @typedef {object} WorkerPoolUpdateState what a run remembers between passes of its update
+ * @property {WorkerPoolUpdates} updates
+ * @property {{log: (line: string) => void, nowMs: () => number}} seams
+ * @property {WorkerRunnerRelease} [wanted] the release the pool drains for, until it is installed or fails
+ * @property {boolean} installing
+ * @property {string} [installed] the version installed, to restart on
+ * @property {number} retryAtMs when a refused or failed update may be tried again
+ * @property {string} [announced] the release last said to be out, where updates are off
+ */
+
+/** @param {WorkerRunnerRelease} release */
+function workerPoolReleaseNamed(release) {
+  return `${release.package} ${release.version}`;
+}
+
+/**
+ * Leaves the release that was wanted, and says why.
+ *
+ * @param {WorkerPoolUpdateState} state
+ * @param {WorkerRunnerRelease} release
+ * @param {string} reason
+ */
+function workerPoolUpdateFailed(state, release, reason) {
+  state.wanted = undefined;
+  state.retryAtMs = state.seams.nowMs() + workerPoolUpdateBackoffMs;
+  state.seams.log(
+    `did not update to ${workerPoolReleaseNamed(release)}: ${reason}; the next try is in ${String(workerPoolUpdateBackoffMs / 60_000)} minutes`,
+  );
+}
+
+/**
+ * Installs the wanted release behind the passes, which renew what the pool
+ * holds meanwhile.
+ *
+ * @param {WorkerPoolUpdateState} state
+ * @param {WorkerRunnerRelease} release
+ */
+function workerPoolUpdateStarted(state, release) {
+  state.installing = true;
+  state.seams.log(`updating to ${workerPoolReleaseNamed(release)}`);
+  void state.updates.updater
+    .update(release)
+    .then(
+      (updated) => {
+        if (updated.updated === "Failed")
+          workerPoolUpdateFailed(state, release, updated.reason);
+        else {
+          state.installed = updated.version;
+          state.seams.log(
+            `${release.package} ${updated.version} is installed, and this runner ends to start on it`,
+          );
+        }
+      },
+      (thrown) =>
+        workerPoolUpdateFailed(
+          state,
+          release,
+          thrown instanceof Error ? thrown.message : String(thrown),
+        ),
+    )
+    .finally(() => {
+      state.installing = false;
+    });
+}
+
+/**
+ * Takes the release a reconciled poll named: one above the runner's own is
+ * wanted, where updates are on and nothing refuses it, or said to be out once
+ * where they are off. One the poll stops naming is no longer wanted, and
+ * nothing a poll names moves an install already begun.
+ *
+ * @param {WorkerPoolUpdateState} state
+ * @param {WorkerRunnerRelease | undefined} release
+ */
+async function workerPoolUpdateNamed(state, release) {
+  const { on, updater } = state.updates;
+  if (state.installing || state.installed !== undefined) return;
+  if (
+    release === undefined ||
+    !runnerVersionAbove(release.version, updater.runner.version)
+  ) {
+    state.wanted = undefined;
+    return;
+  }
+  if (!on) {
+    if (state.announced !== release.version)
+      state.seams.log(
+        `${workerPoolReleaseNamed(release)} is out, and this runner, ${updater.runner.version}, does not update itself`,
+      );
+    state.announced = release.version;
+    return;
+  }
+  const wanted = state.wanted;
+  if (
+    (wanted !== undefined &&
+      ["package", "version", "url", "integrity"].every(
+        (field) => wanted[field] === release[field],
+      )) ||
+    state.seams.nowMs() < state.retryAtMs
+  )
+    return;
+  const reason = await updater.refusal(release);
+  if (reason !== undefined) {
+    workerPoolUpdateFailed(state, release, reason);
+    return;
+  }
+  state.wanted = release;
+  state.seams.log(
+    `${workerPoolReleaseNamed(release)} is out, and this pool takes no new work until it has updated`,
+  );
+}
+
+/**
+ * A run's update of its runner, from the release a poll names to the restart.
+ *
+ * @param {WorkerPoolUpdates} updates
+ * @param {{log: (line: string) => void, nowMs: () => number}} seams
+ * @returns {WorkerPoolUpdating}
+ */
+export function workerPoolUpdating(updates, seams) {
+  /** @type {WorkerPoolUpdateState} */
+  const state = { updates, seams, installing: false, retryAtMs: 0 };
+  return {
+    draining: () => state.wanted !== undefined,
+    restart: (held) => {
+      if (state.installed !== undefined) return state.installed;
+      if (
+        state.wanted !== undefined &&
+        !state.installing &&
+        held.every((workload) => workload.outlivesRunner === true)
+      )
+        workerPoolUpdateStarted(state, state.wanted);
+      return undefined;
+    },
+    named: (release) => workerPoolUpdateNamed(state, release),
+  };
+}
+
 /**
  * One reconciliation pass. The room is asked before the stops are known, so a
  * stop this pass delivers frees room the next pass asks for. The ended are
- * ended before the poll, which may wait on the plane for work to offer.
+ * ended before the poll, which may wait on the plane for work to offer, and
+ * before a pass ends the run for its runner's restart.
  *
  * @param {WorkerPoolClient} client
+ * @param {WorkerPoolUpdating} [updating] the run's update of its runner, where it makes one
  * @returns {Promise<WorkerPoolPass>}
  */
-export async function workerPoolClientPass(client) {
+export async function workerPoolClientPass(client, updating) {
   checkedWorkerPoolClientSessions(client);
   const minted = await workerPoolClientToken(client);
   if (!("token" in minted)) return minted;
   const held = await workerPoolClientHeld(client);
   const ended = await workerPoolClientEnded(client, minted.token);
+  const restart = updating?.restart(held);
+  if (restart !== undefined) return { passed: "Updated", version: restart };
+  const draining = updating?.draining() ?? false;
   const polled = await client.plane.poll(
     minted.token,
     held.map(({ assignment }) => assignment),
-    workerPoolClientRoom(client.settings, held, "Job"),
-    workerPoolClientRoom(client.settings, held, "Session"),
+    draining ? 0 : workerPoolClientRoom(client.settings, held, "Job"),
+    draining ? 0 : workerPoolClientRoom(client.settings, held, "Session"),
   );
   if (polled.polled === "Stale") {
     client.tokens.invalidate(minted.token);
@@ -416,15 +593,19 @@ export async function workerPoolClientPass(client) {
     minted.token,
     polled.assignments,
     "Job",
-    workerPoolClientRunning(held, "Job", polled.stop),
+    { running: workerPoolClientRunning(held, "Job", polled.stop), draining },
   );
   const sessions = await workerPoolClientPlaced(
     client,
     minted.token,
     polled.sessions,
     "Session",
-    workerPoolClientRunning(held, "Session", polled.stop),
+    {
+      running: workerPoolClientRunning(held, "Session", polled.stop),
+      draining,
+    },
   );
+  await updating?.named(polled.release);
   return {
     passed: "Reconciled",
     placed: jobs.placed + sessions.placed,
