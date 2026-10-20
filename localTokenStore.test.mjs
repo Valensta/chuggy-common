@@ -7,7 +7,6 @@ import { setTimeout } from "node:timers";
 
 import {
   localTokenStore,
-  localTokenStoreHolderAlive,
   localTokenStoreLockHeldMsMax,
   localTokenStoreLockWaitMsMax,
 } from "./localTokenStore.mjs";
@@ -111,10 +110,4 @@ test("a held lock names its holder whole", async (t) => {
   const store = localTokenStore(path);
   const seen = await store.locked(async () => readFile(`${path}.lock`, "utf8"));
   assert.equal(seen, `${String(process.pid)}\n`);
-});
-
-test("a holder is alive while its process runs", () => {
-  assert.equal(localTokenStoreHolderAlive(process.pid), true);
-  assert.equal(localTokenStoreHolderAlive(Number.NaN), false);
-  assert.equal(localTokenStoreHolderAlive(0), false);
 });

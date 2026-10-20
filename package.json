@@ -40,6 +40,7 @@
     "engineArgv.mjs",
     "engineErrors.mjs",
     "entrypoint.mjs",
+    "fileLock.mjs",
     "git-askpass.sh",
     "hostBackend.mjs",
     "job.mjs",
