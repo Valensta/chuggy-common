@@ -5,7 +5,7 @@
  * names the pool it registers; a personal token is a member's in a tenant,
  * minted through chuggy's API at
  * `/api/v1/tenants/:tenant/personal-runner-registration-tokens`, and registers
- * the one runner that member has there. What the operator
+ * this machine as one of that member's runners there. What the operator
  * could have asked wrongly is refused before the token is spent, and the
  * answer is checked whole before anything is written. The runner's secret is
  * never printed and never in an argv.
@@ -253,7 +253,7 @@ export function registerAskedChecked(asked, hostname) {
     if (asked.pool !== undefined)
       return {
         refused:
-          "--pool names a pool, and a personal runner is its member's one in the tenant; register it without --pool",
+          "--pool names a pool, and a personal runner names none; register it without --pool",
       };
     if (!registerTokenAllowed(asked.token))
       return { refused: "--token is not a registration token" };
@@ -361,7 +361,7 @@ function registerRefusal(status, body, request) {
   if (status === 403)
     return `the registration token does not permit every capability declared, of ${request.capabilities.join(", ")}; mint one that does`;
   if (status === 409 && request.kind === "Personal")
-    return "chuggy registered this member's runner again meanwhile, and the token is not spent; run register again";
+    return "this member has as many runners in the tenant as chuggy allows, and the token is not spent; remove one in chuggy's console and run register again";
   if (status === 400) {
     const reason = registerErrorReason(body);
     return `chuggy refused the registration as malformed${reason === "" ? "" : `: ${reason}`}`;

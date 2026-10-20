@@ -667,13 +667,13 @@ test("a pool's redemption answered with a personal runner's file is refused", as
   );
 });
 
-test("a personal registration that lost a race is told to run again, its token unspent; a pool's is answered as any status", async () => {
+test("a personal registration past its member's bound is told to remove a runner, its token unspent; a pool's is answered as any status", async () => {
   const conflict = {
-    error: { code: "RegistrationConflict", message: "try again" },
+    error: { code: "RunnerLimitReached", message: "at the bound" },
   };
   await assert.rejects(
     registerRedeemed(personalRequest, answeringFetch(409, conflict).fetch),
-    /^Error: chuggy registered this member's runner again meanwhile, and the token is not spent; run register again$/u,
+    /^Error: this member has as many runners in the tenant as chuggy allows, and the token is not spent; remove one in chuggy's console and run register again$/u,
   );
   await assert.rejects(
     registerRedeemed(request, answeringFetch(409, conflict).fetch),
