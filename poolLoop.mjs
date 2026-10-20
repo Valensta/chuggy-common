@@ -28,7 +28,7 @@
  * install ends the run for the restart. Where something it holds would end
  * with its process, it first proves the release while taking work as before,
  * and only then asks for no more and waits for that work to end, so a release
- * that cannot install never drains the pool. A run that does not update says
+ * that fails its proof never drains the pool. A run that does not update says
  * once per release that one is out. A refused or failed update is logged and
  * not tried again before `workerPoolUpdateBackoffMs` has passed.
  */

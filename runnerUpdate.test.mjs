@@ -24,6 +24,7 @@ import test from "node:test";
 import { setTimeout } from "node:timers";
 import { URL } from "node:url";
 
+import { workerPoolClientPass, workerPoolUpdating } from "./poolLoop.mjs";
 import {
   runnerEnginesRefusal,
   runnerUpdateBytesMax,
@@ -93,10 +94,21 @@ const releaseOf = (bytes, fields = {}) => ({
   ...fields,
 });
 
+/** A machine whose npm cannot write its cache, as a root-owned `~/.npm` leaves it. */
+const uncached = async (file, args, call) =>
+  args[0] === "install"
+    ? {
+        code: 243,
+        stdout: "",
+        stderr:
+          "npm error code EACCES\nnpm error path /home/runner/.npm/_cacache/tmp\n",
+      }
+    : runnerUpdateRun(file, args, call);
+
 /**
  * A machine with this runner installed globally under a prefix of its own,
  * a fetch answering the release's address with `bytes`, and an npm that
- * installs a tarball by copying its manifest over the installed one.
+ * installs a tarball by copying its manifest into the prefix it is given.
  *
  * @param {import("node:test").TestContext} t
  * @param {{bytes?: Uint8Array, ports?: Record<string, unknown>, installedVersion?: string}} [options]
@@ -137,8 +149,10 @@ async function machine(t, options = {}) {
         { timeoutMs: 30_000 },
       );
       assert.equal(untarred.code, 0, untarred.stderr);
+      const target = join(args[3], "lib", "node_modules", packageName);
+      await mkdir(target, { recursive: true });
       await writeFile(
-        join(installed, "package.json"),
+        join(target, "package.json"),
         await readFile(join(scratch, "package", "package.json")),
       );
       return { code: 0, stdout: "", stderr: "" };
@@ -190,19 +204,31 @@ test("a release proved whole is installed into the prefix the runner was install
   await assert.rejects(readFile(box.settings.lockPath), { code: "ENOENT" });
 });
 
-test("a release proved whole is not installed, no lock is taken and nothing is left staged", async (t) => {
+test("a release proved whole is installed by npm only into a prefix of the proof's own, no lock is taken and nothing is left staged", async (t) => {
   const box = await machine(t);
   assert.deepEqual(await box.updater.prove(releaseOf(box.bytes)), {
     proved: "Proved",
   });
   assert.equal(box.fetched.length, 1);
-  assert.equal(box.npmCalls.length, 0);
+  assert.equal(box.npmCalls.length, 1);
+  const [{ file, args, environment }] = box.npmCalls;
+  assert.equal(file, "npm");
+  assert.deepEqual(
+    [...args.slice(0, 3), ...args.slice(4, -1)],
+    ["install", "--global", "--prefix", "--no-audit", "--no-fund"],
+  );
+  assert.ok(args[3].startsWith(join(box.temporary, "chuggy-runner-update-")));
+  assert.match(args.at(-1) ?? "", /chuggy-test-0\.5\.0\.tgz$/u);
+  assert.equal(
+    environment?.PATH?.split(delimiter)[0],
+    dirname(process.execPath),
+  );
   assert.equal(await box.installedVersion(), ownVersion);
   assert.deepEqual(await readdir(box.temporary), []);
   await assert.rejects(readFile(box.settings.lockPath), { code: "ENOENT" });
 });
 
-test("a release whose update would fail before npm fails its proof for the same reason", async (t) => {
+test("a release whose update would fail before npm, or at npm's own failure, fails its proof for the same reason", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "runner-pack-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const tooNew = await packed(root, {
@@ -223,6 +249,11 @@ test("a release whose update would fail before npm fails its proof for the same 
     [{}, { integrity: `sha512-${"A".repeat(86)}==` }, /integrity chuggy/u],
     [{ bytes: tooNew }, {}, /needs Node >=99/u],
     [{ bytes: misnamed }, {}, /^its bin answered/u],
+    [
+      { ports: { run: uncached } },
+      {},
+      /^npm could not install it: npm error code EACCES; npm error path /u,
+    ],
   ]) {
     const box = await machine(t, options);
     const release = releaseOf(box.bytes, fields);
@@ -237,6 +268,80 @@ test("a release whose update would fail before npm fails its proof for the same 
     assert.deepEqual(await readdir(box.temporary), []);
   }
 });
+
+test(
+  "a release npm cannot install never drains a pool whose work would end with its process, and is not proved again before the backoff",
+  { timeout: 60_000 },
+  async (t) => {
+    const box = await machine(t, { ports: { run: uncached } });
+    const release = releaseOf(box.bytes);
+    /** @type {number[][]} */
+    const rooms = [];
+    /** @type {string[]} */
+    const logged = [];
+    const pooled = {
+      tokens: {
+        acquire: async () => ({ acquired: "Token", token: "pool-token" }),
+        invalidate: () => undefined,
+      },
+      plane: {
+        poll: async (_token, _held, jobs, sessions) => {
+          rooms.push([jobs, sessions]);
+          return {
+            polled: "Reconciled",
+            assignments: [],
+            sessions: [],
+            stop: [],
+            release,
+          };
+        },
+        settle: async () => "Settled",
+      },
+      jobs: { end: async () => "Ended" },
+      sessions: { end: async () => "Ended" },
+      backend: {
+        held: async () => [{ assignment: "host-1", kind: "Job" }],
+        ended: async () => [],
+        place: async () => ({ placed: "Placed" }),
+        stop: async () => ({ stopped: "Stopped" }),
+      },
+      settings: {
+        concurrencyMax: 2,
+        sessionsMax: 1,
+        outageBackoffMs: 1,
+        passesMax: 1,
+      },
+    };
+    const updating = workerPoolUpdating(
+      { on: true, updater: box.updater },
+      { log: (line) => logged.push(line), nowMs: () => 0 },
+    );
+    await workerPoolClientPass(/** @type {any} */ (pooled), updating);
+    await workerPoolClientPass(/** @type {any} */ (pooled), updating);
+    for (
+      let waits = 0;
+      waits < 3000 && !logged.some((line) => line.startsWith("did not update"));
+      waits += 1
+    )
+      await new Promise((settle) => {
+        setTimeout(settle, 10);
+      });
+    await workerPoolClientPass(/** @type {any} */ (pooled), updating);
+    await workerPoolClientPass(/** @type {any} */ (pooled), updating);
+    assert.deepEqual(rooms, [
+      [1, 1],
+      [1, 1],
+      [1, 1],
+      [1, 1],
+    ]);
+    assert.equal(box.fetched.length, 1);
+    assert.match(
+      logged.at(-1) ?? "",
+      /^did not update to chuggy-test 0\.5\.0: npm could not install it: npm error code EACCES/u,
+    );
+    assert.equal(await box.installedVersion(), ownVersion);
+  },
+);
 
 test("a copy another service already brought to or past the release is proved without a fetch", async (t) => {
   for (const present of [wanted, "0.6.0"]) {

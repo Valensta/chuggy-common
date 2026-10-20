@@ -8,9 +8,10 @@
  * chuggy named. Unpacked where nothing runs it, it must name the package and
  * the version, accept this process's Node, and answer `--version` with that
  * version when its bin runs under that Node. Any failure leaves the running
- * copy as it was. `prove` is that proof alone, installing nothing, so a runner
- * whose work would end with its process stops taking work only for a release
- * that has already proved itself.
+ * copy as it was. `prove` is that proof alone, followed by npm's install of the
+ * tarball into a prefix of its own beside it, by the npm and the cache the real
+ * install would use, so a runner whose work would end with its process stops
+ * taking work only for a release that has already proved itself.
  *
  * EVERY SERVICE SHARING THE INSTALL TAKES ONE LOCK to install, and one that
  * finds the installed copy already at or past the version, before it fetches
@@ -80,7 +81,7 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @typedef {{updated: "Installed", version: string} | {updated: "AlreadyInstalled", version: string}
  *   | {updated: "Failed", reason: string}} RunnerUpdated the first two are a restart now; `reason` is a clause a log line reads after the release it names
  *
- * @typedef {{proved: "Proved"} | {proved: "Failed", reason: string}} RunnerProved `Proved` is a release `update` would install, or a copy already at or past it; `reason` reads as `RunnerUpdated`'s does
+ * @typedef {{proved: "Proved"} | {proved: "Failed", reason: string}} RunnerProved `Proved` is a release npm installed into a prefix of the proof's own, or a copy already at or past it; `reason` reads as `RunnerUpdated`'s does
  *
  * @typedef {object} RunnerUpdater
  * @property {RunnerIdentity} runner
@@ -490,6 +491,23 @@ async function runnerReleaseInstalled(release, tarball, context) {
   const { settings, prefix, ports } = context;
   const already = await runnerAlreadyInstalled(settings.installed, release);
   if (already !== undefined) return already;
+  await runnerNpmInstalled(prefix, tarball, ports);
+  const now = await runnerInstalledVersion(settings.installed, release.package);
+  if (now !== release.version)
+    runnerUpdateRefused(
+      `npm installed it, and ${join(settings.installed, "package.json")} names version ${String(now)}`,
+    );
+  return { updated: "Installed", version: release.version };
+}
+
+/**
+ * npm's global install of the tarball under `prefix`.
+ *
+ * @param {string} prefix
+ * @param {string} tarball
+ * @param {RunnerUpdatePorts} ports
+ */
+async function runnerNpmInstalled(prefix, tarball, ports) {
   const beside = join(dirname(ports.execPath), "npm");
   const npm = (await ports.executable(beside)) ? beside : "npm";
   const path = ports.environment.PATH;
@@ -518,12 +536,6 @@ async function runnerReleaseInstalled(release, tarball, context) {
     runnerUpdateRefused(
       `npm could not install it: ${runnerUpdateTail(installed.stderr)}`,
     );
-  const now = await runnerInstalledVersion(settings.installed, release.package);
-  if (now !== release.version)
-    runnerUpdateRefused(
-      `npm installed it, and ${join(settings.installed, "package.json")} names version ${String(now)}`,
-    );
-  return { updated: "Installed", version: release.version };
 }
 
 /**
@@ -615,7 +627,11 @@ async function runnerUpdateProve(context, release) {
   try {
     const unfetched = await runnerUpdateUnfetched(context, release);
     if ("prefix" in unfetched)
-      await runnerReleaseProved(context.ports, release, async () => undefined);
+      await runnerReleaseProved(context.ports, release, async (tarball) => {
+        const trial = join(dirname(tarball), "prefix");
+        await mkdir(trial);
+        await runnerNpmInstalled(trial, tarball, context.ports);
+      });
     else if (unfetched.updated === "Failed")
       return { proved: "Failed", reason: unfetched.reason };
     return { proved: "Proved" };
