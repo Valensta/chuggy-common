@@ -6,6 +6,10 @@ import {
   workerContractHeader,
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
+import {
+  workerRunnerHeader,
+  workerRunnerOf,
+} from "@chuggy/worker-contract/workerPool";
 
 import {
   checkedPoolPlaneClientSettings,
@@ -228,6 +232,77 @@ test("a timeout that is not a positive whole number is refused", () => {
         () => poolPlaneClient({ ...planeSettings, [name]: refused }),
         /timeout must be a positive integer/u,
       );
+});
+
+/** The release chuggy pins for a runner's package, as a poll's answer names it. */
+const release = {
+  package: "chuggy-linux",
+  version: "0.14.1",
+  url: "https://github.com/kasofsk/chuggy-linux/releases/download/v0.14.1/chuggy-linux-0.14.1.tgz",
+  integrity: `sha512-${"A".repeat(86)}==`,
+};
+
+test("a runner's poll names its package and version, and the release the answer pins for it is passed on", async () => {
+  const headers = [];
+  const plane = poolPlaneClient(
+    {
+      ...planeSettings,
+      runner: { package: "chuggy-linux", version: "0.14.0" },
+    },
+    async (_input, init) => {
+      headers.push(init.headers);
+      return answered(
+        200,
+        JSON.stringify({ assignments: [], sessions: [], stop: [], release }),
+      );
+    },
+  );
+  assert.deepEqual(await plane.poll("pool-token", [], 1), {
+    polled: "Reconciled",
+    assignments: [],
+    sessions: [],
+    stop: [],
+    release,
+  });
+  assert.deepEqual(workerRunnerOf(headers[0][workerRunnerHeader]), {
+    package: "chuggy-linux",
+    version: "0.14.0",
+  });
+});
+
+test("a client that is no runner names none, and an answer pinning no release passes none on", async () => {
+  const headers = [];
+  const plane = poolPlaneClient(planeSettings, async (_input, init) => {
+    headers.push(init.headers);
+    return answered(
+      200,
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+    );
+  });
+  const polled = await plane.poll("pool-token", [], 1);
+  assert.equal(workerRunnerHeader in headers[0], false);
+  assert.equal("release" in polled, false);
+});
+
+test("a runner the contract cannot name is refused at once, and a release it cannot read is an outage", async () => {
+  for (const runner of [
+    { package: "chuggy-linux", version: "0.14.0-rc.1" },
+    { package: "Chuggy", version: "0.14.0" },
+  ])
+    assert.throws(
+      () => poolPlaneClient({ ...planeSettings, runner }),
+      /pool plane runner must name a package and a plain release version/u,
+    );
+  const polled = await answering(
+    200,
+    JSON.stringify({
+      assignments: [],
+      sessions: [],
+      stop: [],
+      release: { ...release, url: release.url.replace("https:", "http:") },
+    }),
+  ).poll("pool-token", [], 1);
+  assert.equal(polled.polled, "Unavailable");
 });
 
 test("a poll and every settlement name the release this client was built with", async () => {
