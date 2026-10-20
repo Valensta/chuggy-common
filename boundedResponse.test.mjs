@@ -33,14 +33,22 @@ test("a declared length past the bound is refused before any of the body is read
   assert.equal(body.pulled.count, 0);
 });
 
-test("a body that declares no length is refused as it passes the bound, however long it goes on", async () => {
-  const endless = new globalThis.ReadableStream({
+test("a body that declares no length is refused as it passes the byte bound, before its end is read", async () => {
+  const readsMax = 1_000;
+  // One chunk past the read bound, then the end: a read without either bound
+  // fails the reason below rather than filling the machine's memory.
+  let sent = 0;
+  const long = new globalThis.ReadableStream({
     pull(controller) {
-      controller.enqueue(new Uint8Array([1, 2]));
+      if (sent > readsMax) controller.close();
+      else {
+        controller.enqueue(new Uint8Array([1, 2]));
+        sent += 1;
+      }
     },
   });
   await assert.rejects(
-    boundedResponseBytes(new globalThis.Response(endless), 4, 1_000),
+    boundedResponseBytes(new globalThis.Response(long), 4, readsMax),
     /byte bound/u,
   );
 });

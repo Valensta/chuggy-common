@@ -253,25 +253,29 @@ test("a response longer than the byte bound is refused before it is parsed", asy
   await assert.rejects(source.token(bounded()), /byte bound/u);
 });
 
-test("an endless empty grant response is refused at the configured read bound", async () => {
+test("a grant response of empty chunks is refused at the configured read bound, before its end is read", async () => {
+  const readsMax = 3;
+  // One chunk past the read bound, then the end: a read without the bound
+  // fails on the empty grant rather than reading forever.
   let pulled = 0;
   const stream = new globalThis.ReadableStream(
     {
       pull(controller) {
         pulled += 1;
-        controller.enqueue(new Uint8Array());
+        if (pulled > readsMax + 1) controller.close();
+        else controller.enqueue(new Uint8Array());
       },
     },
     { highWaterMark: 0 },
   );
   const source = clientCredentialsTokenSource(
     credentials({
-      responseReadsMax: 3,
+      responseReadsMax: readsMax,
       fetch: async () => new globalThis.Response(stream),
     }),
   );
   await assert.rejects(source.token(bounded()), /read bound/u);
-  assert.equal(pulled, 4);
+  assert.equal(pulled, readsMax + 1);
 });
 
 test("an invalidated token is minted again, and only that one", async () => {
