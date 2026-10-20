@@ -797,7 +797,9 @@ async function listedHeld(state, inspected, container, nowSecs) {
  * What this pool holds, each with the kind it was placed as: every placement
  * still pulling or starting, and every container still running inside its
  * deadline. The placements are read before the listing, so one that finishes
- * between the two is listed as a container.
+ * between the two is listed as a container. A container runs on when this
+ * process ends, and a runner started after it lists it again; a placement is
+ * this process's own, and ends with it.
  *
  * The ends of placements that failed before that read are made ready only
  * where the listing finds no container of theirs and no stop came meanwhile:
@@ -854,7 +856,11 @@ async function heldAssignments(state) {
   }
   for (const assignment of state.ends.accounted)
     if (!listed.has(assignment)) state.ends.accounted.delete(assignment);
-  return [...held].map(([assignment, kind]) => ({ assignment, kind }));
+  return [...held].map(([assignment, kind]) =>
+    placing.has(assignment)
+      ? { assignment, kind }
+      : { assignment, kind, outlivesRunner: true },
+  );
 }
 
 /** The images an owner lists for work that pins none, as a runner's settings name them. */
