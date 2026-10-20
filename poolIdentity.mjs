@@ -2,7 +2,7 @@
  * What a runner serves, in the forms this machine keys what it keeps by: the
  * label its containers carry, and a digest naming its runtime directory and
  * its containers. A pool is named by its tenant, project and name; a personal
- * runner by its tenant and the member it serves, one per member per tenant.
+ * runner by its tenant and the member it serves.
  * Each form is injective across both kinds, so two runners never share one
  * whatever their names hold: a pool's label has three names and a personal
  * runner's two, and a pool's digest is of a list of names where a personal
