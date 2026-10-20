@@ -527,13 +527,20 @@ test("a download that answers anything but its bytes, or more of them than a rel
     updated: "Failed",
     reason: "its download answered 404",
   });
+  // One chunk past the bound, then the end: a read without the bound fails
+  // the reason below rather than filling the machine's memory.
+  let sent = 0;
   const heavy = await machine(t, {
     ports: {
       fetch: async () =>
         new globalThis.Response(
           new globalThis.ReadableStream({
             pull(controller) {
-              controller.enqueue(new Uint8Array(1024 * 1024));
+              if (sent > runnerUpdateBytesMax) controller.close();
+              else {
+                controller.enqueue(new Uint8Array(1024 * 1024));
+                sent += 1024 * 1024;
+              }
             },
           }),
           { status: 200 },
