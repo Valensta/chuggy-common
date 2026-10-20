@@ -65,6 +65,7 @@
     "repository.mjs",
     "result.mjs",
     "runEvidence.mjs",
+    "runnerUpdate.mjs",
     "runtimeScratch.mjs",
     "sdkProbe.mjs",
     "session.mjs",
