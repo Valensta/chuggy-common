@@ -139,6 +139,14 @@ const verbs = (state) => state.calls.map((call) => call.argv[0]);
 const heldJobs = (...named) =>
   named.map((assignment) => ({ assignment, kind: "Job" }));
 
+/** Jobs `held` lists as containers, which run on once the runner's process ends. */
+const listedJobs = (...named) =>
+  named.map((assignment) => ({
+    assignment,
+    kind: "Job",
+    outlivesRunner: true,
+  }));
+
 /**
  * The attempt a seeded container was run for.
  *
@@ -216,7 +224,7 @@ test("a slow pull keeps the assignment held, and the container it starts is held
     "io.chuggy.deadline": String(startMs / 1000 + 3600),
   });
   assert.deepEqual(backend.inFlight(), []);
-  assert.deepEqual(await backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
   assert.deepEqual(await readdir(settings.runtimeDir), []);
 });
 
@@ -937,7 +945,7 @@ test("a placement whose run failed after its container started answers through t
     /was not started: its container could not be run/u,
   );
 
-  assert.deepEqual(await backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
   assert.deepEqual(await backend.ended(), []);
   const [container] = state.containers.values();
   container.status = "exited";
@@ -1029,7 +1037,7 @@ test("a container a run named before names were scoped by project is held, and s
     startMs / 1000 + 60,
     `chuggy-shame-${digest.slice(0, 20)}`,
   );
-  assert.deepEqual(await backend.held(), heldJobs("asg-2"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-2"));
   assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
   assert.equal(state.containers.has(name), false);
 });
@@ -1037,7 +1045,7 @@ test("a container a run named before names were scoped by project is held, and s
 test("a running container inside its deadline is held", async (t) => {
   const { backend, state } = await harness(t);
   seeded(state, "asg-2", "running", startMs / 1000 + 60);
-  assert.deepEqual(await backend.held(), heldJobs("asg-2"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-2"));
 });
 
 test("a listing that failed throws rather than answering nothing held", async (t) => {
@@ -1416,9 +1424,9 @@ test("held and ended name each workload by the kind it was placed as, and a cont
     if (container.status === "exited") container.exitCode = 0;
   assert.deepEqual(await backend.held(), [
     { assignment: "ses-placing", kind: "Session" },
-    { assignment: "ses-running", kind: "Session" },
-    { assignment: "asg-running", kind: "Job" },
-    { assignment: "asg-unlabelled", kind: "Job" },
+    { assignment: "ses-running", kind: "Session", outlivesRunner: true },
+    { assignment: "asg-running", kind: "Job", outlivesRunner: true },
+    { assignment: "asg-unlabelled", kind: "Job", outlivesRunner: true },
   ]);
   assert.deepEqual(await backend.ended(), [
     {
@@ -1552,7 +1560,7 @@ test("a personal runner's containers are named and labelled by its tenant and ow
     state.containers.get(name)?.labels["io.chuggy.pool"],
     "vteng/28:https:%2F%2Fauth.chuggy.example%2Fgeoff",
   );
-  assert.deepEqual(await backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
   assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
   assert.equal(state.containers.get(poolName)?.status, "running");
 });
@@ -1656,7 +1664,7 @@ test("a job given a runtime starts through its own copy of it, mounted read-only
   assert.deepEqual(container?.command, ["/opt/chuggy/check.sh"]);
   const run = state.calls.find((call) => call.argv.includes("-d"));
   assert.match(run?.envFile ?? "", /^CHUG_WORKER_WORKSPACE=\/workspace$/mu);
-  assert.deepEqual(await context.backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await context.backend.held(), listedJobs("asg-1"));
 });
 
 test("a runtime job's workspace variable is the workspace its envelope names, whatever the runner's environment says", async (t) => {
@@ -1968,7 +1976,7 @@ test("a job's image whose pull can still pass is pulled again through a runtime,
   };
   await passing.backend.place(assignment({ runtime }), "Job");
   await passing.backend.settled();
-  assert.deepEqual(await passing.backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await passing.backend.held(), listedJobs("asg-1"));
   assert.match(
     passing.log.join("\n"),
     /its image could not be pulled yet, and is pulled again: .*no such host/u,
@@ -1990,7 +1998,7 @@ test("a runtime slow to pull takes none of the dwell its job's image is pulled a
   await backend.place(assignment({ runtime }), "Job");
   await backend.settled();
   assert.equal(failures, 2);
-  assert.deepEqual(await backend.held(), heldJobs("asg-1"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
 });
 
 test("a job's image whose engine could not be reached through a runtime fails as any placement does", async (t) => {
@@ -2204,7 +2212,7 @@ test("volumes of chuggy's runtime nothing answers for are removed at the first h
   state.volumes.set("unassigned", {
     labels: { "io.chuggy.pool": "vteng/chuggy/shame" },
   });
-  assert.deepEqual(await backend.held(), heldJobs("asg-2"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-2"));
   assert.deepEqual(
     [...state.volumes.keys()],
     ["held-runtime", "other-runtime", "unassigned"],
@@ -2224,7 +2232,7 @@ test("volumes of chuggy's runtime nothing answers for are removed at the first h
     ],
   );
   const calls = state.calls.length;
-  assert.deepEqual(await backend.held(), heldJobs("asg-2"));
+  assert.deepEqual(await backend.held(), listedJobs("asg-2"));
   assert.ok(!verbs(state).slice(calls).includes("volume"));
 });
 

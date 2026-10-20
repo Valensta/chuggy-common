@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
+
+import {
+  workerRunnerHeader,
+  workerRunnerOf,
+} from "@chuggy/worker-contract/workerPool";
 
 import { poolRunnerClient, poolRunnerLoop } from "./poolRunner.mjs";
 
@@ -160,4 +165,72 @@ test("a runner's client makes one pass a run, holds its limits, and takes the to
       ),
     RangeError,
   );
+});
+
+test("a run whose runner has installed the release it updates to ends with the version it is restarted on", async () => {
+  const release = {
+    package: "chuggy-linux",
+    version: "0.14.1",
+    url: "https://github.com/kasofsk/chuggy-linux/releases/download/v0.14.1/chuggy-linux-0.14.1.tgz",
+    integrity: `sha512-${"A".repeat(86)}==`,
+  };
+  const pinned = () => ({
+    polled: "Reconciled",
+    assignments: [],
+    sessions: [],
+    stop: [],
+    release,
+  });
+  const { client } = scriptedClient([pinned, pinned]);
+  /** @type {string[]} */
+  const log = [];
+  const updated = await poolRunnerLoop(/** @type {any} */ (client), {
+    sleep: async () => undefined,
+    log: (line) => log.push(line),
+    updates: {
+      on: true,
+      updater: {
+        runner: { package: "chuggy-linux", version: "0.14.0" },
+        refusal: async () => undefined,
+        prove: async () => ({ proved: "Proved" }),
+        update: async () => ({ updated: "Installed", version: "0.14.1" }),
+      },
+    },
+  });
+  assert.deepEqual(updated, { passed: "Updated", version: "0.14.1" });
+  assert.deepEqual(log, [
+    "outage: the issuer could not be reached",
+    "updating to chuggy-linux 0.14.1",
+    "chuggy-linux 0.14.1 is installed, and this runner ends to start on it",
+  ]);
+});
+
+test("a runner's client names the runner it is given on each poll, and one given none names none", async (t) => {
+  /** @type {Array<Record<string, string>>} */
+  const sent = [];
+  mock.method(globalThis, "fetch", async (_input, init) => {
+    sent.push(init.headers);
+    return new globalThis.Response(
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      { status: 200 },
+    );
+  });
+  t.after(() => mock.restoreAll());
+  const backend = /** @type {any} */ ({});
+  const limits = { concurrencyMax: 1, sessionsMax: 0 };
+  const runner = { package: "chuggy-linux", version: "0.14.0" };
+  await poolRunnerClient(credentials, backend, limits, { runner }).plane.poll(
+    "pool-token",
+    [],
+    1,
+    0,
+  );
+  await poolRunnerClient(credentials, backend, limits).plane.poll(
+    "pool-token",
+    [],
+    1,
+    0,
+  );
+  assert.deepEqual(workerRunnerOf(sent[0][workerRunnerHeader]), runner);
+  assert.equal(workerRunnerHeader in sent[1], false);
 });

@@ -34,8 +34,8 @@ fsp.rm = async (path, options) => {
   await realWriteFile(path, "4242\n");
 };
 syncBuiltinESMExports();
-const { localTokenStore, localTokenStoreHolderAlive } =
-  await import("./localTokenStore.mjs");
+const { localTokenStore } = await import("./localTokenStore.mjs");
+const { fileLockHolderAlive } = await import("./fileLock.mjs");
 
 async function pathOf(t) {
   const directory = await fsp.mkdtemp(join(tmpdir(), "local-token-race-"));
@@ -52,7 +52,7 @@ test("where creating a file is slow, no server judges a lock before it names its
   const judged = [];
   const holderAlive = (pid) => {
     judged.push(pid);
-    return localTokenStoreHolderAlive(pid);
+    return fileLockHolderAlive(pid);
   };
   let holding = 0;
   let overlapped = false;

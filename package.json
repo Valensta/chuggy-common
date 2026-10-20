@@ -7,7 +7,7 @@
   },
   "private": true,
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.10.0/chuggy-worker-contract-1.10.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.11.0/chuggy-worker-contract-1.11.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -40,6 +40,7 @@
     "engineArgv.mjs",
     "engineErrors.mjs",
     "entrypoint.mjs",
+    "fileLock.mjs",
     "git-askpass.sh",
     "hostBackend.mjs",
     "job.mjs",
@@ -64,6 +65,7 @@
     "repository.mjs",
     "result.mjs",
     "runEvidence.mjs",
+    "runnerUpdate.mjs",
     "runtimeScratch.mjs",
     "sdkProbe.mjs",
     "session.mjs",

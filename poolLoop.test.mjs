@@ -6,7 +6,12 @@ import {
   workerPoolEvidenceCharsMax,
 } from "@chuggy/worker-contract/workerPool";
 
-import { workerPoolClientPass, workerPoolClientRun } from "./poolLoop.mjs";
+import {
+  workerPoolClientPass,
+  workerPoolClientRun,
+  workerPoolUpdateBackoffMs,
+  workerPoolUpdating,
+} from "./poolLoop.mjs";
 
 const settings = { concurrencyMax: 1, outageBackoffMs: 1, passesMax: 1 };
 
@@ -898,4 +903,426 @@ test("a run refuses a session ceiling that is not a whole number of zero or more
       ).passed,
       "Reconciled",
     );
+});
+
+/** The runner a run updates, and the release chuggy pins above it. */
+const runner = { package: "chuggy-linux", version: "0.14.0" };
+const pinned = {
+  package: "chuggy-linux",
+  version: "0.14.1",
+  url: "https://github.com/kasofsk/chuggy-linux/releases/download/v0.14.1/chuggy-linux-0.14.1.tgz",
+  integrity: `sha512-${"A".repeat(86)}==`,
+};
+
+/** The minutes a failed update's log line says the next try is in. */
+const backoffMinutes = String(workerPoolUpdateBackoffMs / 60_000);
+
+/**
+ * A promise and what settles it, for a proof or an install a case finishes
+ * when it chooses.
+ */
+function deferred() {
+  let settle;
+  const promise = new Promise((resolve) => {
+    settle = resolve;
+  });
+  return { promise, settle };
+}
+
+/**
+ * A run's update over an updater that refuses, proves and installs as told,
+ * proving and installing whatever it is asked to otherwise, on a clock the
+ * case moves.
+ *
+ * @param {{on?: boolean, refusal?: (release: object) => string | undefined, prove?: (release: object) => Promise<object>, update?: (release: {version: string}) => Promise<object>}} [answers]
+ */
+function updatingOf(answers = {}) {
+  const asked = { refusal: [], prove: [], update: [] };
+  const log = [];
+  const clock = { nowMs: 0 };
+  const updater = {
+    runner,
+    refusal: async (release) => {
+      asked.refusal.push(release.version);
+      return answers.refusal?.(release);
+    },
+    prove: async (release) => {
+      asked.prove.push(release.version);
+      return answers.prove === undefined
+        ? { proved: "Proved" }
+        : answers.prove(release);
+    },
+    update: async (release) => {
+      asked.update.push(release.version);
+      return answers.update === undefined
+        ? { updated: "Installed", version: release.version }
+        : answers.update(release);
+    },
+  };
+  const updating = workerPoolUpdating(
+    { on: answers.on ?? true, updater },
+    { log: (line) => log.push(line), nowMs: () => clock.nowMs },
+  );
+  return { asked, log, clock, updating };
+}
+
+/**
+ * A plane naming `pin.release` on every poll while it is set, recording the
+ * held and the room each poll asks.
+ *
+ * @param {{release?: object}} pin
+ * @param {object[]} [offered]
+ */
+function pinning(pin, offered = []) {
+  const polls = [];
+  const posted = [];
+  return {
+    polls,
+    posted,
+    plane: {
+      poll: async (_token, held, wanted, wantedSessions) => {
+        polls.push({ held: [...held], room: [wanted, wantedSessions] });
+        return {
+          ...reconciled(offered),
+          ...(pin.release === undefined ? {} : { release: pin.release }),
+        };
+      },
+      settle: async (_token, _assignment, outcome) => {
+        posted.push(outcome.outcome);
+        return "Settled";
+      },
+    },
+  };
+}
+
+/**
+ * Makes `count` passes, each reconciled.
+ *
+ * @param {object} pooled
+ * @param {object} updating
+ * @param {number} count
+ */
+async function passes(pooled, updating, count) {
+  for (let pass = 0; pass < count; pass += 1)
+    assert.equal(
+      (await workerPoolClientPass(pooled, updating)).passed,
+      "Reconciled",
+    );
+}
+
+const updateSettings = { ...settings, concurrencyMax: 3, sessionsMax: 1 };
+
+/** A host job, which ends with the runner's process, and a container, which outlives it. */
+const hostJob = { assignment: "host-1", kind: "Job" };
+const container = {
+  assignment: "container-1",
+  kind: "Job",
+  outlivesRunner: true,
+};
+
+test("a release above the runner's own is installed at once, unproved, where nothing held ends with the process, and the pass after ends the run", async () => {
+  const run = updatingOf();
+  const { plane, polls } = pinning({ release: pinned });
+  const pooled = client({ plane, settings: updateSettings });
+  await passes(pooled, run.updating, 1);
+  assert.deepEqual(run.asked, { refusal: ["0.14.1"], prove: [], update: [] });
+  await passes(pooled, run.updating, 1);
+  assert.deepEqual(run.asked.update, ["0.14.1"]);
+  assert.deepEqual(await workerPoolClientPass(pooled, run.updating), {
+    passed: "Updated",
+    version: "0.14.1",
+  });
+  assert.deepEqual(run.asked.prove, []);
+  assert.deepEqual(
+    polls.map(({ room }) => room),
+    [
+      [3, 1],
+      [0, 0],
+    ],
+  );
+  assert.deepEqual(run.log, [
+    "updating to chuggy-linux 0.14.1",
+    "chuggy-linux 0.14.1 is installed, and this runner ends to start on it",
+  ]);
+});
+
+test("where a workload would end with the process, the release is proved while the pool takes work, then drained for, then installed once that workload has ended", async () => {
+  const run = updatingOf();
+  const { plane, polls } = pinning({ release: pinned });
+  let held = [hostJob, container];
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: { ...idle, held: async () => held },
+  });
+  await passes(pooled, run.updating, 4);
+  assert.deepEqual(run.asked, {
+    refusal: ["0.14.1"],
+    prove: ["0.14.1"],
+    update: [],
+  });
+  assert.deepEqual(run.log, [
+    "proving chuggy-linux 0.14.1 before this pool stops taking work for it",
+    "chuggy-linux 0.14.1 is proved, and this pool takes no new work until it has updated",
+  ]);
+  held = [container];
+  await passes(pooled, run.updating, 1);
+  assert.deepEqual(run.asked.update, ["0.14.1"]);
+  assert.equal(
+    (await workerPoolClientPass(pooled, run.updating)).passed,
+    "Updated",
+  );
+  assert.deepEqual(
+    polls.map(({ room }) => room),
+    [
+      [1, 1],
+      [1, 1],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+    ],
+  );
+  assert.ok(polls.every((poll) => poll.held.includes("container-1")));
+});
+
+test("a release that fails its proof never drains the pool, is logged once, and is not proved again before the backoff", async () => {
+  const run = updatingOf({
+    prove: async () => ({
+      proved: "Failed",
+      reason: "it needs Node >=99, and this runner's Node is 24.1.0",
+    }),
+  });
+  const { plane, polls } = pinning({ release: pinned });
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: { ...idle, held: async () => [hostJob] },
+  });
+  await passes(pooled, run.updating, 4);
+  assert.deepEqual(run.asked, {
+    refusal: ["0.14.1"],
+    prove: ["0.14.1"],
+    update: [],
+  });
+  assert.deepEqual(run.log, [
+    "proving chuggy-linux 0.14.1 before this pool stops taking work for it",
+    `did not update to chuggy-linux 0.14.1: it needs Node >=99, and this runner's Node is 24.1.0; the next try is in ${backoffMinutes} minutes`,
+  ]);
+  run.clock.nowMs = workerPoolUpdateBackoffMs - 1;
+  await passes(pooled, run.updating, 1);
+  assert.equal(run.asked.refusal.length, 1);
+  run.clock.nowMs = workerPoolUpdateBackoffMs;
+  await passes(pooled, run.updating, 2);
+  assert.deepEqual(run.asked.prove, ["0.14.1", "0.14.1"]);
+  assert.deepEqual(run.asked.update, []);
+  assert.ok(polls.every(({ room }) => room[0] === 2 && room[1] === 1));
+});
+
+test("a proof that throws is a failed one, and drains nothing", async () => {
+  const run = updatingOf({
+    prove: async () => {
+      throw new Error("the disk is full");
+    },
+  });
+  const { plane, polls } = pinning({ release: pinned });
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: { ...idle, held: async () => [hostJob] },
+  });
+  await passes(pooled, run.updating, 3);
+  assert.ok(
+    run.log.includes(
+      `did not update to chuggy-linux 0.14.1: the disk is full; the next try is in ${backoffMinutes} minutes`,
+    ),
+  );
+  assert.ok(polls.every(({ room }) => room[0] === 2));
+});
+
+test("nothing a poll names moves a proof begun, and a proved release a poll names no longer is not drained for", async () => {
+  const proof = deferred();
+  const run = updatingOf({ prove: () => proof.promise });
+  const pin = { release: pinned };
+  const { plane, polls } = pinning(pin);
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: { ...idle, held: async () => [hostJob] },
+  });
+  await passes(pooled, run.updating, 2);
+  pin.release = { ...pinned, version: "0.14.2" };
+  await passes(pooled, run.updating, 2);
+  assert.deepEqual(run.asked, {
+    refusal: ["0.14.1"],
+    prove: ["0.14.1"],
+    update: [],
+  });
+  pin.release = undefined;
+  proof.settle({ proved: "Proved" });
+  await passes(pooled, run.updating, 3);
+  assert.deepEqual(run.asked.update, []);
+  assert.ok(polls.every(({ room }) => room[0] === 2));
+});
+
+test("an offer past no room while the pool drains is settled unavailable and never placed", async () => {
+  const run = updatingOf({ update: () => deferred().promise });
+  const { plane, posted } = pinning({ release: pinned }, [assignment("x")]);
+  const placer = placing();
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: placer.backend,
+  });
+  await passes(pooled, run.updating, 2);
+  assert.equal(placer.counted.placed, 1);
+  assert.deepEqual(posted, ["Accepted", "Unavailable"]);
+});
+
+test("an install in flight leaves the passes renewing what is held with no room asked, and the run ends at the first pass after it answers", async () => {
+  const install = deferred();
+  const run = updatingOf({ update: () => install.promise });
+  const pin = { release: pinned };
+  const { plane, polls } = pinning(pin);
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: { ...idle, held: async () => [container] },
+  });
+  await passes(pooled, run.updating, 3);
+  pin.release = { ...pinned, version: "0.14.2" };
+  await passes(pooled, run.updating, 1);
+  assert.deepEqual(run.asked, {
+    refusal: ["0.14.1"],
+    prove: [],
+    update: ["0.14.1"],
+  });
+  install.settle({ updated: "AlreadyInstalled", version: "0.14.2" });
+  assert.deepEqual(await workerPoolClientPass(pooled, run.updating), {
+    passed: "Updated",
+    version: "0.14.2",
+  });
+  assert.deepEqual(
+    polls.map(({ room, held }) => [room, held]),
+    [
+      [[2, 1], ["container-1"]],
+      [[0, 0], ["container-1"]],
+      [[0, 0], ["container-1"]],
+      [[0, 0], ["container-1"]],
+    ],
+  );
+});
+
+test("a failed install is logged once, the pool takes work again, and the release is not tried again before the backoff", async () => {
+  const run = updatingOf({
+    update: async () => ({
+      updated: "Failed",
+      reason: "npm could not install it: EACCES",
+    }),
+  });
+  const { plane, polls } = pinning({ release: pinned });
+  const pooled = client({ plane, settings: updateSettings });
+  await passes(pooled, run.updating, 4);
+  assert.deepEqual(run.asked, {
+    refusal: ["0.14.1"],
+    prove: [],
+    update: ["0.14.1"],
+  });
+  assert.deepEqual(
+    polls.map(({ room }) => room),
+    [
+      [3, 1],
+      [0, 0],
+      [3, 1],
+      [3, 1],
+    ],
+  );
+  assert.deepEqual(
+    run.log.filter((line) => line.startsWith("did not update")),
+    [
+      `did not update to chuggy-linux 0.14.1: npm could not install it: EACCES; the next try is in ${backoffMinutes} minutes`,
+    ],
+  );
+  run.clock.nowMs = workerPoolUpdateBackoffMs - 1;
+  await passes(pooled, run.updating, 1);
+  assert.equal(run.asked.refusal.length, 1);
+  run.clock.nowMs = workerPoolUpdateBackoffMs;
+  await passes(pooled, run.updating, 2);
+  assert.deepEqual(run.asked.update, ["0.14.1", "0.14.1"]);
+});
+
+test("an install that throws is a failed one", async () => {
+  const run = updatingOf({
+    update: async () => {
+      throw new Error("the disk is full");
+    },
+  });
+  const pooled = client({
+    plane: pinning({ release: pinned }).plane,
+    settings: updateSettings,
+  });
+  await passes(pooled, run.updating, 3);
+  assert.ok(
+    run.log.includes(
+      `did not update to chuggy-linux 0.14.1: the disk is full; the next try is in ${backoffMinutes} minutes`,
+    ),
+  );
+});
+
+test("a release the updater refuses is logged and never proved, installed or drained for", async () => {
+  const run = updatingOf({
+    refusal: () => "this runner cannot write /usr/lib/node_modules",
+  });
+  const { plane, polls } = pinning({ release: pinned });
+  const pooled = client({ plane, settings: updateSettings });
+  await passes(pooled, run.updating, 3);
+  assert.deepEqual(run.asked, { refusal: ["0.14.1"], prove: [], update: [] });
+  assert.ok(polls.every(({ room }) => room[0] === 3));
+  assert.deepEqual(run.log, [
+    `did not update to chuggy-linux 0.14.1: this runner cannot write /usr/lib/node_modules; the next try is in ${backoffMinutes} minutes`,
+  ]);
+});
+
+test("a runner that does not update says once per release that one is out, and asks for work as before", async () => {
+  const run = updatingOf({ on: false });
+  const pin = { release: pinned };
+  const { plane, polls } = pinning(pin);
+  const pooled = client({ plane, settings: updateSettings });
+  await passes(pooled, run.updating, 3);
+  pin.release = { ...pinned, version: "0.14.2" };
+  await passes(pooled, run.updating, 2);
+  assert.deepEqual(run.asked, { refusal: [], prove: [], update: [] });
+  assert.ok(polls.every(({ room }) => room[0] === 3));
+  assert.deepEqual(run.log, [
+    "chuggy-linux 0.14.1 is out, and this runner, 0.14.0, does not update itself",
+    "chuggy-linux 0.14.2 is out, and this runner, 0.14.0, does not update itself",
+  ]);
+});
+
+test("a release at or below the runner's own is no update, and one the poll stops naming is no longer drained for", async () => {
+  const run = updatingOf();
+  const pin = { release: { ...pinned, version: "0.14.0" } };
+  const { plane, polls } = pinning(pin);
+  const pooled = client({
+    plane,
+    settings: updateSettings,
+    backend: { ...idle, held: async () => [hostJob] },
+  });
+  await passes(pooled, run.updating, 1);
+  assert.deepEqual(run.asked.refusal, []);
+  pin.release = pinned;
+  await passes(pooled, run.updating, 3);
+  pin.release = undefined;
+  await passes(pooled, run.updating, 2);
+  assert.deepEqual(
+    polls.map(({ room }) => room),
+    [
+      [2, 1],
+      [2, 1],
+      [2, 1],
+      [0, 0],
+      [0, 0],
+      [2, 1],
+    ],
+  );
+  assert.deepEqual(run.asked.update, []);
 });

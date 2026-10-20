@@ -6,6 +6,9 @@
  * the one status two answers share, told apart by its body. An answer this
  * side cannot read is an outage rather than a denial, because a denial ends
  * the pool over a skew the plane did not refuse.
+ *
+ * A runner names its package and version on the poll, and the answer may name
+ * the release chuggy pins for that package; the cluster's client names none.
  */
 
 import { TextDecoder } from "node:util";
@@ -21,6 +24,8 @@ import {
   workerPoolPollRoute,
   workerPoolReconciliationSchema,
   workerPoolSettlementPath,
+  workerRunnerHeader,
+  workerRunnerSchema,
 } from "@chuggy/worker-contract/workerPool";
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
@@ -28,6 +33,7 @@ import { workerPlaneHeaders } from "./transport.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").AssignmentOutcome} AssignmentOutcome
+ * @typedef {import("@chuggy/worker-contract/workerPool").WorkerRunner} WorkerRunner
  * @typedef {import("./poolLoop.mjs").WorkerPoolPlane} WorkerPoolPlane
  * @typedef {import("./poolLoop.mjs").WorkerPoolPolled} WorkerPoolPolled
  * @typedef {import("./poolLoop.mjs").WorkerPoolSettled} WorkerPoolSettled
@@ -36,6 +42,7 @@ import { workerPlaneHeaders } from "./transport.mjs";
  * @property {string} baseUrl
  * @property {number} pollTimeoutMs the operator's to size, since a long poll cut shorter than the plane's own wait is an outage every idle window
  * @property {number} settleTimeoutMs
+ * @property {WorkerRunner} [runner] the runner's package and version, which each poll names
  */
 
 /** The most one reconciliation may weigh, orders above a bounded batch of assignments. */
@@ -85,6 +92,13 @@ export function checkedPoolPlaneClientSettings(input) {
       throw new RangeError(
         `pool plane ${name} timeout must be a positive integer`,
       );
+  if (
+    input.runner !== undefined &&
+    !workerRunnerSchema.safeParse(input.runner).success
+  )
+    throw new RangeError(
+      "pool plane runner must name a package and a plain release version",
+    );
   return { ...input, baseUrl: url.toString() };
 }
 
@@ -165,6 +179,9 @@ async function poolPlaneReconciled(answered) {
         assignments: read.data.assignments,
         sessions: read.data.sessions,
         stop: read.data.stop,
+        ...(read.data.release === undefined
+          ? {}
+          : { release: read.data.release }),
       }
     : {
         polled: "Unavailable",
@@ -192,10 +209,16 @@ async function poolPlanePolled(
   let answered;
   try {
     const url = poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions);
+    const { runner } = settings;
     answered = await fetcher(url, {
       method: "GET",
       signal: globalThis.AbortSignal.timeout(settings.pollTimeoutMs),
-      headers: workerPlaneHeaders(token, { accept: "application/json" }),
+      headers: workerPlaneHeaders(token, {
+        accept: "application/json",
+        ...(runner === undefined
+          ? {}
+          : { [workerRunnerHeader]: `${runner.package}/${runner.version}` }),
+      }),
     });
   } catch {
     return {
