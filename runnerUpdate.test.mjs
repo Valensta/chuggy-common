@@ -190,6 +190,64 @@ test("a release proved whole is installed into the prefix the runner was install
   await assert.rejects(readFile(box.settings.lockPath), { code: "ENOENT" });
 });
 
+test("a release proved whole is not installed, no lock is taken and nothing is left staged", async (t) => {
+  const box = await machine(t);
+  assert.deepEqual(await box.updater.prove(releaseOf(box.bytes)), {
+    proved: "Proved",
+  });
+  assert.equal(box.fetched.length, 1);
+  assert.equal(box.npmCalls.length, 0);
+  assert.equal(await box.installedVersion(), ownVersion);
+  assert.deepEqual(await readdir(box.temporary), []);
+  await assert.rejects(readFile(box.settings.lockPath), { code: "ENOENT" });
+});
+
+test("a release whose update would fail before npm fails its proof for the same reason", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "runner-pack-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tooNew = await packed(root, {
+    manifest: {
+      name: packageName,
+      version: wanted,
+      engines: { node: ">=99" },
+      bin: { [packageName]: "cli.mjs" },
+    },
+  });
+  const misnamed = await packed(root, {
+    bin: versionBin(`${packageName} 0.5.1`),
+  });
+  const missing = async () => new globalThis.Response("", { status: 404 });
+  for (const [options, fields, why] of [
+    [{}, { package: "chuggy-darwin" }, /release of chuggy-darwin/u],
+    [{ ports: { fetch: missing } }, {}, /^its download answered 404$/u],
+    [{}, { integrity: `sha512-${"A".repeat(86)}==` }, /integrity chuggy/u],
+    [{ bytes: tooNew }, {}, /needs Node >=99/u],
+    [{ bytes: misnamed }, {}, /^its bin answered/u],
+  ]) {
+    const box = await machine(t, options);
+    const release = releaseOf(box.bytes, fields);
+    const proved = await box.updater.prove(release);
+    assert.equal(proved.proved, "Failed", String(why));
+    assert.match(proved.reason, why);
+    assert.deepEqual(await box.updater.update(release), {
+      updated: "Failed",
+      reason: proved.reason,
+    });
+    assert.equal(box.npmCalls.length, 0);
+    assert.deepEqual(await readdir(box.temporary), []);
+  }
+});
+
+test("a copy another service already brought to or past the release is proved without a fetch", async (t) => {
+  for (const present of [wanted, "0.6.0"]) {
+    const box = await machine(t, { installedVersion: present });
+    assert.deepEqual(await box.updater.prove(releaseOf(box.bytes)), {
+      proved: "Proved",
+    });
+    assert.deepEqual(box.fetched, []);
+  }
+});
+
 test("a release of another package, or not above this runner's own version, is refused before anything is fetched", async (t) => {
   const box = await machine(t);
   for (const [fields, why] of [

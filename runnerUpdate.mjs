@@ -8,7 +8,9 @@
  * chuggy named. Unpacked where nothing runs it, it must name the package and
  * the version, accept this process's Node, and answer `--version` with that
  * version when its bin runs under that Node. Any failure leaves the running
- * copy as it was.
+ * copy as it was. `prove` is that proof alone, installing nothing, so a runner
+ * whose work would end with its process stops taking work only for a release
+ * that has already proved itself.
  *
  * EVERY SERVICE SHARING THE INSTALL TAKES ONE LOCK to install, and one that
  * finds the installed copy already at or past the version, before it fetches
@@ -78,9 +80,12 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @typedef {{updated: "Installed", version: string} | {updated: "AlreadyInstalled", version: string}
  *   | {updated: "Failed", reason: string}} RunnerUpdated the first two are a restart now; `reason` is a clause a log line reads after the release it names
  *
+ * @typedef {{proved: "Proved"} | {proved: "Failed", reason: string}} RunnerProved `Proved` is a release `update` would install, or a copy already at or past it; `reason` reads as `RunnerUpdated`'s does
+ *
  * @typedef {object} RunnerUpdater
  * @property {RunnerIdentity} runner
  * @property {(release: RunnerRelease) => Promise<string | undefined>} refusal why the release is refused before anything is fetched, or nothing
+ * @property {(release: RunnerRelease) => Promise<RunnerProved>} prove
  * @property {(release: RunnerRelease) => Promise<RunnerUpdated>} update
  */
 
@@ -522,6 +527,133 @@ async function runnerReleaseInstalled(release, tarball, context) {
 }
 
 /**
+ * @typedef {object} RunnerUpdateContext
+ * @property {RunnerUpdateSettings} settings
+ * @property {string | undefined} prefix the npm prefix the copy was installed under, if it was installed globally
+ * @property {RunnerUpdatePorts} ports
+ */
+
+/**
+ * Why a release is refused before anything is fetched, or nothing.
+ *
+ * @param {RunnerUpdateContext} context
+ * @param {RunnerRelease} release
+ */
+async function runnerUpdateRefusal(context, release) {
+  const { settings, prefix, ports } = context;
+  const { runner } = settings;
+  if (release.package !== runner.package)
+    return `it is a release of ${release.package}, and this runner is ${runner.package}`;
+  if (!runnerVersionAbove(release.version, runner.version))
+    return `it is not above this runner's own version, ${runner.version}`;
+  const address = runnerReleaseUrlRefusal(release.url, settings.releasePrefix);
+  if (address !== undefined) return address;
+  if (prefix === undefined)
+    return `this runner is installed at ${settings.installed}, which is not where npm installs a package globally`;
+  for (const directory of [
+    join(prefix, "lib", "node_modules"),
+    join(prefix, "bin"),
+  ])
+    if (!(await ports.writable(directory)))
+      return `this runner cannot write ${directory}, where npm would install it`;
+  return undefined;
+}
+
+/**
+ * The answer known before anything is fetched, a refusal or a copy already at
+ * or past the release, or else the prefix the release would be installed
+ * under.
+ *
+ * @param {RunnerUpdateContext} context
+ * @param {RunnerRelease} release
+ * @returns {Promise<RunnerUpdated | {prefix: string}>}
+ */
+async function runnerUpdateUnfetched(context, release) {
+  const reason = await runnerUpdateRefusal(context, release);
+  if (reason !== undefined || context.prefix === undefined)
+    return { updated: "Failed", reason: String(reason) };
+  return (
+    (await runnerAlreadyInstalled(context.settings.installed, release)) ?? {
+      prefix: context.prefix,
+    }
+  );
+}
+
+/**
+ * What `proven` makes of the release's tarball once it is proved, while it is
+ * still staged in a directory of this process's own. Throws why the release
+ * did not prove itself.
+ *
+ * @template T
+ * @param {RunnerUpdatePorts} ports
+ * @param {RunnerRelease} release
+ * @param {(tarball: string) => Promise<T>} proven
+ * @returns {Promise<T>}
+ */
+async function runnerReleaseProved(ports, release, proven) {
+  const staging = await mkdtemp(join(ports.temporary, "chuggy-runner-update-"));
+  try {
+    const tarball = await runnerReleaseFetched(release, staging, ports);
+    await runnerReleaseStaged(release, tarball, ports);
+    return await proven(tarball);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+/** @param {unknown} failure */
+function runnerUpdateFailure(failure) {
+  return /** @type {Error} */ (failure).message;
+}
+
+/**
+ * @param {RunnerUpdateContext} context
+ * @param {RunnerRelease} release
+ * @returns {Promise<RunnerProved>}
+ */
+async function runnerUpdateProve(context, release) {
+  try {
+    const unfetched = await runnerUpdateUnfetched(context, release);
+    if ("prefix" in unfetched)
+      await runnerReleaseProved(context.ports, release, async () => undefined);
+    else if (unfetched.updated === "Failed")
+      return { proved: "Failed", reason: unfetched.reason };
+    return { proved: "Proved" };
+  } catch (failure) {
+    return { proved: "Failed", reason: runnerUpdateFailure(failure) };
+  }
+}
+
+/**
+ * @param {RunnerUpdateContext} context
+ * @param {RunnerRelease} release
+ * @returns {Promise<RunnerUpdated>}
+ */
+async function runnerUpdateInstall(context, release) {
+  const { settings, ports } = context;
+  const { lockPath } = settings;
+  const lockBounds = {
+    waitMsMax: runnerUpdateLockWaitMsMax,
+    heldMsMax: runnerUpdateLockHeldMsMax,
+    pollMs: 1_000,
+    busy: `another service has held the install lock at ${lockPath} for longer than an install waits`,
+  };
+  try {
+    const unfetched = await runnerUpdateUnfetched(context, release);
+    if (!("prefix" in unfetched)) return unfetched;
+    const { prefix } = unfetched;
+    return await runnerReleaseProved(ports, release, async (tarball) => {
+      await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+      return fileLocked(lockPath, lockBounds, ports, () =>
+        runnerReleaseInstalled(release, tarball, { settings, prefix, ports }),
+      );
+    });
+  } catch (failure) {
+    return { updated: "Failed", reason: runnerUpdateFailure(failure) };
+  }
+}
+
+/**
  * The update of a copy installed as `settings` says, through `overrides`
  * where a suite stands in for the network, npm or the machine.
  *
@@ -531,77 +663,31 @@ async function runnerReleaseInstalled(release, tarball, context) {
  */
 export function runnerUpdater(settings, overrides = {}) {
   checkedRunnerUpdateSettings(settings);
-  /** @type {RunnerUpdatePorts} */
-  const ports = {
-    fetch: globalThis.fetch,
-    deadline: (ms) => globalThis.AbortSignal.timeout(ms),
-    run: runnerUpdateRun,
-    writable: (path) => runnerUpdateAllowed(path, constants.W_OK),
-    executable: (path) => runnerUpdateAllowed(path, constants.X_OK),
-    execPath: process.execPath,
-    nodeVersion: process.versions.node,
-    environment: process.env,
-    temporary: tmpdir(),
-    pid: process.pid,
-    nowMs: Date.now,
-    wait,
-    holderAlive: fileLockHolderAlive,
-    ...overrides,
+  /** @type {RunnerUpdateContext} */
+  const context = {
+    settings,
+    prefix: runnerNpmPrefix(settings.installed, settings.runner.package),
+    ports: {
+      fetch: globalThis.fetch,
+      deadline: (ms) => globalThis.AbortSignal.timeout(ms),
+      run: runnerUpdateRun,
+      writable: (path) => runnerUpdateAllowed(path, constants.W_OK),
+      executable: (path) => runnerUpdateAllowed(path, constants.X_OK),
+      execPath: process.execPath,
+      nodeVersion: process.versions.node,
+      environment: process.env,
+      temporary: tmpdir(),
+      pid: process.pid,
+      nowMs: Date.now,
+      wait,
+      holderAlive: fileLockHolderAlive,
+      ...overrides,
+    },
   };
-  const { runner, releasePrefix, installed, lockPath } = settings;
-  const prefix = runnerNpmPrefix(installed, runner.package);
-  const lockBounds = {
-    waitMsMax: runnerUpdateLockWaitMsMax,
-    heldMsMax: runnerUpdateLockHeldMsMax,
-    pollMs: 1_000,
-    busy: `another service has held the install lock at ${lockPath} for longer than an install waits`,
+  return {
+    runner: settings.runner,
+    refusal: (release) => runnerUpdateRefusal(context, release),
+    prove: (release) => runnerUpdateProve(context, release),
+    update: (release) => runnerUpdateInstall(context, release),
   };
-
-  /** @param {RunnerRelease} release */
-  async function refusal(release) {
-    if (release.package !== runner.package)
-      return `it is a release of ${release.package}, and this runner is ${runner.package}`;
-    if (!runnerVersionAbove(release.version, runner.version))
-      return `it is not above this runner's own version, ${runner.version}`;
-    const address = runnerReleaseUrlRefusal(release.url, releasePrefix);
-    if (address !== undefined) return address;
-    if (prefix === undefined)
-      return `this runner is installed at ${installed}, which is not where npm installs a package globally`;
-    for (const directory of [
-      join(prefix, "lib", "node_modules"),
-      join(prefix, "bin"),
-    ])
-      if (!(await ports.writable(directory)))
-        return `this runner cannot write ${directory}, where npm would install it`;
-    return undefined;
-  }
-
-  /** @param {RunnerRelease} release */
-  async function update(release) {
-    const reason = await refusal(release);
-    if (reason !== undefined || prefix === undefined)
-      return { updated: "Failed", reason: String(reason) };
-    const already = await runnerAlreadyInstalled(installed, release);
-    if (already !== undefined) return already;
-    const staging = await mkdtemp(
-      join(ports.temporary, "chuggy-runner-update-"),
-    );
-    try {
-      const tarball = await runnerReleaseFetched(release, staging, ports);
-      await runnerReleaseStaged(release, tarball, ports);
-      await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-      return await fileLocked(lockPath, lockBounds, ports, () =>
-        runnerReleaseInstalled(release, tarball, { settings, prefix, ports }),
-      );
-    } catch (failure) {
-      return {
-        updated: "Failed",
-        reason: /** @type {Error} */ (failure).message,
-      };
-    } finally {
-      await rm(staging, { recursive: true, force: true });
-    }
-  }
-
-  return { runner, refusal, update };
 }
