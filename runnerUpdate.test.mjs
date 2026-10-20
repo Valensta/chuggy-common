@@ -543,6 +543,18 @@ test("an install already at or past the version under the lock installs nothing 
   }
 });
 
+test("an install another service already brought to or past the version restarts without fetching", async (t) => {
+  for (const present of [wanted, "0.6.0"]) {
+    const box = await machine(t, { installedVersion: present });
+    assert.deepEqual(await box.updater.update(releaseOf(box.bytes)), {
+      updated: "AlreadyInstalled",
+      version: present,
+    });
+    assert.deepEqual(box.fetched, []);
+    assert.equal(box.npmCalls.length, 0);
+  }
+});
+
 test("an install of another package's manifest, or none, is installed over", async (t) => {
   const box = await machine(t);
   await writeFile(

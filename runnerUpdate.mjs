@@ -11,8 +11,10 @@
  * copy as it was.
  *
  * EVERY SERVICE SHARING THE INSTALL TAKES ONE LOCK to install, and one that
- * finds the installed copy already at or past the version installs nothing and
- * only restarts.
+ * finds the installed copy already at or past the version, before it fetches
+ * or once it holds the lock, installs nothing and only restarts. Two services
+ * taking one abandoned lock at once cost two npm installs of one release over
+ * one prefix, each proved before it runs.
  *
  * npm is the one beside this process's Node, else the first on PATH, and runs
  * with that Node's directory first on PATH, so its own Node is this one.
@@ -116,7 +118,7 @@ const redirectStatuses = new Set([301, 302, 303, 307, 308]);
  * @param {readonly number[]} left
  * @param {readonly number[]} right
  */
-function partsCompared(left, right) {
+function runnerVersionPartsCompared(left, right) {
   for (let at = 0; at < left.length; at += 1)
     if (left[at] !== right[at]) return left[at] < right[at] ? -1 : 1;
   return 0;
@@ -141,7 +143,7 @@ function runnerVersionAtLeast(version, floor) {
   return (
     parts !== undefined &&
     floorParts !== undefined &&
-    partsCompared(parts, floorParts) >= 0
+    runnerVersionPartsCompared(parts, floorParts) >= 0
   );
 }
 
@@ -177,7 +179,7 @@ export function runnerEnginesRefusal(range, nodeVersion) {
     .exec(nodeVersion)
     ?.slice(1)
     .map(Number);
-  return node !== undefined && partsCompared(node, floor) >= 0
+  return node !== undefined && runnerVersionPartsCompared(node, floor) >= 0
     ? undefined
     : `it needs Node ${range}, and this runner's Node is ${nodeVersion}`;
 }
@@ -261,7 +263,7 @@ function runnerUpdateTail(text) {
  * @param {string} reason
  * @returns {never}
  */
-function refused(reason) {
+function runnerUpdateRefused(reason) {
   throw new Error(reason);
 }
 
@@ -289,7 +291,7 @@ export function runnerUpdateRun(file, args, call) {
 }
 
 /** @param {string} path */
-function allowed(path, mode) {
+function runnerUpdateAllowed(path, mode) {
   return access(path, mode).then(
     () => true,
     () => false,
@@ -307,13 +309,15 @@ async function runnerReleaseBytes(release, ports) {
   let address = release.url;
   for (let redirects = 0; ; redirects += 1) {
     if (new URL(address).protocol !== "https:")
-      refused(`its download was sent on to ${address}, which is not https`);
+      runnerUpdateRefused(
+        `its download was sent on to ${address}, which is not https`,
+      );
     const response = await ports.fetch(address, { redirect: "manual", signal });
     const location = response.headers.get("location");
     if (!redirectStatuses.has(response.status) || location === null) {
       if (response.status !== 200) {
         await response.body?.cancel();
-        refused(`its download answered ${String(response.status)}`);
+        runnerUpdateRefused(`its download answered ${String(response.status)}`);
       }
       return boundedResponseBytes(
         response,
@@ -323,7 +327,9 @@ async function runnerReleaseBytes(release, ports) {
     }
     await response.body?.cancel();
     if (redirects >= runnerUpdateRedirectsMax)
-      refused("its download was sent on more times than a runner follows");
+      runnerUpdateRefused(
+        "its download was sent on more times than a runner follows",
+      );
     address = new URL(location, address).href;
   }
 }
@@ -349,7 +355,9 @@ async function runnerReleaseFetched(release, staging, ports) {
   }
   const digest = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
   if (digest !== release.integrity)
-    refused("its tarball is not the one whose integrity chuggy named");
+    runnerUpdateRefused(
+      "its tarball is not the one whose integrity chuggy named",
+    );
   const tarball = join(staging, `${release.package}-${release.version}.tgz`);
   await writeFile(tarball, bytes, { mode: 0o600 });
   return tarball;
@@ -371,11 +379,11 @@ function runnerStagedBin(manifest, root, packageName) {
         ? /** @type {Record<string, unknown>} */ (bin)[packageName]
         : undefined;
   if (typeof named !== "string")
-    refused(`its package.json names no bin called ${packageName}`);
+    runnerUpdateRefused(`its package.json names no bin called ${packageName}`);
   const path = resolve(root, named);
   const inside = relative(root, path);
   if (inside === "" || inside.startsWith("..") || isAbsolute(inside))
-    refused(`its bin, ${named}, is outside its package`);
+    runnerUpdateRefused(`its bin, ${named}, is outside its package`);
   return path;
 }
 
@@ -395,7 +403,7 @@ async function runnerReleaseStaged(release, tarball, ports) {
     timeoutMs: runnerUpdateStepMsMax,
   });
   if (untarred.code !== 0)
-    refused(
+    runnerUpdateRefused(
       `its tarball could not be unpacked: ${runnerUpdateTail(untarred.stderr)}`,
     );
   const root = join(unpacked, "package");
@@ -403,27 +411,31 @@ async function runnerReleaseStaged(release, tarball, ports) {
   try {
     manifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   } catch {
-    refused("its tarball holds no package.json this runner can read");
+    runnerUpdateRefused(
+      "its tarball holds no package.json this runner can read",
+    );
   }
   if (manifest?.name !== release.package)
-    refused(`its package.json names ${String(manifest?.name)}`);
+    runnerUpdateRefused(`its package.json names ${String(manifest?.name)}`);
   if (manifest.version !== release.version)
-    refused(`its package.json names version ${String(manifest.version)}`);
+    runnerUpdateRefused(
+      `its package.json names version ${String(manifest.version)}`,
+    );
   const engines = runnerEnginesRefusal(
     manifest.engines?.node,
     ports.nodeVersion,
   );
-  if (engines !== undefined) refused(engines);
+  if (engines !== undefined) runnerUpdateRefused(engines);
   const bin = runnerStagedBin(manifest, root, release.package);
   const answered = await ports.run(ports.execPath, [bin, "--version"], {
     timeoutMs: runnerUpdateStepMsMax,
   });
   if (answered.code !== 0)
-    refused(
+    runnerUpdateRefused(
       `its bin exited ${String(answered.code)} asked its version: ${runnerUpdateTail(answered.stderr)}`,
     );
   if (!answered.stdout.split(/\s+/u).includes(release.version))
-    refused(
+    runnerUpdateRefused(
       `its bin answered ${JSON.stringify(answered.stdout.trim().slice(0, 200))} asked its version`,
     );
 }
@@ -447,6 +459,20 @@ async function runnerInstalledVersion(installed, packageName) {
 }
 
 /**
+ * The answer for a copy already installed at or past `release`, or nothing.
+ *
+ * @param {string} installed
+ * @param {RunnerRelease} release
+ * @returns {Promise<RunnerUpdated | undefined>}
+ */
+async function runnerAlreadyInstalled(installed, release) {
+  const present = await runnerInstalledVersion(installed, release.package);
+  return runnerVersionAtLeast(present, release.version)
+    ? { updated: "AlreadyInstalled", version: String(present) }
+    : undefined;
+}
+
+/**
  * Installs the proved tarball under the install lock, unless the installed
  * copy is already at or past it.
  *
@@ -457,12 +483,8 @@ async function runnerInstalledVersion(installed, packageName) {
  */
 async function runnerReleaseInstalled(release, tarball, context) {
   const { settings, prefix, ports } = context;
-  const present = await runnerInstalledVersion(
-    settings.installed,
-    release.package,
-  );
-  if (runnerVersionAtLeast(present, release.version))
-    return { updated: "AlreadyInstalled", version: String(present) };
+  const already = await runnerAlreadyInstalled(settings.installed, release);
+  if (already !== undefined) return already;
   const beside = join(dirname(ports.execPath), "npm");
   const npm = (await ports.executable(beside)) ? beside : "npm";
   const path = ports.environment.PATH;
@@ -488,10 +510,12 @@ async function runnerReleaseInstalled(release, tarball, context) {
     },
   );
   if (installed.code !== 0)
-    refused(`npm could not install it: ${runnerUpdateTail(installed.stderr)}`);
+    runnerUpdateRefused(
+      `npm could not install it: ${runnerUpdateTail(installed.stderr)}`,
+    );
   const now = await runnerInstalledVersion(settings.installed, release.package);
   if (now !== release.version)
-    refused(
+    runnerUpdateRefused(
       `npm installed it, and ${join(settings.installed, "package.json")} names version ${String(now)}`,
     );
   return { updated: "Installed", version: release.version };
@@ -512,8 +536,8 @@ export function runnerUpdater(settings, overrides = {}) {
     fetch: globalThis.fetch,
     deadline: (ms) => globalThis.AbortSignal.timeout(ms),
     run: runnerUpdateRun,
-    writable: (path) => allowed(path, constants.W_OK),
-    executable: (path) => allowed(path, constants.X_OK),
+    writable: (path) => runnerUpdateAllowed(path, constants.W_OK),
+    executable: (path) => runnerUpdateAllowed(path, constants.X_OK),
     execPath: process.execPath,
     nodeVersion: process.versions.node,
     environment: process.env,
@@ -557,6 +581,8 @@ export function runnerUpdater(settings, overrides = {}) {
     const reason = await refusal(release);
     if (reason !== undefined || prefix === undefined)
       return { updated: "Failed", reason: String(reason) };
+    const already = await runnerAlreadyInstalled(installed, release);
+    if (already !== undefined) return already;
     const staging = await mkdtemp(
       join(ports.temporary, "chuggy-runner-update-"),
     );
