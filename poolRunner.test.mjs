@@ -192,6 +192,7 @@ test("a run whose runner has installed the release it updates to ends with the v
       updater: {
         runner: { package: "chuggy-linux", version: "0.14.0" },
         refusal: async () => undefined,
+        prove: async () => ({ proved: "Proved" }),
         update: async () => ({ updated: "Installed", version: "0.14.1" }),
       },
     },
@@ -199,7 +200,6 @@ test("a run whose runner has installed the release it updates to ends with the v
   assert.deepEqual(updated, { passed: "Updated", version: "0.14.1" });
   assert.deepEqual(log, [
     "outage: the issuer could not be reached",
-    "chuggy-linux 0.14.1 is out, and this pool takes no new work until it has updated",
     "updating to chuggy-linux 0.14.1",
     "chuggy-linux 0.14.1 is installed, and this runner ends to start on it",
   ]);

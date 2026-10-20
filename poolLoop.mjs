@@ -23,12 +23,14 @@
  * A denial ends the run; an outage backs off and comes back.
  *
  * A RUNNER UPDATES ITSELF BETWEEN JOBS. Once a poll names a release above the
- * runner's own, a run that updates asks for no more work, and once nothing it
- * holds would end with its process it installs the release behind its passes,
- * which go on renewing what it holds; the pass after the install ends the run
- * for the restart. A run that does not update says once per release that one
- * is out. A refused or failed update is logged and not tried again before
- * `workerPoolUpdateBackoffMs` has passed.
+ * runner's own, a run that updates installs it behind its passes, which go on
+ * renewing what it holds and ask for no more work, and the pass after the
+ * install ends the run for the restart. Where something it holds would end
+ * with its process, it first proves the release while taking work as before,
+ * and only then asks for no more and waits for that work to end, so a release
+ * that cannot install never drains the pool. A run that does not update says
+ * once per release that one is out. A refused or failed update is logged and
+ * not tried again before `workerPoolUpdateBackoffMs` has passed.
  */
 
 import { workerPoolEvidenceCharsMax } from "@chuggy/worker-contract/workerPool";
@@ -118,8 +120,8 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {RunnerUpdater} updater
  *
  * @typedef {object} WorkerPoolUpdating a run's update, from the release a poll names to the restart
- * @property {() => boolean} draining whether the pool asks for no work, a release being wanted
- * @property {(held: readonly WorkerPoolHeld[]) => string | undefined} restart the version installed to restart on, if any; otherwise starts the install where one is wanted and nothing held ends with this process
+ * @property {() => boolean} draining whether the pool asks for no work, for a release it installs
+ * @property {(held: readonly WorkerPoolHeld[]) => string | undefined} restart the version installed to restart on, if any; otherwise starts the install of a release named or drained for where nothing held ends with this process, or the proof of one named where something does
  * @property {(release: WorkerRunnerRelease | undefined) => Promise<void>} named takes what a reconciled poll named
  *
  * @typedef {object} WorkerPoolClient
@@ -417,12 +419,18 @@ async function workerPoolClientPlaced(client, token, offered, kind, room) {
 export const workerPoolUpdateBackoffMs = 60 * 60 * 1000;
 
 /**
+ * Where a run's update stands. `Named` passed the updater's refusal and is
+ * installed at once where nothing held ends with this process, else proved
+ * first; `Proving` and `Proved` take work as before, and the poll that still
+ * names a `Proved` release drains for it.
+ *
+ * @typedef {{at: "Idle"} | {at: "Installed", version: string}
+ *   | {at: "Named" | "Proving" | "Proved" | "Draining" | "Installing", release: WorkerRunnerRelease}} WorkerPoolUpdateStage
+ *
  * @typedef {object} WorkerPoolUpdateState what a run remembers between passes of its update
  * @property {WorkerPoolUpdates} updates
  * @property {{log: (line: string) => void, nowMs: () => number}} seams
- * @property {WorkerRunnerRelease} [wanted] the release the pool drains for, until it is installed or fails
- * @property {boolean} installing
- * @property {string} [installed] the version installed, to restart on
+ * @property {WorkerPoolUpdateStage} stage
  * @property {number} retryAtMs when a refused or failed update may be tried again
  * @property {string} [announced] the release last said to be out, where updates are off
  */
@@ -432,15 +440,20 @@ function workerPoolReleaseNamed(release) {
   return `${release.package} ${release.version}`;
 }
 
+/** @param {unknown} thrown */
+function workerPoolThrownReason(thrown) {
+  return thrown instanceof Error ? thrown.message : String(thrown);
+}
+
 /**
- * Leaves the release that was wanted, and says why.
+ * Leaves the release, and says why.
  *
  * @param {WorkerPoolUpdateState} state
  * @param {WorkerRunnerRelease} release
  * @param {string} reason
  */
 function workerPoolUpdateFailed(state, release, reason) {
-  state.wanted = undefined;
+  state.stage = { at: "Idle" };
   state.retryAtMs = state.seams.nowMs() + workerPoolUpdateBackoffMs;
   state.seams.log(
     `did not update to ${workerPoolReleaseNamed(release)}: ${reason}; the next try is in ${String(workerPoolUpdateBackoffMs / 60_000)} minutes`,
@@ -448,57 +461,87 @@ function workerPoolUpdateFailed(state, release, reason) {
 }
 
 /**
- * Installs the wanted release behind the passes, which renew what the pool
- * holds meanwhile.
+ * Proves the release behind the passes, which go on taking work meanwhile.
  *
  * @param {WorkerPoolUpdateState} state
  * @param {WorkerRunnerRelease} release
  */
-function workerPoolUpdateStarted(state, release) {
-  state.installing = true;
+function workerPoolProofStarted(state, release) {
+  state.stage = { at: "Proving", release };
+  state.seams.log(
+    `proving ${workerPoolReleaseNamed(release)} before this pool stops taking work for it`,
+  );
+  void state.updates.updater.prove(release).then(
+    (proved) => {
+      if (proved.proved === "Failed")
+        workerPoolUpdateFailed(state, release, proved.reason);
+      else state.stage = { at: "Proved", release };
+    },
+    (thrown) =>
+      workerPoolUpdateFailed(state, release, workerPoolThrownReason(thrown)),
+  );
+}
+
+/**
+ * Installs the release behind the passes, which renew what the pool holds
+ * meanwhile.
+ *
+ * @param {WorkerPoolUpdateState} state
+ * @param {WorkerRunnerRelease} release
+ */
+function workerPoolInstallStarted(state, release) {
+  state.stage = { at: "Installing", release };
   state.seams.log(`updating to ${workerPoolReleaseNamed(release)}`);
-  void state.updates.updater
-    .update(release)
-    .then(
-      (updated) => {
-        if (updated.updated === "Failed")
-          workerPoolUpdateFailed(state, release, updated.reason);
-        else {
-          state.installed = updated.version;
-          state.seams.log(
-            `${release.package} ${updated.version} is installed, and this runner ends to start on it`,
-          );
-        }
-      },
-      (thrown) =>
-        workerPoolUpdateFailed(
-          state,
-          release,
-          thrown instanceof Error ? thrown.message : String(thrown),
-        ),
+  void state.updates.updater.update(release).then(
+    (updated) => {
+      if (updated.updated === "Failed")
+        workerPoolUpdateFailed(state, release, updated.reason);
+      else {
+        state.stage = { at: "Installed", version: updated.version };
+        state.seams.log(
+          `${release.package} ${updated.version} is installed, and this runner ends to start on it`,
+        );
+      }
+    },
+    (thrown) =>
+      workerPoolUpdateFailed(state, release, workerPoolThrownReason(thrown)),
+  );
+}
+
+/**
+ * Whether the stage is one for this very release.
+ *
+ * @param {WorkerPoolUpdateStage} stage
+ * @param {WorkerRunnerRelease} release
+ */
+function workerPoolStageFor(stage, release) {
+  return (
+    "release" in stage &&
+    ["package", "version", "url", "integrity"].every(
+      (field) => stage.release[field] === release[field],
     )
-    .finally(() => {
-      state.installing = false;
-    });
+  );
 }
 
 /**
  * Takes the release a reconciled poll named: one above the runner's own is
- * wanted, where updates are on and nothing refuses it, or said to be out once
- * where they are off. One the poll stops naming is no longer wanted, and
- * nothing a poll names moves an install already begun.
+ * named for the next pass, where updates are on and nothing refuses it, or
+ * said to be out once where they are off; a proved one the poll still names
+ * is drained for. One the poll stops naming is left, and nothing a poll names
+ * moves a proof or an install begun.
  *
  * @param {WorkerPoolUpdateState} state
  * @param {WorkerRunnerRelease | undefined} release
  */
 async function workerPoolUpdateNamed(state, release) {
   const { on, updater } = state.updates;
-  if (state.installing || state.installed !== undefined) return;
+  const { stage } = state;
+  if (["Proving", "Installing", "Installed"].includes(stage.at)) return;
   if (
     release === undefined ||
     !runnerVersionAbove(release.version, updater.runner.version)
   ) {
-    state.wanted = undefined;
+    state.stage = { at: "Idle" };
     return;
   }
   if (!on) {
@@ -509,24 +552,19 @@ async function workerPoolUpdateNamed(state, release) {
     state.announced = release.version;
     return;
   }
-  const wanted = state.wanted;
-  if (
-    (wanted !== undefined &&
-      ["package", "version", "url", "integrity"].every(
-        (field) => wanted[field] === release[field],
-      )) ||
-    state.seams.nowMs() < state.retryAtMs
-  )
-    return;
-  const reason = await updater.refusal(release);
-  if (reason !== undefined) {
-    workerPoolUpdateFailed(state, release, reason);
+  if (workerPoolStageFor(stage, release)) {
+    if (stage.at === "Proved") {
+      state.stage = { at: "Draining", release };
+      state.seams.log(
+        `${workerPoolReleaseNamed(release)} is proved, and this pool takes no new work until it has updated`,
+      );
+    }
     return;
   }
-  state.wanted = release;
-  state.seams.log(
-    `${workerPoolReleaseNamed(release)} is out, and this pool takes no new work until it has updated`,
-  );
+  if (state.seams.nowMs() < state.retryAtMs) return;
+  const reason = await updater.refusal(release);
+  if (reason === undefined) state.stage = { at: "Named", release };
+  else workerPoolUpdateFailed(state, release, reason);
 }
 
 /**
@@ -538,17 +576,20 @@ async function workerPoolUpdateNamed(state, release) {
  */
 export function workerPoolUpdating(updates, seams) {
   /** @type {WorkerPoolUpdateState} */
-  const state = { updates, seams, installing: false, retryAtMs: 0 };
+  const state = { updates, seams, stage: { at: "Idle" }, retryAtMs: 0 };
   return {
-    draining: () => state.wanted !== undefined,
+    draining: () =>
+      ["Draining", "Installing", "Installed"].includes(state.stage.at),
     restart: (held) => {
-      if (state.installed !== undefined) return state.installed;
-      if (
-        state.wanted !== undefined &&
-        !state.installing &&
-        held.every((workload) => workload.outlivesRunner === true)
-      )
-        workerPoolUpdateStarted(state, state.wanted);
+      const { stage } = state;
+      if (stage.at === "Installed") return stage.version;
+      const outlived = held.every(
+        (workload) => workload.outlivesRunner === true,
+      );
+      if ((stage.at === "Named" || stage.at === "Draining") && outlived)
+        workerPoolInstallStarted(state, stage.release);
+      else if (stage.at === "Named")
+        workerPoolProofStarted(state, stage.release);
       return undefined;
     },
     named: (release) => workerPoolUpdateNamed(state, release),
