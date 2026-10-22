@@ -221,14 +221,14 @@ test("every path a workload's container mounts, given all it can be, is among th
 });
 
 test("an owner's volume is made labelled as one, and podman is told the owner to give it, so that no mount gives it another while it is empty", () => {
-  assert.deepEqual(ownerVolumeCreateArgv("docker", "cargo"), [
+  assert.deepEqual(ownerVolumeCreateArgv("docker", { source: "cargo" }), [
     "volume",
     "create",
     "--label",
     "io.chuggy.owner-volume",
     "cargo",
   ]);
-  assert.deepEqual(ownerVolumeCreateArgv("podman", "cargo"), [
+  assert.deepEqual(ownerVolumeCreateArgv("podman", { source: "cargo" }), [
     "volume",
     "create",
     "--label",
@@ -236,6 +236,30 @@ test("an owner's volume is made labelled as one, and podman is told the owner to
     "--opt",
     "o=uid=0,gid=0",
     "cargo",
+  ]);
+});
+
+test("an owner's volume that is one project's alone is made labelled as that project's too", () => {
+  const volume = { source: "sccache-0123456789abcdef0123", project: "a/b%2Fc" };
+  assert.deepEqual(ownerVolumeCreateArgv("docker", volume), [
+    "volume",
+    "create",
+    "--label",
+    "io.chuggy.owner-volume",
+    "--label",
+    "io.chuggy.owner-volume.project=a/b%2Fc",
+    "sccache-0123456789abcdef0123",
+  ]);
+  assert.deepEqual(ownerVolumeCreateArgv("podman", volume), [
+    "volume",
+    "create",
+    "--label",
+    "io.chuggy.owner-volume",
+    "--label",
+    "io.chuggy.owner-volume.project=a/b%2Fc",
+    "--opt",
+    "o=uid=0,gid=0",
+    "sccache-0123456789abcdef0123",
   ]);
 });
 

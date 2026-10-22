@@ -69,10 +69,16 @@
  * whose opening a stopped runner cut short is opened by the next job.
  * One its owner made is mounted as it is. A job started through no runtime
  * has no image to open one with, so it mounts one only once it is there.
- * These volumes are the owner's, and nothing here removes one: none carries a
- * pool's label, and none is a job's own. A session mounts none: it runs its
- * site's session image, whose environment points at none of them, and, as
- * with the engine, is given nothing of this machine it does not need.
+ * A named volume listed as its project's is one per project: its name carries
+ * a digest of the pool's project and its label names that project. One of
+ * that name labelled as another project's or as none is refused, and so is
+ * one listed unscoped that is labelled as a project's. A personal runner
+ * serves no one project, so no job of its mounts a volume listed as its
+ * project's, which it says once. These volumes are the owner's, and nothing
+ * here removes one: none carries a pool's label, and none is a job's own. A
+ * session mounts none: it runs its site's session image, whose environment
+ * points at none of them, and, as with the engine, is given nothing of this
+ * machine it does not need.
  */
 
 import { randomBytes } from "node:crypto";
@@ -107,6 +113,7 @@ import {
   ownerVolumeCreateArgv,
   ownerVolumeDirectory,
   ownerVolumeLabel,
+  ownerVolumeProjectLabel,
   ownerVolumesOpenArgv,
   removeArgv,
   runArgv,
@@ -135,8 +142,11 @@ import {
 } from "./job.mjs";
 import {
   poolIdentityDigest,
+  poolIdentityDigestChars,
   poolIdentityPersonal,
   poolLabelValue,
+  poolProjectDigest,
+  poolProjectLabelValue,
 } from "./poolIdentity.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
@@ -174,7 +184,9 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {number} pullRetryMs the wait before a pull the registry refused is tried again
  * @property {import("./engineArgv.mjs").EngineSocket} [engineSocket] this machine's engine, which each job is handed through its socket and no session is; none, and no workload is
  * @property {readonly OwnerImage[]} [images] what a job whose assignment pins no image runs in; none, and no such job is taken
- * @property {readonly OwnerVolume[]} [volumes] what its owner mounts into each job and no session; none, and nothing is
+ * @property {readonly OwnerVolumeListed[]} [volumes] what its owner mounts into each job and no session; none, and nothing is
+ *
+ * @typedef {z.infer<typeof ownerVolumesSchema>[number]} OwnerVolumeListed a volume as its owner lists it, which `ownerVolumesServed` makes one a job mounts
  *
  * @typedef {object} OwnerImage an image its pool's owner runs work in that names capabilities rather than an image
  * @property {string} image
@@ -238,6 +250,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} State
  * @property {ContainerBackendSettings} settings
  * @property {ContainerBackendSeams} seams
+ * @property {readonly OwnerVolume[]} volumes what each job mounts of its owner's, as `ownerVolumesServed` serves them
  * @property {Map<string, Placement>} placements
  * @property {Ends} ends
  * @property {boolean} strays whether volumes of chuggy's runtime that nothing answers for may be left: from the start, since a predecessor may have left some, and after any removal of one failed
@@ -950,6 +963,28 @@ function ownerVolumeTargetRefusal(target) {
   return undefined;
 }
 
+/** The longest name docker gives a volume, which names a directory of this machine, as podman's does. */
+const ownerVolumeNameCharsMax = 255;
+
+/** The longest name of a volume that can be listed as its project's, whose name there is followed by `-` and the project's digest. */
+const ownerVolumeScopedNameCharsMax =
+  ownerVolumeNameCharsMax - 1 - poolIdentityDigestChars;
+
+/**
+ * Why an owner's volume cannot be listed as its project's, or nothing: a
+ * directory is not made, so it cannot be made per project, and a name must
+ * still name a volume once the project's digest follows it.
+ *
+ * @param {string} source
+ */
+function ownerVolumeScopeRefusal(source) {
+  if (ownerVolumeDirectory(source))
+    return "is a directory, and only a named volume can be one per project";
+  return source.length > ownerVolumeScopedNameCharsMax
+    ? `is too long to be named per project, which takes a name of at most ${String(ownerVolumeScopedNameCharsMax)} characters`
+    : undefined;
+}
+
 /**
  * Adds an issue where a refusal names one.
  *
@@ -965,16 +1000,24 @@ function ownerVolumeRefined(refusal) {
 /**
  * What a runner's owner mounts into each job, as a runner's settings name
  * it: the source, told apart as `ownerVolumeDirectory` says, its target in
- * the job's container, each target once, and whether the job may only read
- * it.
+ * the job's container, each target once, whether the job may only read it,
+ * and whether it is one per project, which only a named volume can be.
  */
 export const ownerVolumesSchema = z
   .array(
-    z.strictObject({
-      source: ownerVolumeRefined(ownerVolumeSourceRefusal),
-      target: ownerVolumeRefined(ownerVolumeTargetRefusal),
-      readonly: z.boolean().default(false),
-    }),
+    z
+      .strictObject({
+        source: ownerVolumeRefined(ownerVolumeSourceRefusal),
+        target: ownerVolumeRefined(ownerVolumeTargetRefusal),
+        readonly: z.boolean().default(false),
+        scope: z.literal("project").optional(),
+      })
+      .superRefine(({ source, scope }, context) => {
+        const why =
+          scope === undefined ? undefined : ownerVolumeScopeRefusal(source);
+        if (why !== undefined)
+          context.addIssue({ code: "custom", path: ["source"], message: why });
+      }),
   )
   .superRefine((volumes, context) => {
     volumes.forEach(({ target }, index) => {
@@ -1341,12 +1384,59 @@ async function ownerVolumeLabels(state, volume) {
 }
 
 /**
+ * Each volume its owner lists, as a job of this pool mounts it, and the
+ * sources of those none does: one listed as its project's is named and
+ * labelled as the pool's project's, and a personal runner, serving no one
+ * project, withholds it.
+ *
+ * @param {readonly OwnerVolumeListed[]} volumes
+ * @param {PoolIdentity} pool
+ * @returns {{served: OwnerVolume[], withheld: string[]}}
+ */
+export function ownerVolumesServed(volumes, pool) {
+  const project = poolProjectLabelValue(pool);
+  const digest = poolProjectDigest(pool);
+  /** @type {OwnerVolume[]} */
+  const served = [];
+  /** @type {string[]} */
+  const withheld = [];
+  for (const { scope, ...volume } of volumes)
+    if (scope === undefined) served.push(volume);
+    else if (project === undefined || digest === undefined)
+      withheld.push(volume.source);
+    else
+      served.push({ ...volume, source: `${volume.source}-${digest}`, project });
+  return { served, withheld };
+}
+
+/**
+ * Why an owner's named volume that is there, labelled `labels`, cannot be
+ * mounted as `volume`, or nothing: one listed as its project's must be
+ * labelled as that project's, and one listed unscoped as no project's, so no
+ * job mounts a volume made for another project.
+ *
+ * @param {Pick<OwnerVolume, "project">} volume
+ * @param {Readonly<Record<string, string>>} labels
+ */
+export function ownerVolumeLabelsRefusal({ project }, labels) {
+  const labelled = Object.hasOwn(labels, ownerVolumeProjectLabel)
+    ? labels[ownerVolumeProjectLabel]
+    : undefined;
+  if (labelled === project) return undefined;
+  if (labelled === undefined)
+    return `is labelled as no project's, and is listed as ${String(project)}'s`;
+  if (project === undefined)
+    return `is labelled as ${labelled}'s, and is listed as no project's`;
+  return `is labelled as ${labelled}'s, not ${project}'s`;
+}
+
+/**
  * Makes an owner's named volume that was not there. One another placement
  * made since, which podman refuses to make again, is taken as made.
  *
  * @param {State} state
  * @param {Placement} placement
- * @param {string} volume
+ * @param {OwnerVolume} volume
  */
 async function ownerVolumeMade(state, placement, volume) {
   const { settings, seams } = state;
@@ -1354,17 +1444,20 @@ async function ownerVolumeMade(state, placement, volume) {
     ownerVolumeCreateArgv(settings.engine, volume),
   );
   if (created.code === 0)
-    seams.log(`${placement.name}: its owner's volume ${volume} was made`);
-  else if ((await ownerVolumeLabels(state, volume)) === undefined)
+    seams.log(
+      `${placement.name}: its owner's volume ${volume.source} was made`,
+    );
+  else if ((await ownerVolumeLabels(state, volume.source)) === undefined)
     throw new Error(
-      `its owner's volume ${volume} could not be made: ${engineFailureLine(created)}`,
+      `its owner's volume ${volume.source} could not be made: ${engineFailureLine(created)}`,
     );
 }
 
 /**
  * Readies each named volume a job's owner mounts into it, as this backend's
- * header says: made where it is not there, then, with every other this runner
- * made, opened by the container `ownerVolumesOpenArgv` names.
+ * header says: refused where its labels say it is not the one listed, made
+ * where it is not there, then, with every other this runner made, opened by
+ * the container `ownerVolumesOpenArgv` names.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1374,21 +1467,24 @@ async function ownerVolumesReady(state, placement) {
   const runtime = placement.runtime?.image;
   /** @type {string[]} */
   const opened = [];
-  const named = (settings.volumes ?? []).flatMap(({ source }) =>
-    ownerVolumeDirectory(source) ? [] : [source],
-  );
-  for (const volume of new Set(named)) {
-    const labels = await ownerVolumeLabels(state, volume);
+  for (const volume of ownerVolumesReadyNamed(state.volumes)) {
+    const labels = await ownerVolumeLabels(state, volume.source);
+    const refusal =
+      labels === undefined
+        ? undefined
+        : ownerVolumeLabelsRefusal(volume, labels);
+    if (refusal !== undefined)
+      throw new Error(`its owner's volume ${volume.source} ${refusal}`);
     if (labels !== undefined && !Object.hasOwn(labels, ownerVolumeLabel))
       continue;
     if (runtime === undefined) {
       if (labels !== undefined) continue;
       throw new Error(
-        `its owner's volume ${volume} is not there, and only a job started through chuggy's runtime can make one`,
+        `its owner's volume ${volume.source} is not there, and only a job started through chuggy's runtime can make one`,
       );
     }
     if (labels === undefined) await ownerVolumeMade(state, placement, volume);
-    opened.push(volume);
+    opened.push(volume.source);
   }
   if (runtime === undefined || opened.length === 0) return;
   try {
@@ -1409,6 +1505,20 @@ async function ownerVolumesReady(state, placement) {
       `this runner could not open its owner's volumes ${opened.join(", ")}`,
     );
   }
+}
+
+/**
+ * The named volumes among a job's owner's, each once by its name and project.
+ *
+ * @param {readonly OwnerVolume[]} volumes
+ */
+function ownerVolumesReadyNamed(volumes) {
+  /** @type {Map<string, OwnerVolume>} */
+  const named = new Map();
+  for (const volume of volumes)
+    if (!ownerVolumeDirectory(volume.source))
+      named.set(JSON.stringify([volume.source, volume.project]), volume);
+  return named.values();
 }
 
 /**
@@ -1436,13 +1546,14 @@ function workloadEngineSocket(settings, placement) {
 }
 
 /**
- * What a workload is given of its owner's volumes: each, where it is a job.
+ * What a workload is given of its owner's volumes: each served, where it is a
+ * job.
  *
- * @param {ContainerBackendSettings} settings
+ * @param {State} state
  * @param {Placement} placement
  */
-function workloadOwnerVolumes(settings, placement) {
-  return placement.kind === "Job" ? settings.volumes : undefined;
+function workloadOwnerVolumes(state, placement) {
+  return placement.kind === "Job" ? state.volumes : undefined;
 }
 
 /**
@@ -1529,7 +1640,7 @@ async function started(state, placement, assignment, envelope) {
         image: placement.image,
         runtime: placement.runtime?.volumes,
         engineSocket: workloadEngineSocket(settings, placement),
-        volumes: workloadOwnerVolumes(settings, placement),
+        volumes: workloadOwnerVolumes(state, placement),
       }),
     );
   } finally {
@@ -1814,10 +1925,17 @@ async function stopped(state, assignment) {
  * @returns {ContainerBackend}
  */
 export function containerBackend(settings, seams) {
+  const checked = checkedContainerBackendSettings(settings);
+  const volumes = ownerVolumesServed(checked.volumes ?? [], checked.pool);
+  for (const source of volumes.withheld)
+    seams.log(
+      `its owner's volume ${source} is listed as its project's, and a personal runner serves no one project, so its jobs run without it; a project's own pool mounts one`,
+    );
   /** @type {State} */
   const state = {
-    settings: checkedContainerBackendSettings(settings),
+    settings: checked,
     seams,
+    volumes: volumes.served,
     placements: new Map(),
     ends: { pending: [], ready: [], accounted: new Set() },
     strays: true,

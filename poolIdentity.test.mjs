@@ -6,6 +6,8 @@ import {
   poolIdentityDigest,
   poolIdentitySame,
   poolLabelValue,
+  poolProjectDigest,
+  poolProjectLabelValue,
 } from "./poolIdentity.mjs";
 
 const shame = { tenant: "vteng", project: "chuggy", pool: "shame" };
@@ -111,4 +113,37 @@ test("a personal runner is the same runner only in its tenant and owner, and nev
   const pool = { tenant: "vteng", project: geoff.owner, pool: "shame" };
   assert.ok(!poolIdentitySame(geoff, pool));
   assert.ok(!poolIdentitySame(pool, geoff));
+});
+
+test("a pool's project is labelled and digested by its tenant and project alone, whatever its pool", () => {
+  assert.equal(poolProjectLabelValue(shame), "vteng/chuggy");
+  assert.equal(
+    poolProjectLabelValue({ ...shame, pool: "other" }),
+    poolProjectLabelValue(shame),
+  );
+  assert.equal(
+    poolProjectDigest({ ...shame, pool: "other" }),
+    poolProjectDigest(shame),
+  );
+  assert.match(poolProjectDigest(shame) ?? "", /^[0-9a-f]{20}$/u);
+});
+
+test("no two projects share a project label or digest, whatever their names hold", () => {
+  const projects = [
+    { tenant: "a/b", project: "c", pool: "p" },
+    { tenant: "a", project: "b/c", pool: "p" },
+    { tenant: "a.b", project: "c", pool: "p" },
+    { tenant: "a", project: "b.c", pool: "p" },
+    { tenant: "a-b", project: "c", pool: "p" },
+    { tenant: "a", project: "b-c", pool: "p" },
+  ];
+  for (const named of [poolProjectLabelValue, poolProjectDigest]) {
+    const values = projects.map(named);
+    assert.equal(new Set(values).size, projects.length, String(values));
+  }
+});
+
+test("a personal runner serves no one project, so it has no project label or digest", () => {
+  assert.equal(poolProjectLabelValue(geoff), undefined);
+  assert.equal(poolProjectDigest(geoff), undefined);
 });

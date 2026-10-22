@@ -37,6 +37,7 @@ import {
   jobProviderCredentialFile,
   jobRunDirectory,
 } from "./job.mjs";
+import { poolProjectDigest } from "./poolIdentity.mjs";
 
 const pool = { tenant: "vteng", project: "chuggy", pool: "shame" };
 const image = "registry.chuggy.example/worker@sha256:" + "a".repeat(64);
@@ -461,6 +462,43 @@ test("an owner's volume is a named volume by a name both engines give one, or a 
   assert.equal(
     ownerVolumesRefused([
       { source: "cargo", target: "/cache/cargo", type: "volume" },
+    ]).length,
+    1,
+  );
+});
+
+test("a named volume may be listed as its project's, by a name that still names a volume once its project's digest follows it, and a directory may not", () => {
+  const scoped = (source) =>
+    ownerVolumesRefused([
+      { source, target: "/cache/sccache", scope: "project" },
+    ]);
+  assert.deepEqual(
+    ownerVolumesSchema.parse([
+      { source: "sccache", target: "/cache/sccache", scope: "project" },
+    ]),
+    [
+      {
+        source: "sccache",
+        target: "/cache/sccache",
+        readonly: false,
+        scope: "project",
+      },
+    ],
+  );
+  assert.deepEqual(scoped("s".repeat(234)), []);
+  assert.deepEqual(scoped("s".repeat(235)), [
+    "0.source is too long to be named per project, which takes a name of at most 234 characters",
+  ]);
+  assert.deepEqual(
+    ownerVolumesRefused([{ source: "s".repeat(235), target: "/cache/s" }]),
+    [],
+  );
+  assert.deepEqual(scoped("/srv/cache"), [
+    "0.source is a directory, and only a named volume can be one per project",
+  ]);
+  assert.equal(
+    ownerVolumesRefused([
+      { source: "sccache", target: "/cache/sccache", scope: "pool" },
     ]).length,
     1,
   );
@@ -2441,7 +2479,7 @@ test("a named volume not there is made labelled as the owner's, and opened to th
     );
     assert.deepEqual(
       made.map(({ argv }) => argv),
-      [ownerVolumeCreateArgv(engine, "cargo")],
+      [ownerVolumeCreateArgv(engine, { source: "cargo" })],
       engine,
     );
     assert.deepEqual(state.volumes.get("cargo"), { labels: ownerVolumeLabels });
@@ -2638,4 +2676,129 @@ test("no sweep removes an owner's volume: not a restarted runner's first held, n
   ]);
   await backend.held();
   assert.deepEqual(state.volumes.get("cargo"), { labels: ownerVolumeLabels });
+});
+
+/** A volume listed as its project's. */
+const projectMount = {
+  source: "sccache",
+  target: "/cache/sccache",
+  readonly: false,
+  scope: /** @type {const} */ ("project"),
+};
+
+/** The name `projectMount` has for `pool`'s project. */
+const projectVolume = `sccache-${String(poolProjectDigest(pool))}`;
+
+/** The labels of a volume this runner made as `pool`'s project's. */
+const projectVolumeLabels = {
+  ...ownerVolumeLabels,
+  "io.chuggy.owner-volume.project": "vteng/chuggy",
+};
+
+test("a volume listed as its project's is mounted by a name of that project's, which is made labelled as that project's and opened", async (t) => {
+  for (const engine of /** @type {const} */ (["docker", "podman"])) {
+    const context = await harness(t, { engine, volumes: [projectMount] });
+    const container = await placedThroughRuntime(context);
+    assert.ok(
+      container?.volumes?.includes(`${projectVolume}:/cache/sccache:nocopy`),
+      engine,
+    );
+    assert.deepEqual(
+      context.state.volumes.get(projectVolume),
+      { labels: projectVolumeLabels },
+      engine,
+    );
+    assert.deepEqual(
+      openings(context.state).map(({ argv }) => argv),
+      [ownerVolumesOpenArgv(engine, [projectVolume], runtime)],
+      engine,
+    );
+  }
+  assert.deepEqual(
+    ownerVolumesRefused([{ source: projectVolume, target: "/cache/s" }]),
+    [],
+  );
+});
+
+test("a volume listed as its project's that is there labelled as that project's is mounted, and not made again", async (t) => {
+  const context = await harness(t, { volumes: [projectMount] });
+  context.state.volumes.set(projectVolume, { labels: projectVolumeLabels });
+  const container = await placedThroughRuntime(context);
+  assert.ok(
+    container?.volumes?.includes(`${projectVolume}:/cache/sccache:nocopy`),
+  );
+  assert.ok(
+    !context.state.calls.some(
+      ({ argv }) => argv[1] === "create" && argv.at(-1) === projectVolume,
+    ),
+  );
+});
+
+test("a personal runner's jobs mount no volume listed as its project's, which it says once", async (t) => {
+  const personal = {
+    kind: /** @type {const} */ ("Personal"),
+    tenant: "vteng",
+    owner: "28:https://auth.chuggy.example/geoff",
+  };
+  const context = await harness(t, {
+    pool: personal,
+    volumes: [...ownerMounts, projectMount],
+  });
+  context.state.images.add(image);
+  context.state.volumes.set("cargo", { labels: ownerVolumeLabels });
+  await context.backend.place(assignment(), "Job");
+  await context.backend.place(assignment({ assignment: "asg-2" }), "Job");
+  await context.backend.settled();
+  for (const job of ["asg-1", "asg-2"]) {
+    const argv = ranWith(context.state, job).argv;
+    assert.ok(holdsRun(argv, ownerMountArgv), job);
+    assert.ok(!argv.some((value) => /sccache/u.test(value)), argv.join(" "));
+  }
+  assert.deepEqual(
+    context.log.filter((line) => line.includes("sccache")),
+    [
+      "its owner's volume sccache is listed as its project's, and a personal runner serves no one project, so its jobs run without it; a project's own pool mounts one",
+    ],
+  );
+});
+
+test("a volume another project's labels or none mark, or one listed unscoped that a project's label marks, fails the job's placement and is mounted by none", async (t) => {
+  /** @type {[string, Record<string, string>, unknown[], string][]} */
+  const cases = [
+    [
+      projectVolume,
+      { ...ownerVolumeLabels, "io.chuggy.owner-volume.project": "vteng/other" },
+      [projectMount],
+      `its owner's volume ${projectVolume} is labelled as vteng/other's, not vteng/chuggy's`,
+    ],
+    [
+      projectVolume,
+      ownerVolumeLabels,
+      [projectMount],
+      `its owner's volume ${projectVolume} is labelled as no project's, and is listed as vteng/chuggy's`,
+    ],
+    [
+      projectVolume,
+      {},
+      [projectMount],
+      `its owner's volume ${projectVolume} is labelled as no project's, and is listed as vteng/chuggy's`,
+    ],
+    [
+      "cargo",
+      projectVolumeLabels,
+      ownerMounts,
+      "its owner's volume cargo is labelled as vteng/chuggy's, and is listed as no project's",
+    ],
+  ];
+  for (const [volume, labels, volumes, why] of cases) {
+    const context = await harness(t, { volumes });
+    context.state.volumes.set(volume, { labels });
+    await placedThroughRuntime(context);
+    assert.equal(context.state.containers.size, 0, why);
+    assert.deepEqual(openings(context.state), [], why);
+    assert.deepEqual(context.state.volumes.get(volume), { labels }, why);
+    const [ended] = await endsNamed(context.backend);
+    assert.ok(ended?.kind === "Job");
+    assert.equal(ended.why, `its container was not started: ${why}`);
+  }
 });
