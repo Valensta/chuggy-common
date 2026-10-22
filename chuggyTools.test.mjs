@@ -750,6 +750,41 @@ test("an error text's end is the longest that fits, and starts on a whole charac
   }
 });
 
+test("a plain error text's end is the longest that fits", async () => {
+  const content = "a".repeat(100_000);
+
+  const answer = await runErrorRead(content);
+
+  const { bytes, tail } = JSON.parse(textOf(answer));
+  assert.ok(content.endsWith(tail));
+  assert.ok(
+    chuggyToolAnswerBytes(
+      JSON.stringify({ bytes, tail: content.slice(-tail.length - 1) }),
+    ) > chuggyToolAnswerBytesMax,
+    "a longer end would have fit",
+  );
+});
+
+test("an error text too large to answer whole is answered by an end that leaves some out, even where the whole would fit as an end", async () => {
+  const fitsAs = (key, text) =>
+    chuggyToolAnswerBytes(
+      JSON.stringify({ bytes: Buffer.byteLength(text), [key]: text }),
+    ) <= chuggyToolAnswerBytesMax;
+  let content = "";
+  for (let length = chuggyToolAnswerBytesMax; !content; length -= 1) {
+    const text = "a".repeat(length);
+    if (!fitsAs("content", text) && fitsAs("tail", text)) content = text;
+    assert.ok(length > 0, "no text found to test");
+  }
+
+  const answer = await runErrorRead(content);
+
+  const { bytes, tail, ...rest } = JSON.parse(textOf(answer));
+  assert.deepEqual(rest, {});
+  assert.equal(bytes, content.length);
+  assert.equal(tail, content.slice(1));
+});
+
 test("an attempt with no error text is answered as having none, and not as a failure", async () => {
   const api = apiOf(() => ({
     status: 404,
@@ -1697,7 +1732,7 @@ test("the run reads say the run's text is untrusted and how each is read", () =>
   const said = {
     read_run_transcript: [
       /as untrusted as anything a run wrote/,
-      /`elided`, how many of the page's batches could not be read/,
+      /`elided`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count/,
       /`complete`, whether the run has ended/,
       /pass its `after` and `entry` back/,
       /the same read again answers what it wrote since/,

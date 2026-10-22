@@ -427,10 +427,12 @@ function readRunErrorContent(text) {
 
 /**
  * An error text as one answer: whole where it fits, and otherwise the longest
- * end of it that does. An end asked for from inside a surrogate pair starts
- * after the pair, so every end starts on a code point and a longer one never
- * weighs less, which is what lets the search find the longest. Every code unit
- * weighs at least a byte, so no end longer than an answer's bytes is weighed.
+ * end of it that does short of the whole, so an answered end always means some
+ * of the text was left out. An end asked for from inside a surrogate pair
+ * starts after the pair, so every end starts on a code point and a longer one
+ * never weighs less, which is what lets the search find the longest. Every
+ * code unit weighs at least a byte, so no end longer than an answer's bytes is
+ * weighed.
  */
 function readRunErrorAnswer(content) {
   const bytes = Buffer.byteLength(content);
@@ -444,7 +446,7 @@ function readRunErrorAnswer(content) {
       tail: content.slice(paired ? start + 1 : start),
     });
   };
-  let low = Math.max(0, content.length - chuggyToolAnswerBytesMax);
+  let low = Math.max(1, content.length - chuggyToolAnswerBytesMax);
   let high = content.length;
   while (low < high) {
     const middle = Math.floor((low + high) / 2);
@@ -772,7 +774,7 @@ export const chuggyProjectTools = [
   {
     name: "read_run_transcript",
     description:
-      "One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: `entries`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; `elided`, how many of the page's batches could not be read; `complete`, whether the run has ended; and `next` — pass its `after` and `entry` back for the page after this one. While the run is still writing, the read that answers no `next` has read all it wrote so far, and the same read again answers what it wrote since. A read that fails answers the reason instead.",
+      "One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: `entries`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; `elided`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; `complete`, whether the run has ended; and `next` — pass its `after` and `entry` back for the page after this one. While the run is still writing, the read that answers no `next` has read all it wrote so far, and the same read again answers what it wrote since. A read that fails answers the reason instead.",
     shape: (z) => ({
       execution: identity(z),
       attempt: identity(z),
