@@ -42,6 +42,7 @@
     "entrypoint.mjs",
     "fileLock.mjs",
     "git-askpass.sh",
+    "gitRemote.mjs",
     "hostBackend.mjs",
     "job.mjs",
     "leadDecision.mjs",
