@@ -14,11 +14,16 @@ import {
   chuggyToolImageResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
+  chuggyToolRunErrorResponseBytesMax,
+  chuggyToolRunTranscriptResponseBytesMax,
   chuggyToolTimeoutMs,
   nativeHttpPageItemsMax,
+  runTranscriptBatchBytesMax,
+  runTranscriptPageBatchesMax,
   selectorHistoryLimitMax,
   threadTurnsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
+import { workerPlaneUploadBytesMax } from "@chuggy/worker-contract/workerPlane";
 import { z } from "zod";
 
 import {
@@ -37,12 +42,13 @@ import {
   chuggyToolHandler,
   chuggyToolImageFiles,
   chuggyToolServer,
+  chuggyTranscriptBodyBytesMax,
   sessionAllowedTools,
   sessionBuiltInTools,
   sessionCapabilityTools,
 } from "./chuggyTools.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
-import { credentialScrub } from "./runEvidence.mjs";
+import { credentialScrub, runTranscriptEventBytesMax } from "./runEvidence.mjs";
 import { leadRoster, threadRoster } from "./sessionHarness.fixture.mjs";
 import { sessionStoreAdapter } from "./sessionStore.mjs";
 
@@ -343,11 +349,6 @@ test("the refusal names what this caller can lower, and says so where there is n
       { execution: "e-1" },
       /read_execution takes no limit, so this one cannot be answered\.$/,
     ],
-    [
-      "read_run_transcript",
-      { execution: "e-1", attempt: "a-1" },
-      /read_run_transcript takes no limit, so this one cannot be answered\.$/,
-    ],
   ]) {
     const answer = await routeOf(
       name,
@@ -499,6 +500,374 @@ test("a lead transcript page a little over the bound is answered across two read
   );
 });
 
+/** One batch of a run's transcript as its route answers it, a line for each event. */
+function runBatchOf(batch, events) {
+  const content = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  return {
+    batch,
+    recordedAt: "2026-10-22T12:00:00.000Z",
+    bytes: Buffer.byteLength(content),
+    read: "Content",
+    content,
+  };
+}
+
+/** One page of a run's transcript as its route answers it. */
+function runPageOf(batches, fields = {}) {
+  return JSON.stringify({
+    batches,
+    observedAt: "2026-10-22T12:00:05.000Z",
+    complete: true,
+    ...fields,
+  });
+}
+
+/** One event a run wrote, its text `filler` repeated `count` times. */
+function runEventOf(uuid, filler, count) {
+  return {
+    type: "assistant",
+    uuid,
+    message: { role: "assistant", content: filler.repeat(count) },
+  };
+}
+
+/** A run's transcript read the way a caller reads it, page after page: the events given whole, those previewed, and every answer. */
+async function runWalked(call, pagesMax) {
+  const read = [];
+  const previews = [];
+  const answers = [];
+  let cursor = {};
+  for (let page = 0; page < pagesMax; page += 1) {
+    const answer = await call("read_run_transcript", {
+      execution: "e-1",
+      attempt: "a-1",
+      ...cursor,
+    });
+    answers.push(answer);
+    assert.ok(answer.isError === undefined, `page ${String(page)} was refused`);
+    const given = JSON.parse(textOf(answer));
+    for (const entry of given.entries)
+      if (entry.preview === undefined) read.push(entry);
+      else previews.push(entry);
+    if (given.next === undefined) return { read, previews, answers };
+    cursor = given.next;
+  }
+  assert.fail("the walk did not terminate");
+}
+
+test("a run transcript page of the most batches, each full, is read whole, page by page, under the bound", async () => {
+  const events = [];
+  const batches = [];
+  for (let batch = 1; batch <= runTranscriptPageBatchesMax; batch += 1) {
+    const held = [];
+    for (;;) {
+      const event = runEventOf(
+        `r-${String(batch)}-${String(held.length)}`,
+        'say "x" ',
+        512,
+      );
+      if (
+        runBatchOf(batch, [...held, event]).bytes > runTranscriptBatchBytesMax
+      )
+        break;
+      held.push(event);
+    }
+    events.push(...held);
+    batches.push(runBatchOf(batch, held));
+  }
+  const body = runPageOf(batches);
+  assert.ok(
+    Buffer.byteLength(body) > chuggyTranscriptBodyBytesMax &&
+      Buffer.byteLength(body) <= chuggyToolRunTranscriptResponseBytesMax,
+    "the page under test is not one only the run's own draw bound admits",
+  );
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const { read, previews, answers } = await runWalked(call, 1_024);
+
+  assert.deepEqual(read, events, "the transcript was not read whole");
+  assert.deepEqual(previews, []);
+  for (const answer of answers)
+    assert.ok(
+      chuggyToolAnswerBytes(textOf(answer)) <= chuggyToolAnswerBytesMax,
+    );
+  assert.ok(answers.length > runTranscriptPageBatchesMax);
+  assert.ok(
+    api.calls.every(({ path }) =>
+      /\/executions\/e-1\/attempts\/a-1\/transcript(\?after=0)?$/u.test(path),
+    ),
+    "a read moved off the page its walk had not finished",
+  );
+});
+
+test("a run event of the largest size, too heavy for one answer as the transcript escapes it, is previewed and the walk moves past it", async () => {
+  const empty = runEventOf("r-2", "", 0);
+  const heavy = runEventOf(
+    "r-2",
+    "\\",
+    Math.floor(
+      (runTranscriptEventBytesMax - Buffer.byteLength(JSON.stringify(empty))) /
+        2,
+    ),
+  );
+  const line = JSON.stringify(heavy);
+  assert.ok(Buffer.byteLength(line) <= runTranscriptEventBytesMax);
+  assert.ok(chuggyToolAnswerBytes(line) > chuggyToolAnswerBytesMax);
+  const light = [runEventOf("r-1", "x", 40), runEventOf("r-3", "x", 40)];
+  const body = runPageOf([runBatchOf(1, [light[0], heavy, light[1]])]);
+  const { call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const { read, previews } = await runWalked(call, 8);
+
+  assert.deepEqual(read, light);
+  assert.equal(previews.length, 1);
+  assert.equal(previews[0].uuid, "r-2");
+  assert.equal(previews[0].type, "assistant");
+  assert.equal(previews[0].bytes, Buffer.byteLength(line));
+});
+
+test("a run transcript page at its draw bound is read, and one past it is refused", async () => {
+  const page = runPageOf([runBatchOf(1, [runEventOf("r-1", "x", 8)])]);
+  const at = `${page}${" ".repeat(
+    chuggyToolRunTranscriptResponseBytesMax - Buffer.byteLength(page),
+  )}`;
+  const args = { execution: "e-1", attempt: "a-1" };
+
+  const read = await routeOf(
+    "read_run_transcript",
+    args,
+    apiOf(() => ({ status: 200, body: at })),
+  );
+  const over = await routeOf(
+    "read_run_transcript",
+    args,
+    apiOf(() => ({ status: 200, body: `${at} ` })),
+  );
+
+  assert.ok(read.isError === undefined);
+  assert.equal(JSON.parse(textOf(read)).entries.length, 1);
+  assert.equal(over.isError, true);
+  assert.match(
+    textOf(over),
+    new RegExp(
+      `larger than the ${String(chuggyToolRunTranscriptResponseBytesMax)} bytes`,
+      "u",
+    ),
+  );
+});
+
+/** What `read_run_error` answers when its route answers `content`, read from the route it names. */
+async function runErrorRead(content) {
+  const api = apiOf(() => ({
+    status: 200,
+    body: JSON.stringify({ read: "Content", content }),
+  }));
+  const answer = await routeOf(
+    "read_run_error",
+    { execution: "e-1", attempt: "a-1" },
+    api,
+  );
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    ["/api/v1/tenants/vteng/projects/chuggy/executions/e-1/attempts/a-1/error"],
+  );
+  return answer;
+}
+
+test("an attempt's error text is answered whole, with its size", async () => {
+  const content =
+    "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n";
+
+  const answer = await runErrorRead(content);
+
+  assert.ok(answer.isError === undefined);
+  assert.deepEqual(JSON.parse(textOf(answer)), {
+    bytes: Buffer.byteLength(content),
+    content,
+  });
+});
+
+test("an error text as large as an upload, every line of it coloured, is answered by the longest end that fits, with the size of the whole", async () => {
+  const why = "the line that says why\n";
+  const line = "\u001b[31m\u0001rror\u001b[0m: \u001b[2Kstep\n";
+  const head = line.repeat(
+    Math.floor(
+      (workerPlaneUploadBytesMax - Buffer.byteLength(why)) /
+        Buffer.byteLength(line),
+    ),
+  );
+  const content = `${head}${"\u001b".repeat(
+    workerPlaneUploadBytesMax -
+      Buffer.byteLength(head) -
+      Buffer.byteLength(why),
+  )}${why}`;
+  const body = JSON.stringify({ read: "Content", content });
+  assert.equal(Buffer.byteLength(content), workerPlaneUploadBytesMax);
+  assert.ok(
+    Buffer.byteLength(body) > chuggyToolResponseBytesMax &&
+      Buffer.byteLength(body) <= chuggyToolRunErrorResponseBytesMax,
+    "the text under test is not one only the error text's own draw bound admits",
+  );
+
+  const answer = await runErrorRead(content);
+
+  assert.ok(answer.isError === undefined);
+  assert.ok(chuggyToolAnswerBytes(textOf(answer)) <= chuggyToolAnswerBytesMax);
+  const { bytes, tail, ...rest } = JSON.parse(textOf(answer));
+  assert.deepEqual(rest, {});
+  assert.equal(bytes, workerPlaneUploadBytesMax);
+  assert.ok(content.endsWith(tail) && tail.endsWith(why));
+  assert.ok(
+    chuggyToolAnswerBytes(
+      JSON.stringify({ bytes, tail: content.slice(-tail.length - 1) }),
+    ) > chuggyToolAnswerBytesMax,
+    "a longer end would have fit",
+  );
+});
+
+test("an error text's end is the longest that fits, and starts on a whole character, never inside a surrogate pair", async () => {
+  for (let pad = 0; pad < 8; pad += 1) {
+    const content = `${"\u{1F600}y".repeat(12_000)}${"z".repeat(pad)}`;
+
+    const answer = await runErrorRead(content);
+
+    const { tail } = JSON.parse(textOf(answer));
+    assert.ok(content.endsWith(tail), String(pad));
+    assert.ok(
+      tail.isWellFormed(),
+      `the end of pad ${String(pad)} splits a pair`,
+    );
+    const before = [...content.slice(0, content.length - tail.length)].at(-1);
+    assert.ok(
+      chuggyToolAnswerBytes(
+        JSON.stringify({
+          bytes: Buffer.byteLength(content),
+          tail: `${before}${tail}`,
+        }),
+      ) > chuggyToolAnswerBytesMax,
+      `a longer end of pad ${String(pad)} would have fit`,
+    );
+  }
+});
+
+test("a plain error text's end is the longest that fits", async () => {
+  const content = "a".repeat(100_000);
+
+  const answer = await runErrorRead(content);
+
+  const { bytes, tail } = JSON.parse(textOf(answer));
+  assert.ok(content.endsWith(tail));
+  assert.ok(
+    chuggyToolAnswerBytes(
+      JSON.stringify({ bytes, tail: content.slice(-tail.length - 1) }),
+    ) > chuggyToolAnswerBytesMax,
+    "a longer end would have fit",
+  );
+});
+
+test("an error text too large to answer whole is answered by an end that leaves some out, even where the whole would fit as an end", async () => {
+  const fitsAs = (key, text) =>
+    chuggyToolAnswerBytes(
+      JSON.stringify({ bytes: Buffer.byteLength(text), [key]: text }),
+    ) <= chuggyToolAnswerBytesMax;
+  let content = "";
+  for (let length = chuggyToolAnswerBytesMax; !content; length -= 1) {
+    const text = "a".repeat(length);
+    if (!fitsAs("content", text) && fitsAs("tail", text)) content = text;
+    assert.ok(length > 0, "no text found to test");
+  }
+
+  const answer = await runErrorRead(content);
+
+  const { bytes, tail, ...rest } = JSON.parse(textOf(answer));
+  assert.deepEqual(rest, {});
+  assert.equal(bytes, content.length);
+  assert.equal(tail, content.slice(1));
+});
+
+test("an attempt with no error text is answered as having none, and not as a failure", async () => {
+  const api = apiOf(() => ({
+    status: 404,
+    body: JSON.stringify({
+      error: { code: "NotFound", message: "Resource not found." },
+    }),
+  }));
+
+  const answer = await routeOf(
+    "read_run_error",
+    { execution: "e-1", attempt: "a-1" },
+    api,
+  );
+
+  assert.ok(answer.isError === undefined);
+  assert.match(textOf(answer), /^This attempt has no error text/u);
+});
+
+test("an error text the plane cannot answer now, or cannot verify, is relayed as the refusal it is", async () => {
+  for (const [status, code] of [
+    [409, "RunErrorCorrupt"],
+    [503, "RunErrorUnavailable"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: code } });
+
+    const answer = await routeOf(
+      "read_run_error",
+      { execution: "e-1", attempt: "a-1" },
+      apiOf(() => ({ status, body })),
+    );
+
+    assert.equal(answer.isError, true, code);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`, code);
+  }
+});
+
+test("an error text route's body that is not one error text is refused rather than answered", async () => {
+  for (const body of [
+    "{}",
+    "not JSON",
+    JSON.stringify({ read: "Content", content: 7 }),
+    JSON.stringify({ read: "Missing", content: "x" }),
+  ]) {
+    const answer = await routeOf(
+      "read_run_error",
+      { execution: "e-1", attempt: "a-1" },
+      apiOf(() => ({ status: 200, body })),
+    );
+
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /not one error text/u, body);
+  }
+});
+
+test("an error text's answer at its draw bound is read, and one past it is refused", async () => {
+  const body = JSON.stringify({ read: "Content", content: "x" });
+  const at = `${body}${" ".repeat(
+    chuggyToolRunErrorResponseBytesMax - Buffer.byteLength(body),
+  )}`;
+  const args = { execution: "e-1", attempt: "a-1" };
+
+  const read = await routeOf(
+    "read_run_error",
+    args,
+    apiOf(() => ({ status: 200, body: at })),
+  );
+  const over = await routeOf(
+    "read_run_error",
+    args,
+    apiOf(() => ({ status: 200, body: `${at} ` })),
+  );
+
+  assert.deepEqual(JSON.parse(textOf(read)), { bytes: 1, content: "x" });
+  assert.equal(over.isError, true);
+  assert.match(
+    textOf(over),
+    new RegExp(
+      `larger than the ${String(chuggyToolRunErrorResponseBytesMax)} bytes`,
+      "u",
+    ),
+  );
+});
+
 test("a raise too large to store is refused like any other answer", async () => {
   const huge = "x".repeat(chuggyToolAnswerBytesMax);
   const api = {
@@ -624,8 +993,15 @@ test("each read reaches the route its roster names, and only it", async () => {
     ],
     [["read_execution", { execution: "e-1" }], "/executions/e-1"],
     [
-      ["read_run_transcript", { execution: "e-1", attempt: "a-1", after: 0 }],
-      "/executions/e-1/attempts/a-1/transcript?after=0",
+      [
+        "read_run_transcript",
+        { execution: "e-1", attempt: "a-1", after: 2, entry: 3 },
+      ],
+      "/executions/e-1/attempts/a-1/transcript?after=2",
+    ],
+    [
+      ["read_run_error", { execution: "e-1", attempt: "a-1" }],
+      "/executions/e-1/attempts/a-1/error",
     ],
     [["read_operation", { operation: "o-1" }], "/operations/o-1"],
     [["initialize_draft", { revision: "r1" }], "/draft-initializations/r1"],
@@ -872,6 +1248,10 @@ test("an identity carrying a separator stays inside the route its tool names", a
     [
       ["read_run_transcript", { execution: escaping, attempt: escaping }],
       `/executions/${escaped}/attempts/${escaped}/transcript`,
+    ],
+    [
+      ["read_run_error", { execution: escaping, attempt: escaping }],
+      `/executions/${escaped}/attempts/${escaped}/error`,
     ],
     [["read_operation", { operation: escaping }], `/operations/${escaped}`],
     [
@@ -1308,6 +1688,7 @@ test("the descriptions say what the server does where a session reads it", () =>
       /`commandedCheckStageNote` says it in words/,
     ],
     read_ticket: [
+      /`escalation\.failed`, which read_run_error takes to read the attempt's error text/,
       /`runTotals`, what every run of its executions reported, summed/,
       /`costUsdMicros`, millionths of a dollar at the runtime's list price/,
       /per model in `models`/,
@@ -1332,6 +1713,36 @@ test("the descriptions say what the server does where a session reads it", () =>
       /written to a new file/,
       /that file's path, its media type and its size in bytes/,
       /open the file with Read/,
+    ],
+  };
+
+  for (const [tool, claims] of Object.entries(said))
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+});
+
+/**
+ * What a session reading a run is told: that what the run wrote is as
+ * untrusted as the run, how its transcript is read on while it is still
+ * writing, and that an attempt with no error text has none rather than failing
+ * to be read.
+ */
+test("the run reads say the run's text is untrusted and how each is read", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const said = {
+    read_run_transcript: [
+      /as untrusted as anything a run wrote/,
+      /`elided`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count/,
+      /`complete`, whether the run has ended/,
+      /pass its `after` and `entry` back/,
+      /the same read again answers what it wrote since/,
+    ],
+    read_run_error: [
+      /as untrusted as anything a run wrote/,
+      /\{bytes, content\}, or \{bytes, tail\} with the text's end/,
+      /An attempt with none answers that it has none/,
+      /`escalation\.failed`/,
+      /`error\.bytes`/,
     ],
   };
 
@@ -1601,6 +2012,7 @@ const projectToolArguments = {
   list_executions: {},
   read_execution: { execution: "e-1" },
   read_run_transcript: { execution: "e-1", attempt: "a-1" },
+  read_run_error: { execution: "e-1", attempt: "a-1" },
   read_operation: { operation: "o-1" },
   list_threads: {},
   read_thread: { session: "t-1" },
@@ -1689,7 +2101,11 @@ test("every project tool a session holds asks its route, and answers what the ro
   for (const { name } of chuggyProjectTools) {
     const { api, call } = imageToolsOf(temporary, (path) => ({
       status: 200,
-      body: path.includes("/artifacts/") ? JSON.stringify(pngAnswered) : "{}",
+      body: path.includes("/artifacts/")
+        ? JSON.stringify(pngAnswered)
+        : path.endsWith("/error")
+          ? JSON.stringify({ read: "Content", content: "x" })
+          : "{}",
     }));
 
     const answer = await call(name, projectToolArguments[name]);

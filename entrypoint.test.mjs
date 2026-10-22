@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL, URL } from "node:url";
+import { TextDecoder } from "node:util";
 
 import {
   sessionTaskVariable,
@@ -30,6 +31,7 @@ import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import {
   runConfigurationBytesMax,
   workerPlaneBytesMediaType,
+  workerPlaneUploadBytesMax,
 } from "@chuggy/worker-contract/workerPlane";
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
@@ -1328,6 +1330,95 @@ test("a run that died reports no verdict of its own", async () => {
   assert.ok(
     !calls.some(({ init }) => String(init.body ?? "").includes('"Fail"')),
   );
+});
+
+/** The error text one failure report uploads, as the bytes the plane is sent. */
+async function uploadedError(message, scrub) {
+  const { calls, request } = planeCalls();
+  await reportWorkerFailure(
+    {
+      task,
+      bearer: "bearer",
+      evidence: evidenceFor(request),
+      request,
+      ...(scrub === undefined ? {} : { scrub }),
+    },
+    message,
+  );
+  const uploaded = calls.find(({ path }) =>
+    path.endsWith("/.chuggy/worker-error.txt"),
+  );
+  return Buffer.from(uploaded.init.body);
+}
+
+/** The count an error text cut to fit says was dropped before its end, and that end. */
+function droppedBefore(uploaded) {
+  const text = uploaded.toString("utf8");
+  const [first, ...rest] = text.split("\n");
+  const dropped =
+    /^The first (\d+) bytes of this error text were dropped; what follows is its end\.$/u.exec(
+      first,
+    );
+  assert.ok(dropped !== null, first.slice(0, 200));
+  return { dropped: Number(dropped[1]), end: rest.join("\n") };
+}
+
+test("an error text within the upload bound is uploaded whole", async () => {
+  const message = "x".repeat(workerPlaneUploadBytesMax - 1);
+
+  const uploaded = await uploadedError(message);
+
+  assert.equal(uploaded.toString("utf8"), `${message}\n`);
+});
+
+test("an error text past the upload bound keeps its end, after a first line saying how many bytes before it were dropped", async () => {
+  const message = `${"head ".repeat(1_000_000)}the line that says why`;
+  const whole = Buffer.byteLength(`${message}\n`);
+  assert.ok(whole > workerPlaneUploadBytesMax);
+
+  const uploaded = await uploadedError(message);
+
+  assert.ok(uploaded.byteLength <= workerPlaneUploadBytesMax);
+  const { dropped, end } = droppedBefore(uploaded);
+  assert.ok(end.endsWith("the line that says why\n"));
+  assert.equal(dropped + Buffer.byteLength(end), whole);
+  assert.ok(`${message}\n`.endsWith(end));
+});
+
+test("an error text is scrubbed whole before it is cut, so a secret the cut falls inside is never half kept", async () => {
+  const held = `chuggy-held-${"0123456789abcdef".repeat(64)}`;
+  const kept = workerPlaneUploadBytesMax - held.length / 2;
+  const message = `${"x".repeat(100_000)}${held}${"y".repeat(kept)}`;
+  const cut = Buffer.byteLength(`${message}\n`) - workerPlaneUploadBytesMax;
+  assert.ok(cut > 100_000 && cut < 100_000 + held.length);
+
+  const uploaded = (
+    await uploadedError(message, credentialScrub([held]))
+  ).toString("utf8");
+
+  for (let at = 0; at + 16 <= held.length; at += 16)
+    assert.ok(
+      !uploaded.includes(held.slice(at, at + 16)),
+      `the secret's bytes at ${String(at)} were uploaded`,
+    );
+});
+
+test("an error text is cut where a character starts, so what is uploaded is UTF-8", async () => {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (let pad = 0; pad < 4; pad += 1) {
+    const message = `${"x".repeat(pad)}${"\u{1F600}".repeat(workerPlaneUploadBytesMax / 4 + 1_000)}`;
+
+    const uploaded = await uploadedError(message);
+
+    assert.ok(uploaded.byteLength <= workerPlaneUploadBytesMax, String(pad));
+    const { dropped, end } = droppedBefore(uploaded);
+    assert.doesNotThrow(() => decoder.decode(uploaded), String(pad));
+    assert.equal(
+      dropped + Buffer.byteLength(end),
+      Buffer.byteLength(`${message}\n`),
+      String(pad),
+    );
+  }
 });
 
 test("an error text that cannot be uploaded still ends the attempt", async () => {
