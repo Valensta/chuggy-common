@@ -2,9 +2,9 @@
  * Git's reach of a remote, tried again where git says its transport failed and
  * never where the remote refused.
  *
- * A REFUSAL IS FINAL. A remote that denied the credential, refused the ref or
- * declined the push answers the same on every try, so a failure naming one is
- * not tried again, whatever else it names. A failure naming git's own
+ * A REFUSAL IS FINAL. A remote that denied the credential, refused the
+ * request or the ref, or declined the push answers the same on every try, so a
+ * failure naming one is not tried again, whatever else it names. A failure naming git's own
  * transport is tried again; anything else, a hook's included, is final.
  *
  * WHAT IS READ IS GIT'S STANDARD ERROR. A failure carrying none, a child that
@@ -19,24 +19,27 @@ export const gitRemoteTriesMax = 4;
 /** The pause before the second try, doubled before each try after it. */
 export const gitRemotePauseMs = 2_000;
 
-/** Lines naming a remote's refusal: of the credential, of the repository, or of the ref. */
+/**
+ * Lines naming a remote's refusal: of the credential, of the repository, of
+ * the request, or of the ref. What the remote itself says is read only off
+ * the lines it wrote, so a repository named for a refusal is not one.
+ */
 const gitRefusals = [
   /returned error: 40[134]\b/u,
-  /\bHTTP 40[134]\b/u,
+  /\bHTTP 4(?!29)\d\d\b/u,
   /Authentication failed/u,
   /could not read (?:Username|Password)/u,
   /\[remote rejected\]/u,
   /! \[rejected\]/u,
-  /protected branch/iu,
-  /declined/iu,
+  /^remote:.*(?:protected branch|declined)/iu,
 ];
 
-/** Lines naming git's transport failing: the connection, its TLS, or a server error. */
+/** Lines naming git's transport failing: the connection, its TLS short of a certificate, or a server error. */
 const gitTransportFailures = [
   /returned error: (?:5\d\d|429)\b/u,
   /\bHTTP (?:5\d\d|429)\b/u,
   /RPC failed; curl \d+/u,
-  /unable to access .*(?:Could not resolve|Failed to connect|timed out|Connection reset|Recv failure|Send failure|Empty reply|SSL|TLS|gnutls)/u,
+  /unable to access (?!.*certificate).*(?:Could not resolve|Failed to connect|timed out|Connection reset|Recv failure|Send failure|Empty reply|SSL|TLS|gnutls)/u,
   /unexpected disconnect/u,
   /early EOF/u,
 ];

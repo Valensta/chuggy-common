@@ -28,6 +28,7 @@ const refused = {
   "a protected branch": `remote: error: GH006: Protected branch update failed for refs/heads/main.\nTo ${remote}\n ! [remote rejected] main -> main (protected branch hook declined)\nerror: failed to push some refs to '${remote}'\n`,
   "a rejected update": `To ${remote}\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '${remote}'\n`,
   "a declining hook": `remote: rejected by policy\nTo ${remote}\n ! [remote rejected] main -> main (pre-receive hook declined)\n`,
+  "a request too large, git ending it by hanging up": `error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413\nsend-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n`,
 };
 
 /** What git writes when its transport fails, each as git reports it. */
@@ -36,6 +37,7 @@ const transient = {
   "a server error mid-push": `error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503\nfatal: the remote end hung up unexpectedly\n`,
   "a rate limit": `fatal: unable to access '${remote}': The requested URL returned error: 429\n`,
   "an unresolved host": `fatal: unable to access '${remote}': Could not resolve host: github.com\n`,
+  "an unresolved host for a repository named for a refusal": `fatal: unable to access 'https://github.com/acme/declined-orders.git/': Could not resolve host: github.com\n`,
   "a refused connection": `fatal: unable to access '${remote}': Failed to connect to github.com port 443 after 3 ms: Couldn't connect to server\n`,
   "a failed handshake": `fatal: unable to access '${remote}': gnutls_handshake() failed: The TLS connection was non-properly terminated.\n`,
   "a broken transfer": `error: RPC failed; curl 56 GnuTLS recv error (-9): Error decoding the received TLS packet.\nfatal: early EOF\n`,
@@ -46,6 +48,7 @@ const transient = {
 const unnamed = {
   "a pre-push hook": `lint failed: 3 problems\nerror: failed to push some refs to '${remote}'\n`,
   "a remote that hung up": `fatal: the remote end hung up unexpectedly\n`,
+  "a certificate the image does not trust": `fatal: unable to access '${remote}': SSL certificate problem: unable to get local issuer certificate\n`,
   "a child with no standard error": undefined,
 };
 
@@ -144,6 +147,12 @@ test("the line a failure is named by is the one that decided it, and otherwise g
   assert.equal(
     gitFailureLine(gitFailed(refused["a denial git ends by hanging up"])),
     "error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403",
+  );
+  assert.equal(
+    gitFailureLine(
+      gitFailed(refused["a request too large, git ending it by hanging up"]),
+    ),
+    "error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413",
   );
   assert.equal(
     gitFailureLine(gitFailed(transient["a broken transfer"])),
