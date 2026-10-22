@@ -38,6 +38,7 @@ const transient = {
   "a rate limit": `fatal: unable to access '${remote}': The requested URL returned error: 429\n`,
   "an unresolved host": `fatal: unable to access '${remote}': Could not resolve host: github.com\n`,
   "an unresolved host for a repository named for a refusal": `fatal: unable to access 'https://github.com/acme/declined-orders.git/': Could not resolve host: github.com\n`,
+  "an unresolved host for a repository named for a certificate": `fatal: unable to access 'https://github.com/google/certificate-transparency-go.git/': Could not resolve host: github.com\n`,
   "a refused connection": `fatal: unable to access '${remote}': Failed to connect to github.com port 443 after 3 ms: Couldn't connect to server\n`,
   "a failed handshake": `fatal: unable to access '${remote}': gnutls_handshake() failed: The TLS connection was non-properly terminated.\n`,
   "a broken transfer": `error: RPC failed; curl 56 GnuTLS recv error (-9): Error decoding the received TLS packet.\nfatal: early EOF\n`,

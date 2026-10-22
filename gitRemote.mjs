@@ -39,7 +39,7 @@ const gitTransportFailures = [
   /returned error: (?:5\d\d|429)\b/u,
   /\bHTTP (?:5\d\d|429)\b/u,
   /RPC failed; curl \d+/u,
-  /unable to access (?!.*certificate).*(?:Could not resolve|Failed to connect|timed out|Connection reset|Recv failure|Send failure|Empty reply|SSL|TLS|gnutls)/u,
+  /unable to access '[^']*': (?!.*certificate).*(?:Could not resolve|Failed to connect|timed out|Connection reset|Recv failure|Send failure|Empty reply|SSL|TLS|gnutls)/u,
   /unexpected disconnect/u,
   /early EOF/u,
 ];
