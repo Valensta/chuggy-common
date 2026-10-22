@@ -285,7 +285,7 @@ const volumes = {
   fill: "chuggy-shame-0123456789abcdef0123-0a1b2c3d-fill",
 };
 
-test("a job given runtime volumes is labelled with them, mounts each uncopied, the runtime read-only, and starts the runtime's check through the image's shell; podman's workspace is chowned to the job's user", () => {
+test("a job given runtime volumes is labelled with them, mounts each uncopied, the runtime read-only, and starts the runtime's check through the image's shell in the workspace; podman's workspace is chowned to the job's user", () => {
   /** @type {[import("./engineArgv.mjs").EngineName, string][]} */
   const workspaces = [
     ["docker", "nocopy"],
@@ -308,9 +308,12 @@ test("a job given runtime volumes is labelled with them, mounts each uncopied, t
       `${volumes.volume}:/opt/chuggy:ro,nocopy`,
       "--entrypoint",
       "/bin/sh",
+      "--workdir",
+      "/workspace",
       ...plain.slice(workspace + 1),
       "/opt/chuggy/check.sh",
     ]);
+    assert.ok(!plain.includes("--workdir"), engine);
   }
 });
 
