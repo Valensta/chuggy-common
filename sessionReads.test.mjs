@@ -1,6 +1,6 @@
 /**
- * The reads a session's shell makes of its project's other repositories:
- * which sessions are served them, what a git the runtime starts is answered,
+ * The reads a session's shell makes of its project's repositories, its own
+ * among them: which sessions are served them, what a git the runtime starts is answered,
  * the scrub a read minted mid-session is held to, and the end of the socket
  * with the session's.
  */
@@ -201,9 +201,10 @@ test("a thread's git is answered the plane's read of another repository its proj
 /**
  * Over a forge that holds them. Catches a repository the project does not
  * bind presented anything, a refusal that ends the reads for the git after
- * it, and the session's own repository asked of the plane through them.
+ * it, and the session's own repository refused through them, which leaves its
+ * shell unable to fetch the repository it works in.
  */
-test("a repository the project does not bind is answered nothing, and git goes on to read one it binds", async (t) => {
+test("a repository the project does not bind is answered nothing, and git goes on to read the session's own and one it binds", async (t) => {
   const names = {
     own: "org/own.git",
     lib: "org/lib.git",
@@ -242,15 +243,17 @@ test("a repository the project does not bind is answered nothing, and git goes o
       .filter(({ repository }) => repository === names[name])
       .map(({ password }) => password);
   assert.notEqual(ran.unbound.code, 0);
-  assert.notEqual(ran.own.code, 0);
-  assert.equal(ran.lib.code, 0, ran.lib.stderr);
-  assert.match(ran.lib.stdout, /^[0-9a-f]{40}\trefs\/heads\/main$/mu);
+  for (const name of ["own", "lib"]) {
+    assert.equal(ran[name].code, 0, ran[name].stderr);
+    assert.match(ran[name].stdout, /^[0-9a-f]{40}\trefs\/heads\/main$/mu);
+  }
   assert.deepEqual(presented("unbound"), []);
-  assert.deepEqual(presented("own"), []);
+  assert.deepEqual([...new Set(presented("own"))], [mintedCredential.password]);
   assert.deepEqual([...new Set(presented("lib"))], [read.password]);
   assert.deepEqual(credentialAsks(plane), [
     forge.url(names.own),
     forge.url(names.unbound),
+    forge.url(names.own),
     forge.url(names.lib),
   ]);
 });

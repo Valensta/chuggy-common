@@ -170,7 +170,7 @@ const sessionSecretKinds = {
   mounted: "a credential the launcher mounted",
   bearer: "the session's bearer",
   minted: "the git credential the plane minted",
-  read: "a read the plane minted for another repository",
+  read: "a read the plane minted for a repository",
 };
 
 function unreffed(milliseconds) {
@@ -1056,12 +1056,12 @@ async function sessionGitVersion(environment) {
 }
 
 /**
- * The reads every git this session's shell runs makes of the other
- * repositories its project binds, served as a job's are (`./projectReads.mjs`)
- * under `services.minted`, asked of the plane's session route under the
- * session's own bearer, and each password kept in the scrub. A session whose
- * agent has no shell, or that has no repository to name the forge, is served
- * none.
+ * The reads every git this session's shell runs makes of the repositories its
+ * project binds, its own among them, served as a job's are
+ * (`./projectReads.mjs`) under `services.minted`, asked of the plane's session
+ * route under the session's own bearer, and each password kept in the scrub.
+ * A session whose agent has no shell, or that has no repository to name the
+ * forge, is served none.
  */
 async function sessionReads(context, facts, { environment, services, warn }) {
   const repository = context.task.repository?.reference;

@@ -3,13 +3,14 @@
  * repository at the moment it is needed.
  *
  * THE PLANE DECIDES AND THE POD ASKS. A pod may ask for a read of any
- * repository its project binds, and never for more. An attempt asking for its
- * own repository names none: the plane reads it off the attempt's own row and
- * mints the least the recorded task kind needs, a work attempt's push among
- * it. An attempt naming any other repository is minted a read, and only where
- * its project binds that repository. A session names its repository, because a
- * site may have placed it against a mirror of the binding, and the plane holds
- * that name to the project's own bindings.
+ * repository its project binds, and never for more. An attempt naming no
+ * repository is answered for its own: the plane reads it off the attempt's own
+ * row and mints the least the recorded task kind needs, a work attempt's push
+ * among it. An attempt naming its own repository is minted a read of it, and
+ * one naming any other is minted a read only where its project binds that
+ * repository. A session names its repository, because a site may have placed
+ * it against a mirror of the binding, and the plane holds that name to the
+ * project's own bindings.
  *
  * NOT FOUND IS THE LAUNCHER'S CREDENTIAL FOR ITS OWN REPOSITORY, AND NO
  * CREDENTIAL FOR ANY OTHER. A deployment holding no app key, and a repository
@@ -23,7 +24,7 @@
  * THE PASSWORD IS WRITTEN AND NEVER PASSED. git reads the attempt's own
  * through the askpass script, which reads a file, so the value reaches no
  * argument list and no child's environment. The file is rewritten in place
- * when an attempt that has outlived its token asks again.
+ * when the attempt asks again, as its push does.
  *
  * THE TOKEN NEVER RESTS ON A NODE'S DISK. It is written under
  * `mintedCredentialDirectory`, which every pod document mounts a memory-backed
@@ -91,7 +92,8 @@ function planeCredentialChecked(minted) {
 /**
  * The username and password the plane minted at `path` for `repository`, or
  * nothing where it mints none for it. An attempt names no `repository` for
- * its own. `request` is the seam each mode reaches the plane through.
+ * what its task kind needs of its own. `request` is the seam each mode reaches
+ * the plane through.
  */
 export async function planeCredentialAnswered({
   task,
