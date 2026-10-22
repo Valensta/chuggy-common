@@ -13,7 +13,13 @@ import {
   recordingGit,
   remoteRefs,
 } from "./checkout.fixture.mjs";
+import { gitRemotePauseMs } from "./gitRemote.mjs";
 import { workerCredentialEnvironment } from "./repository.mjs";
+import {
+  RunStepFailure,
+  runCommitFailed,
+  runPushFailed,
+} from "./runEvidence.mjs";
 import {
   commitAndPushSource,
   resultDocument,
@@ -128,6 +134,120 @@ test("a push that can take a fresh credential takes one, and uses it", async () 
   assert.deepEqual(calls.at(-1).options.env, refreshed);
 });
 
+/** A git child that failed, writing `stderr`, as `execFile` rejects with it. */
+function gitFailed(stderr) {
+  return Object.assign(new Error(`Command failed: git\n${stderr}`), {
+    code: 1,
+    stderr,
+  });
+}
+
+/**
+ * One attempt published through a stand-in git whose pushes fail in turn as
+ * `pushes` says and then succeed, and whose commit throws `commit` where it is
+ * given: what the attempt declared or threw, how many times it pushed, how
+ * many times it took a credential, and each pause between pushes.
+ */
+async function pushedThrough(
+  pushes,
+  { commit, refresh = async () => ({ GIT_ASKPASS: "askpass" }) } = {},
+) {
+  let pushed = 0;
+  let refreshes = 0;
+  const pauses = [];
+  const command = async (_executable, args) => {
+    if (args[0] === "commit" && commit !== undefined) throw commit;
+    if (args[0] === "push") {
+      pushed += 1;
+      if (pushes[pushed - 1] !== undefined) throw pushes[pushed - 1];
+    }
+    return args[0] === "rev-parse" ? { stdout: "abc123\n" } : { stdout: "" };
+  };
+  const outcome = await commitAndPushSource({
+    task: { ticket: 7, attempt: "opaque", worker: {} },
+    repositoryId: "chuggy",
+    repository: "http://git/rig.git",
+    base: "base123",
+    directory: "/workspace/repository",
+    command,
+    environment: {},
+    secrets: [],
+    refresh: () => {
+      refreshes += 1;
+      return refresh();
+    },
+    pause: async (ms) => {
+      pauses.push(ms);
+    },
+  }).catch((failure) => failure);
+  return { outcome, pushed, refreshes, pauses };
+}
+
+test("a push the forge failed with a server error is tried again under the one credential, and lands", async () => {
+  const { outcome, pushed, refreshes, pauses } = await pushedThrough([
+    gitFailed(
+      "fatal: unable to access 'http://git/rig.git/': The requested URL returned error: 502\n",
+    ),
+  ]);
+
+  assert.equal(outcome.commit, "abc123");
+  assert.equal(pushed, 2);
+  assert.equal(refreshes, 1);
+  assert.deepEqual(pauses, [gitRemotePauseMs]);
+});
+
+test("a push refused, or stopped by its hook, is tried once and fails the push step, led by why", async () => {
+  for (const [stderr, why] of [
+    [
+      "remote: Permission to rig.git denied to bot.\nfatal: unable to access 'http://git/rig.git/': The requested URL returned error: 403\n",
+      "fatal: unable to access 'http://git/rig.git/': The requested URL returned error: 403",
+    ],
+    [
+      "remote: error: GH006: Protected branch update failed for refs/heads/chuggy.\n ! [remote rejected] abc123 -> chuggy (protected branch hook declined)\nerror: failed to push some refs to 'http://git/rig.git'\n",
+      "remote: error: GH006: Protected branch update failed for refs/heads/chuggy.",
+    ],
+    [
+      "pre-push: lint failed\nerror: failed to push some refs to 'http://git/rig.git'\n",
+      "error: failed to push some refs to 'http://git/rig.git'",
+    ],
+  ]) {
+    const { outcome, pushed } = await pushedThrough([gitFailed(stderr)]);
+
+    assert.ok(outcome instanceof RunStepFailure, why);
+    assert.equal(outcome.evidence, runPushFailed, why);
+    assert.equal(outcome.message.split("\n")[0], why);
+    assert.ok(outcome.message.includes(stderr), why);
+    assert.equal(pushed, 1, why);
+  }
+});
+
+test("a push that cannot take its credential fails the push step and pushes nothing", async () => {
+  const { outcome, pushed } = await pushedThrough([], {
+    refresh: async () => {
+      throw new Error("the worker plane answered 503 for a credential");
+    },
+  });
+
+  assert.equal(outcome.evidence, runPushFailed);
+  assert.equal(
+    outcome.message,
+    "the worker plane answered 503 for a credential",
+  );
+  assert.equal(pushed, 0);
+});
+
+test("a commit its hook stops fails the commit step and takes no credential", async () => {
+  const { outcome, pushed, refreshes } = await pushedThrough([], {
+    commit: gitFailed("pre-commit: secrets found\nerror: hook refused\n"),
+  });
+
+  assert.ok(outcome instanceof RunStepFailure);
+  assert.equal(outcome.evidence, runCommitFailed);
+  assert.equal(outcome.message.split("\n")[0], "error: hook refused");
+  assert.equal(pushed, 0);
+  assert.equal(refreshes, 0);
+});
+
 /**
  * One attempt published from a checkout by git itself, holding `held`: the
  * source it declared or the error it was refused with, and how many times its
@@ -209,6 +329,7 @@ test("an attempt whose commits carry no held secret pushes them", async () => {
 /** Asserts `refused` is the check's refusal of `secret` in `commit`, and that nothing left the checkout. */
 async function assertRefused(checkout, { refused, asked }, expected) {
   assert.ok(refused instanceof Error, "the attempt pushed a secret");
+  assert.equal(refused.evidence, runCommitFailed);
   assert.equal(
     refused.message,
     `commit ${expected.commit} carries ${expected.secret.kind} in ${expected.place}, so the attempt pushes nothing`,

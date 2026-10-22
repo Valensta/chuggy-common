@@ -5,6 +5,8 @@ import { createHash } from "node:crypto";
 import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocuments";
 
 import { workerGitEnvironment, workerStageEnvironment } from "./checks.mjs";
+import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
+import { runCommitFailed, runPushFailed, runStep } from "./runEvidence.mjs";
 
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
 const sourceObjectHeaderBytesMax = 256;
@@ -204,7 +206,11 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * one, and the push is the last thing it does — so the credential is taken
  * immediately before it rather than carried from the clone. Where the launcher
  * mounted the credential there is nothing to refresh, and the clone's own
- * environment is what pushes.
+ * environment is what pushes. The push is tried again as `gitRemote.mjs` says,
+ * under that one credential, with `pause` between tries.
+ *
+ * EACH HALF IS A STEP. A failure up to and including the secret check fails
+ * the commit step, and one taking the credential or pushing the push step.
  */
 export async function commitAndPushSource({
   task,
@@ -217,9 +223,43 @@ export async function commitAndPushSource({
   refresh,
   secrets,
   git = [],
+  pause,
 }) {
   if (!Array.isArray(secrets))
     throw new Error("a push is checked against the secrets the pod holds");
+  const commit = await runStep(
+    runCommitFailed,
+    () => sourceCommitted({ task, base, directory, command, secrets, git }),
+    gitFailureLine,
+  );
+  const ref = ticketBranch(task);
+  await runStep(
+    runPushFailed,
+    async () => {
+      const pushing = refresh === undefined ? environment : await refresh();
+      await gitRemoteTried(
+        () =>
+          command("git", ["push", repository, `${commit}:${ref}`], {
+            cwd: directory,
+            env: { ...pushing, ...workerGitEnvironment(pushing, git) },
+          }),
+        { pause },
+      );
+    },
+    gitFailureLine,
+  );
+  return { repository: repositoryId, ref, commit, base };
+}
+
+/** The commit everything the attempt changed is in, refused where it carries a held secret. */
+async function sourceCommitted({
+  task,
+  base,
+  directory,
+  command,
+  secrets,
+  git,
+}) {
   const local = {
     cwd: directory,
     env: workerStageEnvironment(process.env, { git }),
@@ -255,11 +295,5 @@ export async function commitAndPushSource({
     throw new Error(
       `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
     );
-  const ref = ticketBranch(task);
-  const pushing = refresh === undefined ? environment : await refresh();
-  await command("git", ["push", repository, `${commit}:${ref}`], {
-    cwd: directory,
-    env: { ...pushing, ...workerGitEnvironment(pushing, git) },
-  });
-  return { repository: repositoryId, ref, commit, base };
+  return commit;
 }

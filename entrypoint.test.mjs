@@ -9,6 +9,7 @@ import {
   readdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -61,6 +62,7 @@ import {
 } from "./claudeCredential.fixture.mjs";
 import { pausedClock } from "./clock.fixture.mjs";
 import {
+  cloneRepository,
   envelopeLaunch,
   envelopeTask,
   prepareWorker,
@@ -84,7 +86,15 @@ import { keepWorkerLease } from "./lease.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { agentResultSchema } from "./result.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
-import { credentialScrub, runEvidenceRecorder } from "./runEvidence.mjs";
+import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
+import {
+  RunStepFailure,
+  credentialScrub,
+  runCloneFailed,
+  runEvidenceRecorder,
+  runPushFailed,
+  runSetupFailed,
+} from "./runEvidence.mjs";
 import { facts } from "./sessionHarness.fixture.mjs";
 import { commitAndPushSource, ticketBranch } from "./source.mjs";
 import { workerPlaneAwayMillisecondsMax, workerRequest } from "./transport.mjs";
@@ -450,7 +460,7 @@ function commandedPlane() {
  * document, a pod that fetched its task anywhere but the envelope's plane or
  * under anything but its bearer, and an attempt that did not run on from
  * there as a pushed one does, to the credential its repository needs and the
- * crashed run's report when there is none.
+ * crashed run's report, as its clone step's, when there is none.
  */
 test("a pod launched with an envelope fetches its task and runs it under the envelope's bearer", async () => {
   const plane = await commandedPlane();
@@ -478,6 +488,9 @@ test("a pod launched with an envelope fetches its task and runs it under the env
         (route) => ({ route, authorization: `Bearer ${envelope.bearer}` }),
       ),
     );
+    assert.deepEqual(plane.requests.at(-1)?.body, {
+      evidence: runCloneFailed,
+    });
   } finally {
     await plane.close();
     await rm(minted, { recursive: true, force: true });
@@ -762,7 +775,10 @@ test("an envelope's pod clones into the workspace its envelope names", async () 
           throw new Error("cloned");
         },
       }),
-      /^Error: cloned$/u,
+      (failure) =>
+        failure instanceof RunStepFailure &&
+        failure.evidence === runCloneFailed &&
+        failure.message === "cloned",
     );
   } finally {
     await plane.close();
@@ -805,6 +821,147 @@ test("a setup line sees the pod's environment but not the task document", async 
     ])
       delete process.env[name];
   }
+});
+
+/**
+ * Catches a failing setup line ending the run as anything but the setup step,
+ * or named by anything but the line itself: its text leads with the line and
+ * how it exited, and what it wrote follows.
+ */
+test("a setup line that fails fails the setup step, named by the line and its exit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-setup-"));
+  try {
+    const setup = "echo the lockfile is stale >&2; exit 3";
+    const failed = await prepareWorker(
+      { worker: { setup: ["true", setup, "touch after"] } },
+      directory,
+    ).catch((failure) => failure);
+
+    assert.ok(failed instanceof RunStepFailure);
+    assert.equal(failed.evidence, runSetupFailed);
+    assert.equal(failed.message.split("\n")[0], `${setup} exited 3`);
+    assert.match(failed.message, /the lockfile is stale/u);
+    await assert.rejects(readFile(join(directory, "after")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a file setup cannot write fails the setup step", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-setup-"));
+  try {
+    await writeFile(join(directory, "CLAUDE.md"), "the repository's own\n");
+    const failed = await prepareWorker(
+      { worker: { files: [{ path: "CLAUDE.md", content: "provisioned\n" }] } },
+      directory,
+    ).catch((failure) => failure);
+
+    assert.equal(failed.evidence, runSetupFailed);
+    assert.match(failed.message, /EEXIST/u);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A clone through a stand-in git: each clone fails in turn as `clones` says,
+ * after leaving the directory it was cloning into, and then succeeds. What the
+ * clone answered or threw, and each git asked with whether its directory was
+ * there.
+ */
+async function clonedThrough(clones) {
+  const workspace = await mkdtemp(join(tmpdir(), "chuggy-clone-"));
+  const asked = [];
+  const pauses = [];
+  let tries = 0;
+  try {
+    const outcome = await cloneRepository(
+      "https://git.test/rig.git",
+      "0".repeat(40),
+      workspace,
+      {},
+      {
+        run: async (_executable, args, options) => {
+          const into = args[0] === "clone" ? args.at(-1) : options.cwd;
+          const there = await stat(into).then(
+            () => true,
+            () => false,
+          );
+          asked.push({ verb: args[0], there });
+          if (args[0] !== "clone") return { stdout: "" };
+          tries += 1;
+          await mkdir(into, { recursive: true });
+          await writeFile(join(into, "partial"), "");
+          if (clones[tries - 1] !== undefined) throw clones[tries - 1];
+          return { stdout: "" };
+        },
+        pause: async (ms) => {
+          pauses.push(ms);
+        },
+      },
+    ).catch((failure) => failure);
+    return { outcome, asked, pauses };
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+/** A git child that failed, writing `stderr`, as `execFile` rejects with it. */
+function gitFailed(stderr) {
+  return Object.assign(new Error(`Command failed: git clone\n${stderr}`), {
+    code: 128,
+    stderr,
+  });
+}
+
+/**
+ * Catches a clone tried again over what the failed one left, which git
+ * refuses, and a checkout tried more than once.
+ */
+test("a clone the forge failed is tried again from an empty directory, and checked out once", async () => {
+  const { outcome, asked, pauses } = await clonedThrough([
+    gitFailed(
+      "fatal: unable to access 'https://git.test/rig.git/': The requested URL returned error: 503\n",
+    ),
+  ]);
+
+  assert.equal(typeof outcome, "string");
+  assert.deepEqual(asked, [
+    { verb: "clone", there: false },
+    { verb: "clone", there: false },
+    { verb: "checkout", there: true },
+  ]);
+  assert.deepEqual(pauses, [gitRemotePauseMs]);
+});
+
+test("a clone the forge refused is tried once", async () => {
+  const refused = gitFailed(
+    "remote: Repository not found.\nfatal: unable to access 'https://git.test/rig.git/': The requested URL returned error: 404\n",
+  );
+  const { outcome, asked } = await clonedThrough([refused]);
+
+  assert.equal(outcome, refused);
+  assert.deepEqual(
+    asked.map(({ verb }) => verb),
+    ["clone"],
+  );
+});
+
+test("a clone the forge never answers is tried to the bound and checked out never", async () => {
+  const failures = Array.from({ length: gitRemoteTriesMax }, () =>
+    gitFailed(
+      "fatal: unable to access 'https://git.test/rig.git/': Could not resolve host: git.test\n",
+    ),
+  );
+  const { outcome, asked } = await clonedThrough(failures);
+
+  assert.equal(outcome, failures.at(-1));
+  assert.deepEqual(
+    asked.map(({ verb }) => verb),
+    Array.from({ length: gitRemoteTriesMax }, () => "clone"),
+  );
 });
 
 /** A shell line that prints what its stage told it of the change's base, or `unset`. */
@@ -1143,6 +1300,20 @@ test("a run that died posts its figures and ends the attempt", async () => {
     JSON.parse(calls.at(-1).init.body).evidence,
     "RunTurnsExhausted",
   );
+});
+
+test("a run stopped at a step ends under that step's label", async () => {
+  const { calls, request } = planeCalls();
+  const evidence = evidenceFor(request);
+  evidence.observed({ type: "result", subtype: "error_max_turns" });
+
+  await reportWorkerFailure(
+    { task, bearer: "bearer", evidence, request, step: runPushFailed },
+    "the push failed",
+  );
+
+  assert.equal(calls.at(-1).path, "/v1/run/ended");
+  assert.equal(JSON.parse(calls.at(-1).init.body).evidence, runPushFailed);
 });
 
 test("a run that died reports no verdict of its own", async () => {
