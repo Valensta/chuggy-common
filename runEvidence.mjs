@@ -78,6 +78,51 @@ const [runFailed, runRateLimited, runTurnsExhausted, runUploadRefused] = [
   "RunUploadRefused",
 ].map((label) => rosterLabel(runEndedEvidences, label));
 
+/** The labels of the harness's own steps, each ending a run that stopped at it. */
+export const [
+  runCloneFailed,
+  runSetupFailed,
+  runCommitFailed,
+  runPushFailed,
+  runTimedOut,
+] = [
+  "RunCloneFailed",
+  "RunSetupFailed",
+  "RunCommitFailed",
+  "RunPushFailed",
+  "RunTimedOut",
+].map((label) => rosterLabel(runEndedEvidences, label));
+
+/** A failure of one of the harness's own steps, carrying that step's label. */
+export class RunStepFailure extends Error {
+  constructor(evidence, message, options) {
+    super(message, options);
+    this.name = "RunStepFailure";
+    this.evidence = evidence;
+  }
+}
+
+/**
+ * What `run` resolves to, or its failure thrown as the step labelled
+ * `evidence`, its text led by the line `lead` answers of it where it answers
+ * one. A failure already a step's keeps its own label and text.
+ */
+export async function runStep(evidence, run, lead = () => undefined) {
+  try {
+    return await run();
+  } catch (failure) {
+    if (failure instanceof RunStepFailure) throw failure;
+    const message =
+      failure instanceof Error ? failure.message : String(failure);
+    const first = lead(failure);
+    throw new RunStepFailure(
+      evidence,
+      first === undefined ? message : `${first}\n\n${message}`,
+      { cause: failure },
+    );
+  }
+}
+
 /**
  * The scrub every uploaded byte passes through, replacing exact occurrences of
  * the credential values the worker was handed. It matches a value as written,
@@ -357,16 +402,18 @@ export function runTotals(result, turns) {
 }
 
 /**
- * Which of the plane's run-ended labels this failure was. A run the runtime
- * accounted for is labelled by that account, so a refused upload names the end
- * only of a run nothing else speaks for.
+ * Which of the plane's run-ended labels this failure was. A run that stopped at
+ * one of the harness's own steps is labelled by that `step`, whatever else it
+ * saw. A run the runtime accounted for is labelled by that account, so a
+ * refused upload names the end only of a run nothing else speaks for.
  *
  * A hold outranks the account, because a run that exhausted its turns while the
  * provider was refusing every request never had the turns to spend. What counts
  * as a hold is `rateLimit.mjs`'s, folded from the frames as they went past.
  */
-export function endedEvidence(result, planeRefused, sightings) {
+export function endedEvidence(result, planeRefused, sightings, step) {
   const subtype = typeof result?.subtype === "string" ? result.subtype : "";
+  if (step !== undefined) return step;
   if (rateLimited(sightings)) return runRateLimited;
   if (subtype === turnsExhaustedSubtype) return runTurnsExhausted;
   if (result !== null && result !== undefined) return runFailed;
@@ -556,7 +603,7 @@ function evidenceUploads(state, call, warn, drain, done) {
         refuse(state, warn, "run totals", failure);
       }
     },
-    async ended() {
+    async ended(step) {
       done();
       await call(workerPlaneRoutes.runEnded.path, {
         method: "POST",
@@ -566,6 +613,7 @@ function evidenceUploads(state, call, warn, drain, done) {
             state.result,
             state.planeRefused,
             state.sightings,
+            step,
           ),
         }),
       });

@@ -66,6 +66,18 @@ test("an ended workload's attempt is left its reason, then ended as a failed run
   assert.deepEqual(plane.authorized, [`Bearer ${bearer}`, `Bearer ${bearer}`]);
 });
 
+test("a workload its backend killed at its deadline is ended as a run that timed out", async () => {
+  const plane = jobPlane(204);
+  const answered = await poolJobPlaneClient(settings, plane.fetch).end({
+    ...ended,
+    why: "its container passed its deadline and was killed",
+    timedOut: true,
+  });
+
+  assert.equal(answered, "Ended");
+  assert.deepEqual(plane.asked.at(-1)?.body, { evidence: "RunTimedOut" });
+});
+
 test("an attempt the plane will not end is refused, and one it could not be asked about is unavailable", async () => {
   const refusals = Object.keys(workerPlaneAnswers.runEnded)
     .map(Number)

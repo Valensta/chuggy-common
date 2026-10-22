@@ -48,6 +48,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -96,6 +97,7 @@ import {
   workerTemporaryFile,
 } from "./checks.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
+import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
 import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -110,9 +112,13 @@ import {
   workerRepositoryUrl,
 } from "./repository.mjs";
 import {
+  RunStepFailure,
   credentialScrub,
   credentialScrubbing,
+  runCloneFailed,
   runEvidenceRecorder,
+  runSetupFailed,
+  runStep,
   workerErrorPath,
 } from "./runEvidence.mjs";
 import { runConfigurationSnapshot } from "./snapshot.mjs";
@@ -223,12 +229,32 @@ async function command(executable, args, options = {}) {
   });
 }
 
-async function cloneRepository(repository, commit, workspace, environment) {
+/**
+ * The repository cloned into `workspace` and checked out at `commit`. The
+ * clone is tried again as `gitRemote.mjs` says, from an empty directory each
+ * time; the checkout reaches no remote and is run once. `seams` names the
+ * programs run and the pause between tries.
+ */
+export async function cloneRepository(
+  repository,
+  commit,
+  workspace,
+  environment,
+  seams = {},
+) {
+  const { run = command, pause } = seams;
   const directory = jobRepositoryDirectory(workspace);
-  await command("git", ["clone", "--no-checkout", repository, directory], {
-    env: environment,
-  });
-  await command("git", ["checkout", "--detach", commit], {
+  await gitRemoteTried(
+    () =>
+      run("git", ["clone", "--no-checkout", repository, directory], {
+        env: environment,
+      }),
+    {
+      again: () => rm(directory, { recursive: true, force: true }),
+      pause,
+    },
+  );
+  await run("git", ["checkout", "--detach", commit], {
     cwd: directory,
     env: environment,
   });
@@ -268,24 +294,42 @@ async function excludedFromWork(directory, paths) {
   await appendFile(excludeFile, `${patterns.join("\n")}\n`);
 }
 
+/** How a setup line's shell ended, naming the line. */
+function setupFailureLine(setup, failure) {
+  if (typeof failure?.code === "number")
+    return `${setup} exited ${String(failure.code)}`;
+  if (typeof failure?.signal === "string")
+    return `${setup} was killed by ${failure.signal}`;
+  return `${setup} failed`;
+}
+
 /**
  * The files and the setup lines a worker block asks for, in the workspace it
- * runs in, its lines handed what the attempt hands the stage's commands.
+ * runs in, its lines handed what the attempt hands the stage's commands. A
+ * file that cannot be written, or a line that fails, fails the setup step.
  */
 export async function prepareWorker(task, directory, handed) {
   const provisioned = [];
   for (const file of task.worker?.files ?? []) {
-    const target = workspaceFile(directory, file.path);
-    await mkdir(dirname(target), { recursive: true });
-    await writeFile(target, file.content, { flag: "wx" });
+    const target = await runStep(runSetupFailed, async () => {
+      const written = workspaceFile(directory, file.path);
+      await mkdir(dirname(written), { recursive: true });
+      await writeFile(written, file.content, { flag: "wx" });
+      return written;
+    });
     provisioned.push(relative(directory, target));
   }
   await excludedFromWork(directory, provisioned);
   for (const setup of task.worker?.setup ?? []) {
-    await command("/bin/sh", ["-eu", "-c", setup], {
-      cwd: directory,
-      env: workerStageEnvironment(process.env, handed),
-    });
+    await runStep(
+      runSetupFailed,
+      () =>
+        command("/bin/sh", ["-eu", "-c", setup], {
+          cwd: directory,
+          env: workerStageEnvironment(process.env, handed),
+        }),
+      (failure) => setupFailureLine(setup, failure),
+    );
   }
   const { stdout: status } = await command(
     "git",
@@ -522,7 +566,8 @@ export async function workerCredential(asked) {
  * names one the clone holds. `seams` names the plane, the clone, the file the
  * password is written to and the directory cloned into, this module's own and
  * the image's `CHUG_WORKER_WORKSPACE` where it names none. `images` are the
- * brief's images the bundle pins, where it pins any.
+ * brief's images the bundle pins, where it pins any. A credential refused or a
+ * clone failed fails the clone step.
  */
 export async function workerWorkspace(
   task,
@@ -542,22 +587,29 @@ export async function workerWorkspace(
     await request(task, bearer, workerPlaneRoutes.input.path)
   ).json();
   const repositoryId = oneReference(input, "Repository");
-  const { repository, environment, refresh } = await workerCredential({
-    task,
-    bearer,
-    repositories,
-    credentialFiles,
-    repositoryId,
-    keepSecret,
-    request,
-    ...(write === undefined ? {} : { write }),
-  });
   const base = oneReference(input, "TargetCommit");
-  const directory = await clone(
-    repository,
-    base,
-    workspace ?? required(workerWorkspaceVariable),
-    environment,
+  const { repository, environment, refresh, directory } = await runStep(
+    runCloneFailed,
+    async () => {
+      const credential = await workerCredential({
+        task,
+        bearer,
+        repositories,
+        credentialFiles,
+        repositoryId,
+        keepSecret,
+        request,
+        ...(write === undefined ? {} : { write }),
+      });
+      const cloned = await clone(
+        credential.repository,
+        base,
+        workspace ?? required(workerWorkspaceVariable),
+        credential.environment,
+      );
+      return { ...credential, directory: cloned };
+    },
+    gitFailureLine,
   );
   const changeBase = await workerChangeBase(input, directory);
   const images = ticketImageReferences(input);
@@ -1069,11 +1121,12 @@ export async function publishWorkerResult(
 
 /**
  * What a crashed run leaves behind: its figures, its error text, and the label
- * that ends the attempt. It reports no verdict, because a run that died is a
- * lost attempt and never a failed task.
+ * that ends the attempt, which is `step`'s where the run stopped at one. It
+ * reports no verdict, because a run that died is a lost attempt and never a
+ * failed task.
  */
 export async function reportWorkerFailure(
-  { task, bearer, evidence, request = workerRequest, scrub = scrubbed },
+  { task, bearer, evidence, request = workerRequest, scrub = scrubbed, step },
   message,
 ) {
   await evidence?.finish();
@@ -1088,14 +1141,20 @@ export async function reportWorkerFailure(
   } catch {
     process.stderr.write("worker failure text could not be uploaded\n");
   }
-  await evidence?.ended();
+  await evidence?.ended(step);
 }
 
 /**
  * A failure ended as a crashed run's is, where the run never began: its figures
  * are empty, and the bearer is the one secret it holds to scrub.
  */
-async function reportWorkerFailureBeforeRun(task, bearer, request, message) {
+async function reportWorkerFailureBeforeRun(
+  task,
+  bearer,
+  request,
+  message,
+  step,
+) {
   const scrub = credentialScrub([bearer]);
   await reportWorkerFailure(
     {
@@ -1104,6 +1163,7 @@ async function reportWorkerFailureBeforeRun(task, bearer, request, message) {
       evidence: runEvidenceRecorder(task, bearer, scrub, { request }),
       request,
       scrub,
+      step,
     },
     message,
   );
@@ -1200,6 +1260,7 @@ async function reportActiveFailure(failure) {
   const message = scrubbed(
     failure instanceof Error ? failure.message : "worker failed",
   );
+  const step = failure instanceof RunStepFailure ? failure.evidence : undefined;
   process.stderr.write(`${message}\n`);
   if (activeTask !== undefined && activeBearer !== undefined) {
     try {
@@ -1209,6 +1270,7 @@ async function reportActiveFailure(failure) {
             activeBearer,
             workerRequest,
             message,
+            step,
           )
         : reportWorkerFailure(
             {
@@ -1216,6 +1278,7 @@ async function reportActiveFailure(failure) {
               bearer: activeBearer,
               evidence: activeEvidence,
               scrub: scrubbed,
+              step,
             },
             message,
           ));

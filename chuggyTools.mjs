@@ -547,7 +547,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring and its brief, and `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none.",
+      "One ticket: its phase, its version, its authoring and its brief, and `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline names that step's label, the execution and the attempt in `escalation.failed`.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),

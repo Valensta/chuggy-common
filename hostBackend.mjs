@@ -480,7 +480,12 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
           if (!job.stopped) {
             const why = hostJobEndedWhy(job, code, signal);
             state.seams.log(`${name} ended: ${why}`);
-            state.pending.push({ kind: "Job", job: job.attempt, why });
+            state.pending.push({
+              kind: "Job",
+              job: job.attempt,
+              why,
+              ...(job.expired ? { timedOut: true } : {}),
+            });
           }
           settle();
         }

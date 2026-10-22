@@ -4,6 +4,7 @@ import test from "node:test";
 import { setImmediate } from "node:timers";
 
 import {
+  runEndedEvidences,
   runModelCharsMax,
   runTranscriptBatchBytesMax,
   runTranscriptBatchesMax,
@@ -17,7 +18,14 @@ import {
   credentialScrubCharsMin,
   credentialScrubHead,
   endedEvidence,
+  RunStepFailure,
+  runCloneFailed,
+  runCommitFailed,
   runEvidenceRecorder,
+  runPushFailed,
+  runSetupFailed,
+  runStep,
+  runTimedOut,
   runTotals,
   runTranscriptEventBytesMax,
   runTurn,
@@ -774,6 +782,66 @@ test("a run that outlived its evidence still names the plane as the reason", () 
     endedEvidence({ subtype: "error_during_execution" }, false, undefined),
     "RunFailed",
   );
+});
+
+test("a run stopped at a step is that step's, whatever else it saw", () => {
+  const steps = [
+    runCloneFailed,
+    runSetupFailed,
+    runCommitFailed,
+    runPushFailed,
+    runTimedOut,
+  ];
+  assert.equal(new Set(steps).size, steps.length);
+  for (const step of steps) {
+    assert.ok(runEndedEvidences.includes(step), step);
+    assert.equal(
+      endedEvidence(
+        { subtype: "error_max_turns" },
+        true,
+        seenBy(rejection),
+        step,
+      ),
+      step,
+    );
+  }
+});
+
+test("a step's failure carries its label, led by what the step says of it", async () => {
+  const failure = Object.assign(new Error("Command failed: git push"), {
+    stderr: "fatal: denied",
+  });
+  const failed = await runStep(
+    runPushFailed,
+    () => Promise.reject(failure),
+    ({ stderr }) => stderr,
+  ).catch((thrown) => thrown);
+
+  assert.ok(failed instanceof RunStepFailure);
+  assert.equal(failed.evidence, runPushFailed);
+  assert.equal(failed.message, "fatal: denied\n\nCommand failed: git push");
+  assert.equal(failed.cause, failure);
+  assert.equal(await runStep(runPushFailed, async () => "pushed"), "pushed");
+});
+
+test("a step's failure inside another step keeps its own label and text", async () => {
+  const inner = new RunStepFailure(runCommitFailed, "the commit failed");
+  const failed = await runStep(
+    runPushFailed,
+    () => Promise.reject(inner),
+    () => "a lead",
+  ).catch((thrown) => thrown);
+
+  assert.equal(failed, inner);
+});
+
+test("a step's failure says nothing more where nothing leads it", async () => {
+  const failed = await runStep(runCloneFailed, () => {
+    throw new Error("no repository configuration for repository-1");
+  }).catch((thrown) => thrown);
+
+  assert.equal(failed.evidence, runCloneFailed);
+  assert.equal(failed.message, "no repository configuration for repository-1");
 });
 
 /**
