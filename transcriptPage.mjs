@@ -36,6 +36,11 @@
  * out. Everything else the route said about the page goes through unaltered,
  * `cut` and `truncated` included, which is what a reader needs the held set to
  * be about.
+ *
+ * A RUN'S TRANSCRIPT IS CUT THE SAME WAY, ONCE IT IS ENTRIES. Its route pages
+ * by several of the batches its worker wrote, each up to the plane's body bound
+ * and each a run of lines that are one event apiece, so `runTranscriptPage`
+ * makes every line an entry and the page is cut like any other.
  */
 
 import { Buffer } from "node:buffer";
@@ -123,4 +128,46 @@ export function transcriptPageAnswer(page, cursor, fits) {
   return fits(text) || given.length === 0
     ? text
     : composed(given, { after, entry: from + given.length });
+}
+
+/** One line a run's worker wrote, as the JSON event it wrote or, where it is not one, as its text. */
+function runTranscriptPageEntry(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return line;
+  }
+}
+
+/**
+ * A run's transcript page as `transcriptPageAnswer` reads a page: the lines of
+ * its batches as entries, in order, and `elided` counting the batches with
+ * nothing to read. Where the run is still writing and the route names no later
+ * batch, the next page is read after this one's last, so the read that finds
+ * nothing past it is the one that names no next, and is the one that answers
+ * what the run writes later.
+ */
+export function runTranscriptPage(page) {
+  const { batches, nextAfter, ...rest } = page ?? {};
+  const read = Array.isArray(batches) ? batches : [];
+  const entries = [];
+  let elided = 0;
+  for (const batch of read) {
+    if (batch?.read !== "Content" || typeof batch.content !== "string") {
+      elided += 1;
+      continue;
+    }
+    for (const line of batch.content.split("\n"))
+      if (line.length > 0) entries.push(runTranscriptPageEntry(line));
+  }
+  const last = read.at(-1)?.batch;
+  const later =
+    nextAfter ??
+    (rest.complete === false && Number.isSafeInteger(last) ? last : undefined);
+  return {
+    ...rest,
+    entries,
+    elided,
+    ...(later === undefined ? {} : { nextAfter: later }),
+  };
 }

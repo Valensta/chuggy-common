@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import test from "node:test";
 
 import {
+  runTranscriptPage,
   transcriptEntryPreviewCharsMax,
   transcriptPageAnswer,
 } from "./transcriptPage.mjs";
@@ -203,4 +204,89 @@ test("a cursor past the page's entries answers none and does not name itself aga
 
   assert.deepEqual(answer.entries, []);
   assert.equal(answer.next, undefined);
+});
+
+/** One batch of a run's transcript as its route answers it, holding `content`. */
+function runBatchOf(batch, content) {
+  return {
+    batch,
+    recordedAt: "2026-10-22T12:00:00.000Z",
+    bytes: Buffer.byteLength(content),
+    read: "Content",
+    content,
+  };
+}
+
+test("a run page's lines are its entries in order, a line that is not JSON kept as its text, and a batch with nothing to read counted as elided", () => {
+  const page = runTranscriptPage({
+    batches: [
+      runBatchOf(
+        1,
+        '{"type":"system","uuid":"r-1"}\n{"type":"assistant","uuid":"r-2"}\n',
+      ),
+      {
+        batch: 2,
+        recordedAt: "2026-10-22T12:00:01.000Z",
+        bytes: 9,
+        read: "Missing",
+      },
+      runBatchOf(3, "Claude Code exited 1\n"),
+      {
+        batch: 4,
+        recordedAt: "2026-10-22T12:00:02.000Z",
+        bytes: 9,
+        read: "Corrupt",
+      },
+    ],
+    observedAt: "2026-10-22T12:00:05.000Z",
+    complete: true,
+  });
+
+  assert.deepEqual(page, {
+    observedAt: "2026-10-22T12:00:05.000Z",
+    complete: true,
+    entries: [
+      { type: "system", uuid: "r-1" },
+      { type: "assistant", uuid: "r-2" },
+      "Claude Code exited 1",
+    ],
+    elided: 2,
+  });
+});
+
+test("a run page names the route's next batch, and a run still writing reads on after the page's last until a page finds nothing past it", () => {
+  const batches = [runBatchOf(3, "{}\n"), runBatchOf(4, "{}\n")];
+
+  assert.equal(
+    runTranscriptPage({ batches, complete: true, nextAfter: 4 }).nextAfter,
+    4,
+  );
+  assert.equal(
+    runTranscriptPage({ batches, complete: true }).nextAfter,
+    undefined,
+  );
+  assert.equal(runTranscriptPage({ batches, complete: false }).nextAfter, 4);
+  assert.equal(
+    runTranscriptPage({ batches: [], complete: false }).nextAfter,
+    undefined,
+  );
+
+  const read = JSON.parse(
+    transcriptPageAnswer(
+      runTranscriptPage({ batches, complete: false }),
+      { after: 2, entry: 0 },
+      fits,
+    ),
+  );
+  assert.equal(read.entries.length, 2);
+  assert.deepEqual(read.next, { after: 4, entry: 0 });
+  const caughtUp = JSON.parse(
+    transcriptPageAnswer(
+      runTranscriptPage({ batches: [], complete: false }),
+      read.next,
+      fits,
+    ),
+  );
+  assert.deepEqual(caughtUp.entries, []);
+  assert.equal(caughtUp.next, undefined);
 });
