@@ -148,8 +148,8 @@ function gitEntries(environment) {
 /**
  * Catches the push handed the attempt's reads as they stand, under which the
  * cache client answers the URL it pushes to with a read the forge refuses a
- * push with; and the commit's hooks handed the clear, which would hand them
- * the push's askpass for the job's own repository.
+ * push with; and the commit's hooks handed the clear, which would leave them
+ * no credential for the job's own repository.
  */
 test("the push is handed the attempt's git with every helper cleared for the URL it pushes to, and the commit as it is", async () => {
   const calls = [];

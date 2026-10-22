@@ -534,8 +534,9 @@ async function workerMinted({
  * mints what the task kind needs: the clone's credential is a read, and a
  * minted token expires while an attempt may outlive one. The plane refusing
  * here is this attempt's failure: a clone that minted and a push that cannot
- * is a deployment mid-change, and reaching the remote with something else is
- * exactly what a minted credential is for.
+ * is a deployment mid-change or an installation that grants only a read, and
+ * reaching the remote with something else is exactly what a minted credential
+ * is for.
  */
 async function workerRefreshed(asked) {
   const minted = await workerMinted(asked);
