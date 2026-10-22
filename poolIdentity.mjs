@@ -6,9 +6,11 @@
  * Each form is injective across both kinds, so two runners never share one
  * whatever their names hold: a pool's label has three names and a personal
  * runner's two, and a pool's digest is of a list of names where a personal
- * runner's leads with a list of its own. A pool's project has a label and a
- * digest of its own, of its tenant and project alone, which a personal runner,
- * serving no one project, has neither of.
+ * runner's leads with a list of its own. A job's project has a label and a
+ * digest of its own, of its tenant and project alone: a pool's job is in the
+ * pool's project, and a personal runner, serving no one project, has each job
+ * in the project its assignment names, in its own tenant. So a pool's job and
+ * a personal runner's in one project are keyed alike.
  */
 
 import { createHash } from "node:crypto";
@@ -104,25 +106,38 @@ function poolIdentityDigestHex(keyed) {
 }
 
 /**
- * The project label's value, written as `poolLabelValue` writes a pool's, of
- * its tenant and project; none for a personal runner.
+ * The tenant and project a job is in: a pool's own, whatever its assignment
+ * names, and a personal runner's tenant with the project the assignment
+ * names, or none where it names none.
  *
  * @param {PoolIdentity} identity
+ * @param {string} [assigned] the project the job's assignment names
  */
-export function poolProjectLabelValue(identity) {
-  return poolIdentityPersonal(identity)
-    ? undefined
-    : poolLabelValueJoined([identity.tenant, identity.project]);
+function poolProjectNames(identity, assigned) {
+  if (!poolIdentityPersonal(identity))
+    return [identity.tenant, identity.project];
+  return assigned === undefined ? undefined : [identity.tenant, assigned];
 }
 
 /**
- * A digest of a pool's project, as long as `poolIdentityDigest`'s; none for a
- * personal runner.
+ * The project label's value of the project a job is in, written as
+ * `poolLabelValue` writes a pool's, of its tenant and project.
  *
  * @param {PoolIdentity} identity
+ * @param {string} [assigned] the project the job's assignment names
  */
-export function poolProjectDigest(identity) {
-  return poolIdentityPersonal(identity)
-    ? undefined
-    : poolIdentityDigestHex([identity.tenant, identity.project]);
+export function poolProjectLabelValue(identity, assigned) {
+  const names = poolProjectNames(identity, assigned);
+  return names === undefined ? undefined : poolLabelValueJoined(names);
+}
+
+/**
+ * A digest of the project a job is in, as long as `poolIdentityDigest`'s.
+ *
+ * @param {PoolIdentity} identity
+ * @param {string} [assigned] the project the job's assignment names
+ */
+export function poolProjectDigest(identity, assigned) {
+  const names = poolProjectNames(identity, assigned);
+  return names === undefined ? undefined : poolIdentityDigestHex(names);
 }

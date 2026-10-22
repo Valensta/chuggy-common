@@ -70,11 +70,13 @@
  * One its owner made is mounted as it is. A job started through no runtime
  * has no image to open one with, so it mounts one only once it is there.
  * A named volume listed as its project's is one per project: its name carries
- * a digest of the pool's project and its label names that project. One of
- * that name labelled as another project's or as none is refused, and so is
- * one listed unscoped that is labelled as a project's. A personal runner
- * serves no one project, so no job of its mounts a volume listed as its
- * project's, which its first job's placement says. These volumes are the owner's, and nothing
+ * a digest of the job's project and its label names that project, as
+ * `poolProjectDigest` and `poolProjectLabelValue` key it, so a pool's job and
+ * a personal runner's in one project mount the same volume. One of that name
+ * labelled as another project's or as none is refused, and so is one listed
+ * unscoped that is labelled as a project's. A personal runner's job whose
+ * assignment names no project mounts none listed as its project's, which its
+ * placement says. These volumes are the owner's, and nothing
  * here removes one: none carries a pool's label, and none is a job's own. A
  * session mounts none: it runs its site's session image, whose environment
  * points at none of them, and, as with the engine, is given nothing of this
@@ -215,6 +217,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  *
  * @typedef {InFlightPlacement & {
  *   runtime: PlacementRuntime | undefined,
+ *   volumes: readonly OwnerVolume[] | undefined,
  *   controller: AbortController,
  *   done: Promise<void>,
  * }} Placement
@@ -250,8 +253,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {object} State
  * @property {ContainerBackendSettings} settings
  * @property {ContainerBackendSeams} seams
- * @property {readonly OwnerVolume[]} volumes what each job mounts of its owner's, as `ownerVolumesServed` serves them
- * @property {string[]} withheld the sources of those it withholds, until the first job's placement says so
+ * @property {readonly OwnerVolumeListed[]} volumes what its owner lists to mount into each job, which `ownerVolumesServed` serves each
  * @property {Map<string, Placement>} placements
  * @property {Ends} ends
  * @property {boolean} strays whether volumes of chuggy's runtime that nothing answers for may be left: from the start, since a predecessor may have left some, and after any removal of one failed
@@ -1386,17 +1388,18 @@ async function ownerVolumeLabels(state, volume) {
 
 /**
  * Each volume its owner lists, as a job of this pool mounts it, and the
- * sources of those none does: one listed as its project's is named and
- * labelled as the pool's project's, and a personal runner, serving no one
- * project, withholds it.
+ * sources of those it does not: one listed as its project's is named and
+ * labelled as the job's project's, and withheld from a personal runner's job
+ * whose assignment names no project.
  *
  * @param {readonly OwnerVolumeListed[]} volumes
  * @param {PoolIdentity} pool
+ * @param {string} [assigned] the project the job's assignment names
  * @returns {{served: OwnerVolume[], withheld: string[]}}
  */
-export function ownerVolumesServed(volumes, pool) {
-  const project = poolProjectLabelValue(pool);
-  const digest = poolProjectDigest(pool);
+export function ownerVolumesServed(volumes, pool, assigned) {
+  const project = poolProjectLabelValue(pool, assigned);
+  const digest = poolProjectDigest(pool, assigned);
   /** @type {OwnerVolume[]} */
   const served = [];
   /** @type {string[]} */
@@ -1411,13 +1414,24 @@ export function ownerVolumesServed(volumes, pool) {
 }
 
 /**
- * What a personal runner says of a volume `ownerVolumesServed` withholds, as
- * its runner's doctor says it too.
+ * What a personal runner says of a volume `ownerVolumesServed` withholds from
+ * a job.
  *
  * @param {string} source
  */
-export function ownerVolumeWithheldLine(source) {
-  return `${source} is scoped per project, and a personal runner mounts no volume scoped per project: its jobs run without it, and a project's own pool is how to get one`;
+function ownerVolumeWithheldLine(source) {
+  return `${source} is scoped per project, and this job's assignment names no project: it runs without it`;
+}
+
+/**
+ * What a personal runner's doctor says of a volume listed as its project's,
+ * which it does not look for: the runner serves its member across projects,
+ * and doctor holds no job's project to look under.
+ *
+ * @param {string} source
+ */
+export function ownerVolumeProjectsLine(source) {
+  return `${source} is scoped per project: each job mounts its own project's, which, where it is missing, the first job in that project started through chuggy's runtime makes`;
 }
 
 /**
@@ -1466,24 +1480,19 @@ async function ownerVolumeMade(state, placement, volume) {
 
 /**
  * Readies each named volume a job's owner mounts into it, as this backend's
- * header says, the first job saying what it withholds: refused where its
- * labels say it is not the one listed, made where it is not there, then, with
- * every other this runner made, opened by the container `ownerVolumesOpenArgv`
- * names.
+ * header says: refused where its labels say it is not the one listed, made
+ * where it is not there, then, with every other this runner made, opened by
+ * the container `ownerVolumesOpenArgv` names.
  *
  * @param {State} state
  * @param {Placement} placement
  */
 async function ownerVolumesReady(state, placement) {
   const { settings, seams } = state;
-  for (const source of state.withheld.splice(0))
-    seams.log(
-      `${placement.name}: its owner's volume ${ownerVolumeWithheldLine(source)}`,
-    );
   const runtime = placement.runtime?.image;
   /** @type {string[]} */
   const opened = [];
-  for (const volume of ownerVolumesReadyNamed(state.volumes)) {
+  for (const volume of ownerVolumesReadyNamed(placement.volumes ?? [])) {
     const labels = await ownerVolumeLabels(state, volume.source);
     const refusal =
       labels === undefined
@@ -1559,17 +1568,6 @@ async function containerAssignment(state, name) {
  */
 function workloadEngineSocket(settings, placement) {
   return placement.kind === "Job" ? settings.engineSocket : undefined;
-}
-
-/**
- * What a workload is given of its owner's volumes: each served, where it is a
- * job.
- *
- * @param {State} state
- * @param {Placement} placement
- */
-function workloadOwnerVolumes(state, placement) {
-  return placement.kind === "Job" ? state.volumes : undefined;
 }
 
 /**
@@ -1656,7 +1654,7 @@ async function started(state, placement, assignment, envelope) {
         image: placement.image,
         runtime: placement.runtime?.volumes,
         engineSocket: workloadEngineSocket(settings, placement),
-        volumes: workloadOwnerVolumes(state, placement),
+        volumes: placement.volumes,
       }),
     );
   } finally {
@@ -1780,6 +1778,10 @@ async function placed(state, assignment, kind) {
     };
   }
   const placedMs = seams.nowMs();
+  const volumes =
+    kind === "Job"
+      ? ownerVolumesServed(state.volumes, settings.pool, assignment.project)
+      : undefined;
   /** @type {Placement} */
   const placement = {
     assignment: assignment.assignment,
@@ -1796,10 +1798,15 @@ async function placed(state, assignment, kind) {
       kind === "Job" && assignment.runtime !== undefined
         ? { image: assignment.runtime, made: [], volumes: undefined }
         : undefined,
+    volumes: volumes?.served,
     controller: new globalThis.AbortController(),
     done: Promise.resolve(),
   };
   state.placements.set(placement.assignment, placement);
+  for (const source of volumes?.withheld ?? [])
+    seams.log(
+      `${placement.name}: its owner's volume ${ownerVolumeWithheldLine(source)}`,
+    );
   placement.done = placementRun(state, placement, assignment, envelope).then(
     () => placementForgotten(state, placement),
     (failure) => placementFailed(state, placement, assignment, failure),
@@ -1942,13 +1949,11 @@ async function stopped(state, assignment) {
  */
 export function containerBackend(settings, seams) {
   const checked = checkedContainerBackendSettings(settings);
-  const volumes = ownerVolumesServed(checked.volumes ?? [], checked.pool);
   /** @type {State} */
   const state = {
     settings: checked,
     seams,
-    volumes: volumes.served,
-    withheld: volumes.withheld,
+    volumes: checked.volumes ?? [],
     placements: new Map(),
     ends: { pending: [], ready: [], accounted: new Set() },
     strays: true,
