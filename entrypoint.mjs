@@ -74,6 +74,7 @@ import {
   workerPlaneAnswers,
   workerPlaneBytesMediaType,
   workerPlaneRoutes,
+  workerPlaneUploadBytesMax,
 } from "@chuggy/worker-contract/workerPlane";
 import {
   filesystemAccesses,
@@ -1119,11 +1120,37 @@ export async function publishWorkerResult(
   });
 }
 
+/** The first line of an error text cut to fit the upload, saying how much of it was dropped before the end that follows. */
+function reportWorkerFailureTextDropped(bytes) {
+  return `The first ${String(bytes)} bytes of this error text were dropped; what follows is its end.\n`;
+}
+
+/**
+ * An error text as it is uploaded: whole where the plane takes it, and
+ * otherwise its end, after a first line saying how many bytes before it were
+ * dropped. The end is what says why a run stopped. The cut is made where a
+ * character starts, because a text that is not UTF-8 is one its read refuses
+ * as corrupt.
+ */
+function reportWorkerFailureText(content) {
+  if (content.byteLength <= workerPlaneUploadBytesMax) return content;
+  let start =
+    content.byteLength -
+    (workerPlaneUploadBytesMax -
+      Buffer.byteLength(reportWorkerFailureTextDropped(content.byteLength)));
+  while ((content[start] & 0xc0) === 0x80) start += 1;
+  return Buffer.concat([
+    Buffer.from(reportWorkerFailureTextDropped(start)),
+    content.subarray(start),
+  ]);
+}
+
 /**
  * What a crashed run leaves behind: its figures, its error text, and the label
  * that ends the attempt, which is `step`'s where the run stopped at one. It
  * reports no verdict, because a run that died is a lost attempt and never a
- * failed task.
+ * failed task. The text is scrubbed whole before it is cut, so a secret the cut
+ * would split is still matched.
  */
 export async function reportWorkerFailure(
   { task, bearer, evidence, request = workerRequest, scrub = scrubbed, step },
@@ -1135,7 +1162,7 @@ export async function reportWorkerFailure(
       task,
       bearer,
       workerErrorPath,
-      Buffer.from(scrub(`${message}\n`)),
+      reportWorkerFailureText(Buffer.from(scrub(`${message}\n`))),
       request,
     );
   } catch {
