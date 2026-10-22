@@ -2757,7 +2757,7 @@ test("a personal runner's jobs mount no volume listed as its project's, which it
   assert.deepEqual(
     context.log.filter((line) => line.includes("sccache")),
     [
-      "its owner's volume sccache is listed as its project's, and a personal runner serves no one project, so its jobs run without it; a project's own pool mounts one",
+      "its owner's volume sccache is scoped per project, and a personal runner mounts no volume scoped per project: its jobs run without it, and a project's own pool is how to get one",
     ],
   );
 });

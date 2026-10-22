@@ -1410,6 +1410,16 @@ export function ownerVolumesServed(volumes, pool) {
 }
 
 /**
+ * What a personal runner says of a volume `ownerVolumesServed` withholds, as
+ * its runner's doctor says it too.
+ *
+ * @param {string} source
+ */
+export function ownerVolumeWithheldLine(source) {
+  return `${source} is scoped per project, and a personal runner mounts no volume scoped per project: its jobs run without it, and a project's own pool is how to get one`;
+}
+
+/**
  * Why an owner's named volume that is there, labelled `labels`, cannot be
  * mounted as `volume`, or nothing: one listed as its project's must be
  * labelled as that project's, and one listed unscoped as no project's, so no
@@ -1928,9 +1938,7 @@ export function containerBackend(settings, seams) {
   const checked = checkedContainerBackendSettings(settings);
   const volumes = ownerVolumesServed(checked.volumes ?? [], checked.pool);
   for (const source of volumes.withheld)
-    seams.log(
-      `its owner's volume ${source} is listed as its project's, and a personal runner serves no one project, so its jobs run without it; a project's own pool mounts one`,
-    );
+    seams.log(`its owner's volume ${ownerVolumeWithheldLine(source)}`);
   /** @type {State} */
   const state = {
     settings: checked,
