@@ -2734,7 +2734,7 @@ test("a volume listed as its project's that is there labelled as that project's 
   );
 });
 
-test("a personal runner's jobs mount no volume listed as its project's, which it says once", async (t) => {
+test("a personal runner's jobs mount no volume listed as its project's, which its first job says once, and a session or a backend that places nothing never", async (t) => {
   const personal = {
     kind: /** @type {const} */ ("Personal"),
     tenant: "vteng",
@@ -2746,6 +2746,13 @@ test("a personal runner's jobs mount no volume listed as its project's, which it
   });
   context.state.images.add(image);
   context.state.volumes.set("cargo", { labels: ownerVolumeLabels });
+  await context.backend.held();
+  await context.backend.place(assignment({ assignment: "ses-1" }), "Session");
+  await context.backend.settled();
+  assert.deepEqual(
+    context.log.filter((line) => line.includes("sccache")),
+    [],
+  );
   await context.backend.place(assignment(), "Job");
   await context.backend.place(assignment({ assignment: "asg-2" }), "Job");
   await context.backend.settled();
@@ -2757,7 +2764,7 @@ test("a personal runner's jobs mount no volume listed as its project's, which it
   assert.deepEqual(
     context.log.filter((line) => line.includes("sccache")),
     [
-      "its owner's volume sccache is scoped per project, and a personal runner mounts no volume scoped per project: its jobs run without it, and a project's own pool is how to get one",
+      `${containerName(personal, "asg-1")}: its owner's volume sccache is scoped per project, and a personal runner mounts no volume scoped per project: its jobs run without it, and a project's own pool is how to get one`,
     ],
   );
 });
