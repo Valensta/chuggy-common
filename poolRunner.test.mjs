@@ -138,7 +138,7 @@ const credentials = {
   clientSecret: "pool-secret",
 };
 
-test("a runner's client makes one pass a run, holds its limits, and takes the token source it is given", () => {
+test("a runner's client makes one pass a run, holds its limits, sessions alone among them, and takes the token source it is given", () => {
   const tokens = {
     acquire: async () => ({ acquired: "Token", token: "pool-token" }),
     invalidate: () => undefined,
@@ -155,6 +155,14 @@ test("a runner's client makes one pass a run, holds its limits, and takes the to
   assert.equal(client.settings.passesMax, 1);
   assert.equal(client.settings.concurrencyMax, 3);
   assert.equal(client.settings.sessionsMax, 0);
+  const sessionsOnly = poolRunnerClient(
+    credentials,
+    backend,
+    { concurrencyMax: 0, sessionsMax: 2 },
+    { tokens },
+  );
+  assert.equal(sessionsOnly.settings.concurrencyMax, 0);
+  assert.equal(sessionsOnly.settings.sessionsMax, 2);
   assert.throws(
     () =>
       poolRunnerClient(

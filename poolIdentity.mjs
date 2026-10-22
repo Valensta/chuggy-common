@@ -6,7 +6,9 @@
  * Each form is injective across both kinds, so two runners never share one
  * whatever their names hold: a pool's label has three names and a personal
  * runner's two, and a pool's digest is of a list of names where a personal
- * runner's leads with a list of its own.
+ * runner's leads with a list of its own. A pool's project has a label and a
+ * digest of its own, of its tenant and project alone, which a personal runner,
+ * serving no one project, has neither of.
  */
 
 import { createHash } from "node:crypto";
@@ -27,7 +29,7 @@ import { createHash } from "node:crypto";
  */
 
 /** How much of a digest a name carries. */
-const poolIdentityDigestChars = 20;
+export const poolIdentityDigestChars = 20;
 
 /**
  * @param {PoolIdentity} identity
@@ -69,7 +71,12 @@ export function poolIdentitySame(one, other) {
  * @param {PoolIdentity} identity
  */
 export function poolLabelValue(identity) {
-  return poolIdentityNames(identity)
+  return poolLabelValueJoined(poolIdentityNames(identity));
+}
+
+/** @param {readonly string[]} names */
+function poolLabelValueJoined(names) {
+  return names
     .map((name) => name.replaceAll("%", "%25").replaceAll("/", "%2F"))
     .join("/");
 }
@@ -82,14 +89,40 @@ export function poolLabelValue(identity) {
  */
 export function poolIdentityDigest(identity, ...more) {
   const names = poolIdentityNames(identity);
+  return poolIdentityDigestHex([
+    ...(poolIdentityPersonal(identity) ? [names] : names),
+    ...more,
+  ]);
+}
+
+/** @param {readonly (string | readonly string[])[]} keyed */
+function poolIdentityDigestHex(keyed) {
   return createHash("sha256")
-    .update(
-      JSON.stringify([
-        ...(poolIdentityPersonal(identity) ? [names] : names),
-        ...more,
-      ]),
-      "utf8",
-    )
+    .update(JSON.stringify(keyed), "utf8")
     .digest("hex")
     .slice(0, poolIdentityDigestChars);
+}
+
+/**
+ * The project label's value, written as `poolLabelValue` writes a pool's, of
+ * its tenant and project; none for a personal runner.
+ *
+ * @param {PoolIdentity} identity
+ */
+export function poolProjectLabelValue(identity) {
+  return poolIdentityPersonal(identity)
+    ? undefined
+    : poolLabelValueJoined([identity.tenant, identity.project]);
+}
+
+/**
+ * A digest of a pool's project, as long as `poolIdentityDigest`'s; none for a
+ * personal runner.
+ *
+ * @param {PoolIdentity} identity
+ */
+export function poolProjectDigest(identity) {
+  return poolIdentityPersonal(identity)
+    ? undefined
+    : poolIdentityDigestHex([identity.tenant, identity.project]);
 }

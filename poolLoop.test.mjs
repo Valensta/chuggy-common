@@ -366,6 +366,24 @@ test("sessions are placed as sessions against their own ceiling, and a full job 
   assert.equal(passed.placed, 2);
 });
 
+test("a pool whose job ceiling is 0 asks for no job and places none it is offered, while it takes sessions", async () => {
+  const placer = placingKinds([]);
+  const offer = offeringKinds([assignment("job")], [sessionOffer("session")]);
+  await workerPoolClientPass(
+    client({
+      settings: { ...settings, concurrencyMax: 0, sessionsMax: 1 },
+      backend: placer.backend,
+      plane: offer.plane,
+    }),
+  );
+  assert.deepEqual(offer.rooms, [{ wanted: 0, wantedSessions: 1 }]);
+  assert.deepEqual(placer.placed, [["session", "Session"]]);
+  assert.deepEqual(offer.posted, [
+    ["job", "Unavailable"],
+    ["session", "Accepted"],
+  ]);
+});
+
 test("a pool that names no session ceiling asks for none and places none it is offered", async () => {
   const placer = placingKinds([]);
   const offer = offeringKinds([assignment("job")], [sessionOffer("session")]);
@@ -873,7 +891,7 @@ test("an issuer that refused the grant stops the run and one that faltered does 
 });
 
 test("a run refuses a bound that is not a positive whole number", async () => {
-  for (const name of ["concurrencyMax", "outageBackoffMs", "passesMax"])
+  for (const name of ["outageBackoffMs", "passesMax"])
     for (const refused of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2])
       await assert.rejects(
         workerPoolClientRun(
@@ -882,6 +900,41 @@ test("a run refuses a bound that is not a positive whole number", async () => {
         ),
         new RegExp(`${name} must be a positive safe integer`, "u"),
       );
+});
+
+test("a run refuses a job ceiling that is not a whole number of zero or more", async () => {
+  for (const refused of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2])
+    await assert.rejects(
+      workerPoolClientRun(
+        client({
+          settings: { ...settings, concurrencyMax: refused, sessionsMax: 1 },
+        }),
+        async () => undefined,
+      ),
+      /concurrencyMax must be a safe integer of zero or more$/u,
+    );
+});
+
+test("a run takes a job ceiling of 0 beside a session ceiling, and refuses one beside none", async () => {
+  assert.equal(
+    (
+      await workerPoolClientRun(
+        client({
+          settings: { ...settings, concurrencyMax: 0, sessionsMax: 1 },
+        }),
+        async () => undefined,
+      )
+    ).passed,
+    "Reconciled",
+  );
+  for (const none of [{}, { sessionsMax: 0 }])
+    await assert.rejects(
+      workerPoolClientRun(
+        client({ settings: { ...settings, concurrencyMax: 0, ...none } }),
+        async () => undefined,
+      ),
+      /concurrencyMax is 0 and sessionsMax is 0 or absent, so the pool would take no work/u,
+    );
 });
 
 test("a run refuses a session ceiling that is not a whole number of zero or more, and takes none or zero", async () => {

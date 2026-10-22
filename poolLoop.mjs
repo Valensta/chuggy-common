@@ -8,8 +8,9 @@
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
- * room nor a job a session's, and a pool that names no session ceiling asks
- * for none. Each kind's end is reported to its own plane.
+ * room nor a job a session's, a pool that names no session ceiling asks for
+ * none, and one whose job ceiling is 0 asks for no job. Each kind's end is
+ * reported to its own plane.
  *
  * A JOB THE BACKEND REFUSED AFTER TAKING IT IS SETTLED REFUSED, not ended: its
  * text is left on its attempt, which only a live attempt takes, and its
@@ -107,8 +108,8 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(token: string) => void} invalidate discards a token the plane rejected
  *
  * @typedef {object} WorkerPoolClientSettings
- * @property {number} concurrencyMax the jobs held at once, which each poll's `wanted` is measured from
- * @property {number} [sessionsMax] the sessions held at once, which each poll's `wantedSessions` is measured from; none where absent
+ * @property {number} concurrencyMax the jobs held at once, which each poll's `wanted` is measured from; none where it is 0
+ * @property {number} [sessionsMax] the sessions held at once, which each poll's `wantedSessions` is measured from; none where absent, and above 0 where `concurrencyMax` is 0
  * @property {number} outageBackoffMs the wait after a pass that met an outage
  * @property {number} passesMax the passes one run makes
  *
@@ -140,7 +141,6 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  */
 export function checkedWorkerPoolClientSettings(settings) {
   for (const [name, bound] of [
-    ["concurrencyMax", settings.concurrencyMax],
     ["outageBackoffMs", settings.outageBackoffMs],
     ["passesMax", settings.passesMax],
   ])
@@ -148,13 +148,21 @@ export function checkedWorkerPoolClientSettings(settings) {
       throw new RangeError(
         `worker pool client ${name} must be a positive safe integer`,
       );
-  const { sessionsMax } = settings;
+  const { concurrencyMax, sessionsMax } = settings;
+  if (!Number.isSafeInteger(concurrencyMax) || concurrencyMax < 0)
+    throw new RangeError(
+      "worker pool client concurrencyMax must be a safe integer of zero or more",
+    );
   if (
     sessionsMax !== undefined &&
     (!Number.isSafeInteger(sessionsMax) || sessionsMax < 0)
   )
     throw new RangeError(
       "worker pool client sessionsMax must be a safe integer of zero or more, or absent",
+    );
+  if (concurrencyMax === 0 && (sessionsMax ?? 0) === 0)
+    throw new RangeError(
+      "worker pool client concurrencyMax is 0 and sessionsMax is 0 or absent, so the pool would take no work",
     );
   return settings;
 }

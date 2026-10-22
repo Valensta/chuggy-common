@@ -45,6 +45,7 @@ import {
  * @property {string} source the volume's name, or the directory's absolute path, which no name can be
  * @property {string} target where the job's container has it
  * @property {boolean} readonly
+ * @property {string} [project] the project label's value a named volume carries where it is its pool's project's alone; none, and it carries no project label
  *
  * @typedef {object} EngineSocket this machine's container engine, as a workload is handed it
  * @property {string} path the socket's path on this machine
@@ -71,6 +72,8 @@ export const fillLabel = "io.chuggy.fill";
  * carries no pool's label, so no sweep of a pool's volumes lists it.
  */
 export const ownerVolumeLabel = "io.chuggy.owner-volume";
+/** The label of an owner's named volume that is one project's alone, whose value names that project. */
+export const ownerVolumeProjectLabel = "io.chuggy.owner-volume.project";
 
 /**
  * Every path `runArgv` mounts in a workload's container, whichever of them a
@@ -444,24 +447,28 @@ export function runtimeFillArgv(volumes, runtime) {
 }
 
 /**
- * A named volume this runner makes for its owner, labelled as one. Podman is
- * also told to give it the owner it would anyway, which is what stops podman,
- * at each mount while the volume is empty and whether or not the mount
- * copies, giving it the mounting container's user and then the owner and mode
- * of the directory that container's image holds there. Docker does neither to
- * a volume mounted uncopied.
+ * A named volume this runner makes for its owner, labelled as one, and as its
+ * project's where it is one project's alone. Podman is also told to give it
+ * the owner it would anyway, which is what stops podman, at each mount while
+ * the volume is empty and whether or not the mount copies, giving it the
+ * mounting container's user and then the owner and mode of the directory that
+ * container's image holds there. Docker does neither to a volume mounted
+ * uncopied.
  *
  * @param {EngineName} engine
- * @param {string} volume
+ * @param {Pick<OwnerVolume, "source" | "project">} volume
  */
-export function ownerVolumeCreateArgv(engine, volume) {
+export function ownerVolumeCreateArgv(engine, { source, project }) {
   return [
     "volume",
     "create",
     "--label",
     ownerVolumeLabel,
+    ...(project === undefined
+      ? []
+      : ["--label", `${ownerVolumeProjectLabel}=${project}`]),
     ...(engine === "podman" ? ["--opt", "o=uid=0,gid=0"] : []),
-    volume,
+    source,
   ];
 }
 
