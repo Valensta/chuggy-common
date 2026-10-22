@@ -134,6 +134,56 @@ test("a push that can take a fresh credential takes one, and uses it", async () 
   assert.deepEqual(calls.at(-1).options.env, refreshed);
 });
 
+/** The `[key, value]` entries `environment` hands git, in the order git reads them. */
+function gitEntries(environment) {
+  return Array.from(
+    { length: Number(environment.GIT_CONFIG_COUNT ?? "0") },
+    (_, index) => [
+      environment[`GIT_CONFIG_KEY_${String(index)}`],
+      environment[`GIT_CONFIG_VALUE_${String(index)}`],
+    ],
+  );
+}
+
+/**
+ * Catches the push handed the attempt's reads as they stand, under which the
+ * cache client answers the URL it pushes to with a read the forge refuses a
+ * push with; and the commit's hooks handed the clear, which would leave them
+ * no credential for the job's own repository.
+ */
+test("the push is handed the attempt's git with every helper cleared for the URL it pushes to, and the commit as it is", async () => {
+  const calls = [];
+  const command = async (_executable, args, options) => {
+    calls.push({ args, options });
+    return args[0] === "rev-parse" ? { stdout: "abc123\n" } : { stdout: "" };
+  };
+  const git = [
+    ["credential.http://git.helper", ""],
+    ["credential.http://git.helper", "cache --socket '/minted/reads.sock'"],
+  ];
+
+  await commitAndPushSource({
+    task: { ticket: 7, attempt: "opaque", worker: {} },
+    repositoryId: "chuggy",
+    repository: "http://git/rig.git",
+    base: "base123",
+    directory: "/workspace/repository",
+    command,
+    environment: {},
+    secrets: [],
+    git,
+    refresh: async () => ({ GIT_ASKPASS: "askpass" }),
+  });
+
+  const handed = (verb) =>
+    gitEntries(calls.find(({ args }) => args[0] === verb).options.env);
+  assert.deepEqual(handed("push"), [
+    ...git,
+    ["credential.http://git/rig.git.helper", ""],
+  ]);
+  assert.deepEqual(handed("commit"), git);
+});
+
 /** A git child that failed, writing `stderr`, as `execFile` rejects with it. */
 function gitFailed(stderr) {
   return Object.assign(new Error(`Command failed: git\n${stderr}`), {

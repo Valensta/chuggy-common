@@ -295,15 +295,18 @@ function jobUsernsArgv(engine) {
  *
  * A JOB GIVEN RUNTIME VOLUMES STARTS THROUGH THEM, as the cluster starts one:
  * the runtime's mounted read-only at `workerRuntimeDirectory`, the workspace's
- * in place of an anonymous one, and the contract's
- * `workerJobCommand` in place of the image's entrypoint. Neither mount copies
- * the job's image into its volume, which an engine otherwise does into an
- * empty one, so a runtime left unfilled starts nothing of the image's own and
- * the workspace is the empty one its job is given on a cluster. Podman's
- * workspace mount also takes `U`, which chowns the volume to the job's user:
- * podman gives an empty volume the owner and mode of the directory the image
- * holds where it is mounted, which for a workspace the image's root owns
- * would undo the fill's opening of it.
+ * in place of an anonymous one, and the contract's `workerJobCommand` in place
+ * of the image's entrypoint, run in the workspace in place of the image's
+ * `WORKDIR`. An engine may create a working directory the image names inside
+ * the workspace as root, as docker does, and the job's user cannot then clone
+ * into it; a workload with no runtime runs its image's own entrypoint in its
+ * image's own directory. Neither mount copies the job's image into its
+ * volume, which an engine otherwise does into an empty one, so a runtime left
+ * unfilled starts nothing of the image's own and the workspace is the empty
+ * one its job is given on a cluster. Podman's workspace mount also takes `U`,
+ * which chowns the volume to the job's user: podman gives an empty volume the
+ * owner and mode of the directory the image holds where it is mounted, which
+ * for a workspace the image's root owns would undo the fill's opening of it.
  *
  * @param {EngineName} engine
  * @param {WorkloadContainer} workload
@@ -363,6 +366,8 @@ export function runArgv(engine, workload) {
           `${runtime.volume}:${workerRuntimeDirectory}:ro,nocopy`,
           "--entrypoint",
           entrypoint,
+          "--workdir",
+          jobWorkspace,
         ]),
     "--network",
     workload.network,

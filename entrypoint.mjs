@@ -147,7 +147,7 @@ const workerSecretKinds = {
   bearer: "the attempt's bearer",
   mounted: "a credential the launcher mounted",
   minted: "the git credential the plane minted",
-  read: "a read the plane minted for another repository",
+  read: "a read the plane minted for a repository",
 };
 
 let activeTask;
@@ -503,14 +503,24 @@ async function workSource(context, workspace, verdict) {
 
 /**
  * One mint from the plane, its password kept out of everything this pod writes
- * before anything reaches a remote with it. Nothing where this deployment mints
- * no credential for the attempt's repository.
+ * before anything reaches a remote with it: a read of `repository` where it is
+ * named, and what the attempt's task kind needs of its own where nothing is.
+ * Nothing where this deployment mints no credential for the attempt's
+ * repository.
  */
-async function workerMinted({ task, bearer, keepSecret, request, write }) {
+async function workerMinted({
+  task,
+  bearer,
+  keepSecret,
+  request,
+  write,
+  repository,
+}) {
   const minted = await planeCredential({
     task,
     bearer,
     path: workerCredentialPath,
+    ...(repository === undefined ? {} : { repository }),
     ...(request === undefined ? {} : { request }),
     ...(write === undefined ? {} : { write }),
   });
@@ -520,11 +530,13 @@ async function workerMinted({ task, bearer, keepSecret, request, write }) {
 }
 
 /**
- * A fresh mint immediately before the push. A minted token expires and an
- * attempt may outlive one, so the credential the clone used is not the one the
- * push presents. The plane refusing here is this attempt's failure: a clone that
- * minted and a push that cannot is a deployment mid-change, and reaching the
- * remote with something else is exactly what a minted credential is for.
+ * A fresh mint immediately before the push, naming no repository, so the plane
+ * mints what the task kind needs: the clone's credential is a read, and a
+ * minted token expires while an attempt may outlive one. The plane refusing
+ * here is this attempt's failure: a clone that minted and a push that cannot
+ * is a deployment mid-change or an installation that grants only a read, and
+ * reaching the remote with something else is exactly what a minted credential
+ * is for.
  */
 async function workerRefreshed(asked) {
   const minted = await workerMinted(asked);
@@ -543,14 +555,15 @@ function workerMounted(task, repositories, credentialFiles, repositoryId) {
 
 /**
  * The remote one attempt reaches and the askpass environment it reaches it
- * with. The plane's mint answers where there is one, and the launcher's mount
- * where there is not — which is what answered before this plane minted
- * anything, the attempt's own credential roster included. `refresh` comes back
- * only from the minted arm, there being nothing to take again in the other.
+ * with. The plane's mint answers where there is one, a read of the attempt's
+ * own repository asked for by name, and the launcher's mount where there is
+ * not — which is what answered before this plane minted anything, the
+ * attempt's own credential roster included. `refresh` comes back only from the
+ * minted arm, there being nothing to take again in the other.
  */
 export async function workerCredential(asked) {
   const { task, repositories, credentialFiles, repositoryId } = asked;
-  const minted = await workerMinted(asked);
+  const minted = await workerMinted({ ...asked, repository: repositoryId });
   return minted === undefined
     ? workerMounted(task, repositories, credentialFiles, repositoryId)
     : {
@@ -951,10 +964,10 @@ export async function workerMintedWritable(directory) {
 }
 
 /**
- * The reads every git this attempt runs makes of the other repositories its
- * project binds, served under `minted` and asked of the plane under the
- * attempt's bearer, each password held among the attempt's secrets; the
- * image's git, run as its programs are, is asked its version.
+ * The reads every git this attempt runs makes of the repositories its project
+ * binds, its own among them, served under `minted` and asked of the plane
+ * under the attempt's bearer, each password held among the attempt's secrets;
+ * the image's git, run as its programs are, is asked its version.
  */
 function workerProjectReads({
   task,

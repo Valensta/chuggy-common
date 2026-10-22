@@ -2,7 +2,8 @@
  * A forge a suite's git reaches over HTTP, as a pod's reaches GitHub: bare
  * repositories under a directory of its own, served by git's own
  * `http-backend`, each refusing every request that presents no password it
- * was told to accept, and every credential presented to it recorded.
+ * was told to accept for the service the request names, and every credential
+ * presented to it recorded with that service.
  */
 
 import { spawn } from "node:child_process";
@@ -27,6 +28,17 @@ export const forgeGitIsolated = {
 function forgeRequested(pathname) {
   const match = /^\/(.+?\.git)(\/.*)$/u.exec(pathname);
   return match === null ? undefined : { name: match[1], rest: match[2] };
+}
+
+/** The services git reaches a repository through: a fetch's, and a push's. */
+export const forgeServices = {
+  read: "git-upload-pack",
+  write: "git-receive-pack",
+};
+
+/** The service a request is for, named by its query where it asks for the refs and by its path where it sends a pack. */
+function forgeService(url, requested) {
+  return url.searchParams.get("service") ?? requested.rest.slice(1);
 }
 
 /** The username and password a request presents, or nothing where it presents none. */
@@ -89,31 +101,36 @@ async function forgeBackend(root, request, requested, presented) {
  * A forge served until `t` ends, holding each of `names`: `url(name)` is the
  * repository's clone URL and `bare(name)` the directory it is kept in;
  * `accept(name, password)` makes that password the only one that reads or
- * pushes it from then on; `seed(name, files, gitlinks)` makes a commit of
- * those files and those submodule commits its `main`; and `presented` is every
- * credential any request presented, in order.
+ * pushes it from then on, and `acceptRead(name, password)` the only one that
+ * reads it, leaving what pushes it as it was; `seed(name, files, gitlinks)`
+ * makes a commit of those files and those submodule commits its `main`; and
+ * `presented` is every credential any request presented, in order, with the
+ * service it asked for.
  */
 export async function forgeServed(t, names) {
   const root = await mkdtemp(join(tmpdir(), "chuggy-forge-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const accepted = new Map(names.map((name) => [name, new Set()]));
+  const accepted = new Map(names.map((name) => [name, new Map()]));
   for (const name of names)
     await git("git", ["init", "--bare", "--initial-branch=main", name], {
       cwd: root,
     });
   const presented = [];
   const server = createServer((request, response) => {
-    const requested = forgeRequested(
-      new URL(request.url ?? "/", "http://forge.invalid").pathname,
-    );
+    const url = new URL(request.url ?? "/", "http://forge.invalid");
+    const requested = forgeRequested(url.pathname);
     if (requested === undefined || !accepted.has(requested.name)) {
       response.writeHead(404).end();
       return;
     }
+    const service = forgeService(url, requested);
     const credential = forgePresented(request.headers.authorization);
     if (credential !== undefined)
-      presented.push({ repository: requested.name, ...credential });
-    if (!accepted.get(requested.name).has(credential?.password)) {
+      presented.push({ repository: requested.name, service, ...credential });
+    if (
+      credential === undefined ||
+      accepted.get(requested.name).get(service) !== credential.password
+    ) {
       response
         .writeHead(401, { "www-authenticate": 'Basic realm="forge"' })
         .end();
@@ -139,7 +156,13 @@ export async function forgeServed(t, names) {
     presented,
     url: (name) => `${origin}/${name}`,
     bare: (name) => join(root, name),
-    accept: (name, password) => accepted.set(name, new Set([password])),
+    accept: (name, password) =>
+      accepted.set(
+        name,
+        new Map(Object.values(forgeServices).map((named) => [named, password])),
+      ),
+    acceptRead: (name, password) =>
+      accepted.get(name).set(forgeServices.read, password),
     seed: (name, files, gitlinks = {}) =>
       forgeSeeded(join(root, name), files, gitlinks),
   };

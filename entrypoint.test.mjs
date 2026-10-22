@@ -83,7 +83,11 @@ import {
   fetchedAnswer,
   poolHeldSessionAnswer,
 } from "./envelope.fixture.mjs";
-import { forgeGitIsolated, forgeServed } from "./gitForge.fixture.mjs";
+import {
+  forgeGitIsolated,
+  forgeServed,
+  forgeServices,
+} from "./gitForge.fixture.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import { overPlane, planeFetch, planes } from "./plane.fixture.mjs";
 import { agentResultSchema } from "./result.mjs";
@@ -123,16 +127,19 @@ const mintedKind = "the git credential the plane minted";
 
 /**
  * One attempt asking the plane for its credential, with what the plane answers
- * and what the pod is authorized to mount if it does not.
+ * and what the pod is authorized to mount if it does not; `named` is the
+ * repository each ask named, nothing where it named none.
  */
 function askedFor(answer, credentials = ["forge"]) {
   const kept = [];
   const written = [];
   const paths = [];
+  const named = [];
   return {
     kept,
     written,
     paths,
+    named,
     asked: {
       task: { ...task, authority: { credentials } },
       bearer: "capability",
@@ -140,8 +147,13 @@ function askedFor(answer, credentials = ["forge"]) {
       credentialFiles,
       repositoryId: "repository-1",
       keepSecret: (secret) => kept.push(secret),
-      request: async (_task, _bearer, path) => {
+      request: async (_task, _bearer, path, init) => {
         paths.push(path);
+        named.push(
+          init?.body === undefined
+            ? undefined
+            : JSON.parse(init.body).repository,
+        );
         return typeof answer === "function" ? answer() : answer;
       },
       write: async (file, content) => written.push({ file, content }),
@@ -2264,10 +2276,15 @@ test("the mounted credential is still one the attempt's authority grants", async
   );
 });
 
-test("the push takes a fresh mint rather than the one the clone used", async () => {
+/**
+ * Catches the clone asking for what the task kind needs, which for a work
+ * attempt is the write, where a read of its own repository is all it needs;
+ * and the push asking for that read, which no forge takes a push with.
+ */
+test("the clone asks for a read of its own repository by name, and the push takes a fresh mint naming none", async () => {
   const later = "ghs_zyxwvutsrqponmlkjihgfedcba9876543210";
   let mints = 0;
-  const { asked, kept } = askedFor(() => {
+  const { asked, kept, named } = askedFor(() => {
     mints += 1;
     return {
       status: 200,
@@ -2280,6 +2297,7 @@ test("the push takes a fresh mint rather than the one the clone used", async () 
   const refreshed = await resolved.refresh();
 
   assert.equal(mints, 2);
+  assert.deepEqual(named, [asked.repositoryId, undefined]);
   assert.equal(refreshed.CHUG_WORKER_GIT_CREDENTIAL_USERNAME, minted.username);
   assert.deepEqual(kept, [
     { kind: mintedKind, value: minted.password },
@@ -3082,7 +3100,7 @@ const projectRepositories = {
   unbound: "org/unbound.git",
 };
 
-/** The credential the plane mints the job's own repository. */
+/** The credential the plane mints the job's own repository where the pod names none, which is a work attempt's push. */
 const ownCredential = {
   username: "x-access-token",
   password: "ghs_ownWrite0123456789abcdefghijklmnop",
@@ -3115,12 +3133,16 @@ async function projectForge(t) {
 /**
  * A plane serving `answer` as one attempt's task, its input the forge's own
  * repository at `base`. It mints the job's own credential where the pod names
- * no repository; a fresh read of the library at every ask naming it, which
- * from then on is the only one the forge accepts for it; and nothing for any
- * other. `reads` is every read it minted, in order.
+ * no repository; a fresh read of the job's own repository at every ask naming
+ * it, which from then on is the only one the forge accepts to read it, leaving
+ * the job's own credential the only one that pushes it; a fresh read of the
+ * library at every ask naming it, which from then on is the only one the forge
+ * accepts for it; and nothing for any other. `reads` is every read of the
+ * library it minted and `ownReads` every read of the job's own, in order.
  */
 async function readsPlane(forge, answer, base) {
   const reads = [];
+  const ownReads = [];
   const expiresAtMs = 1_900_000_000_000;
   const plane = await servedPlane((route, request) => {
     switch (route) {
@@ -3132,6 +3154,15 @@ async function readsPlane(forge, answer, base) {
         const named = request.body?.repository;
         if (named === undefined)
           return { status: 200, body: { ...ownCredential, expiresAtMs } };
+        if (named === forge.url(projectRepositories.own)) {
+          const password = `ghs_readOfOwn${String(ownReads.length).padStart(24, "0")}`;
+          ownReads.push(password);
+          forge.acceptRead(projectRepositories.own, password);
+          return {
+            status: 200,
+            body: { username: "x-access-token", password, expiresAtMs },
+          };
+        }
         if (named !== forge.url(projectRepositories.lib))
           return { status: 404, body: { reason: "NotMinted" } };
         const password = `ghs_readOfLib${String(reads.length).padStart(24, "0")}`;
@@ -3150,7 +3181,7 @@ async function readsPlane(forge, answer, base) {
         return { status: 204 };
     }
   });
-  return { ...plane, reads };
+  return { ...plane, reads, ownReads };
 }
 
 /** Every repository a credential request named, the job's own named by nothing. */
@@ -3160,10 +3191,14 @@ function credentialAsks(plane) {
     .map(({ body }) => body?.repository);
 }
 
-/** The passwords each repository on the forge was presented. */
-function presentedTo(forge, name) {
+/** The passwords each repository on the forge was presented, for `service` alone where it names one. */
+function presentedTo(forge, name, service) {
   return forge.presented
-    .filter(({ repository }) => repository === name)
+    .filter(
+      (presented) =>
+        presented.repository === name &&
+        (service === undefined || presented.service === service),
+    )
     .map(({ password }) => password);
 }
 
@@ -3217,12 +3252,13 @@ async function libReadingHooks(hooks, dumps, lib) {
 
 /**
  * The commanded work task a launched attempt reads its project's repositories
- * in: a setup line cloning the library, checks updating its own submodules and
- * failing to read the repository the project does not bind, and the hooks
- * under `hooks` installed. Its setup line and its checks each write their
- * environment under `dumps`.
+ * in: a setup line cloning the library and fetching its own repository, checks
+ * fetching its own repository, updating its own submodules and failing to read
+ * the repository the project does not bind, and the hooks under `hooks`
+ * installed. Its setup line and its checks each write their environment under
+ * `dumps`.
  */
-function libReadingTask(forge, dumps, hooks) {
+function projectReadingTask(forge, dumps, hooks) {
   const lib = forge.url(projectRepositories.lib);
   return {
     status: 200,
@@ -3232,6 +3268,7 @@ function libReadingTask(forge, dumps, hooks) {
         mode: {
           type: "Commands",
           commands: [
+            "git fetch --quiet origin",
             "git submodule update --init --recursive",
             "test -f lib/lib.txt",
             `! git ls-remote '${forge.url(projectRepositories.unbound)}'`,
@@ -3240,6 +3277,7 @@ function libReadingTask(forge, dumps, hooks) {
         },
         setup: [
           `git clone --quiet '${lib}' '${dumps}/lib-by-setup'`,
+          "git fetch --quiet origin",
           `env > '${dumps}/setup.env'`,
           `git config core.hooksPath '${hooks}'`,
         ],
@@ -3251,34 +3289,45 @@ function libReadingTask(forge, dumps, hooks) {
 
 /**
  * Catches a read kept and presented again after the plane minted another; any
- * credential presented to a repository the plane minted nothing for, or the
- * job's own presented anywhere but its own; and the plane asked for the job's
- * own by name.
+ * credential presented to a repository the plane minted nothing for; the job's
+ * own credential presented anywhere but its own push, or anything else
+ * presented to that push; and the plane asked for the job's own credential
+ * more than once, or before any read of the job's own repository it served.
  */
 function assertReadsOnly(forge, plane) {
+  const own = projectRepositories.own;
   assert.ok(plane.reads.length >= 2, "the library was never minted again");
   assert.deepEqual(
     [...new Set(presentedTo(forge, projectRepositories.lib))],
     plane.reads,
   );
+  assert.ok(plane.ownReads.length >= 3, "its own was read only by its clone");
   assert.deepEqual(
-    [...new Set(presentedTo(forge, projectRepositories.own))],
+    [...new Set(presentedTo(forge, own, forgeServices.read))],
+    plane.ownReads,
+  );
+  assert.deepEqual(
+    [...new Set(presentedTo(forge, own, forgeServices.write))],
     [ownCredential.password],
   );
   assert.deepEqual(presentedTo(forge, projectRepositories.unbound), []);
   const asks = credentialAsks(plane);
-  assert.ok(!asks.includes(forge.url(projectRepositories.own)));
   assert.ok(asks.includes(forge.url(projectRepositories.unbound)));
-  assert.equal(asks.filter((named) => named === undefined).length, 2);
+  assert.equal(asks.filter((named) => named === undefined).length, 1);
+  assert.ok(
+    asks.indexOf(undefined) > asks.lastIndexOf(forge.url(own)),
+    "the job's own credential was asked for before a read of its own",
+  );
 }
 
 /**
- * A work attempt launched as a pool launches its pod reads its project's other
- * repositories from a setup line, from its checks, a submodule written at the
- * forge's ssh address among them, and from the hooks its commit and its push
- * run; and pushes its own as it did before. Catches a git the attempt runs
- * that cannot reach a repository its project binds, what `assertReadsOnly`
- * catches, and the bearer reaching a setup line's or a check's environment.
+ * A work attempt launched as a pool launches its pod reads its project's
+ * repositories from a setup line and from its checks, its own and a submodule
+ * written at the forge's ssh address among them, and others from the hooks its
+ * commit and its push run; and pushes its own with what the plane mints for
+ * its task kind. Catches a git the attempt runs that cannot reach a repository
+ * its project binds, what `assertReadsOnly` catches, and the bearer reaching a
+ * setup line's or a check's environment.
  */
 test("a launched work attempt reads every repository its project binds and pushes only its own", async (t) => {
   const { forge, base } = await projectForge(t);
@@ -3289,7 +3338,7 @@ test("a launched work attempt reads every repository its project binds and pushe
   await libReadingHooks(hooks, dumps, forge.url(projectRepositories.lib));
   const plane = await readsPlane(
     forge,
-    libReadingTask(forge, dumps, hooks),
+    projectReadingTask(forge, dumps, hooks),
     base,
   );
   t.after(() => plane.close());
@@ -3370,7 +3419,7 @@ test("a work attempt whose commit carries a read of another repository pushes no
   );
   assert.match(
     failed.message,
-    /^commit [0-9a-f]{40} carries a read the plane minted for another repository in a file, so the attempt pushes nothing$/u,
+    /^commit [0-9a-f]{40} carries a read the plane minted for a repository in a file, so the attempt pushes nothing$/u,
   );
   assert.ok(!failed.message.includes(plane.reads[0]));
   assert.doesNotMatch(
@@ -3380,19 +3429,25 @@ test("a work attempt whose commit carries a read of another repository pushes no
   assert.ok(!plane.asked.some(({ route }) => route === "report"));
 });
 
+/** An agent's command that clones the library and fails to read the repository the project does not bind, writing `outcome` where both went as they should. */
+const libReadingLine = `git clone --quiet "$1" "$3/lib-by-agent" && ! git ls-remote "$2" 2>/dev/null && echo read > "$3/outcome"`;
+
+/** An agent's command that fetches its own repository and then writes the password git's helpers answer for it to `own-password`. */
+const ownReadingLine = `git fetch --quiet "$4" && printf 'url=%s\\n\\n' "$4" | git credential fill | sed -n 's/^password=//p' > "$3/own-password"`;
+
 /**
- * A stand-in for Claude Code under `root` whose one command clones the library
- * and fails to read the repository the project does not bind, in a shell that
- * first sources what Claude Code's Bash tool does. It writes its process's
- * environment and its shell's under `root`, and `outcome` where both reads
- * went as they should, and fails, so nothing is pushed.
+ * A stand-in for Claude Code under `root` whose one command is `line`, given
+ * the library, the repository the project does not bind, `root` and the job's
+ * own repository as its arguments, in a shell that first sources what Claude
+ * Code's Bash tool does. It writes its process's environment and its shell's
+ * under `root`, and fails, so nothing is pushed.
  */
-function libReadingAgent(root, forge) {
+function readingAgent(root, forge, line) {
   const script = [
     `env > "$3/agent.env"`,
     `. "$CLAUDE_ENV_FILE"`,
     `env > "$3/shell.env"`,
-    `git clone --quiet "$1" "$3/lib-by-agent" && ! git ls-remote "$2" 2>/dev/null && echo read > "$3/outcome"`,
+    line,
     `printf '{"type":"result","structured_output":{"verdict":"Fail","summary":"read"}}\\n'`,
   ].join("\n");
   return {
@@ -3407,6 +3462,7 @@ function libReadingAgent(root, forge) {
       forge.url(projectRepositories.lib),
       forge.url(projectRepositories.unbound),
       root,
+      forge.url(projectRepositories.own),
     ],
   };
 }
@@ -3424,14 +3480,14 @@ async function ownCheckout(forge, root) {
 }
 
 /**
- * An agent's shell reaches the project's other repositories as a check's
- * does, through what Claude Code's Bash tool sources before each command.
- * Catches an agent's git left without the attempt's configuration, or the
- * agent's process or its shell holding the bearer.
+ * One work attempt run in this process over the project's forge, its agent
+ * the stand-in running `line` and its clone a checkout of the job's own
+ * repository; `write` is handed every password the attempt writes where git's
+ * askpass reads it.
  */
-test("an agent's shell reads another repository its project binds, and holds no bearer", async (t) => {
+async function agentReadingAttempt(t, prefix, line, write) {
   const { forge, base } = await projectForge(t);
-  const root = await suiteDirectory(t, "chuggy-reads-agent-");
+  const root = await suiteDirectory(t, prefix);
   const temporary = join(root, "temporary");
   await mkdir(temporary);
   const providerCredentialFile = join(root, "claude-code");
@@ -3466,10 +3522,26 @@ test("an agent's shell reads another repository its project binds, and holds no 
 
   await workerAttempt(envelopeLaunch(served, answered), {
     minted: root,
-    write: async () => undefined,
+    write,
     clone: async () => workspace,
-    agent: libReadingAgent(root, forge),
+    agent: readingAgent(root, forge, line),
   });
+  return { forge, root, plane, served };
+}
+
+/**
+ * An agent's shell reaches the project's other repositories as a check's
+ * does, through what Claude Code's Bash tool sources before each command.
+ * Catches an agent's git left without the attempt's configuration, or the
+ * agent's process or its shell holding the bearer.
+ */
+test("an agent's shell reads another repository its project binds, and holds no bearer", async (t) => {
+  const { forge, root, plane, served } = await agentReadingAttempt(
+    t,
+    "chuggy-reads-agent-",
+    libReadingLine,
+    async () => undefined,
+  );
 
   assert.equal(await readFile(join(root, "outcome"), "utf8"), "read\n");
   assert.deepEqual(
@@ -3481,4 +3553,36 @@ test("an agent's shell reads another repository its project binds, and holds no 
     const text = await readFile(join(root, dump), "utf8");
     assert.ok(!text.includes(served.bearer), `${dump} holds the bearer`);
   }
+});
+
+/**
+ * An agent's shell reaches the job's own repository as it reaches any other,
+ * and git is handed only a read of it until the harness's push, which comes
+ * after the agent has exited and which this attempt, failed, never makes.
+ * Catches the clone minted what the task kind needs and left where the
+ * askpass reads it, an agent's git answered anything but a read of its own
+ * repository, and the job's own credential asked for by an attempt that does
+ * not push.
+ */
+test("an agent's git is handed only a read of its own repository, and the clone leaves no write credential on disk", async (t) => {
+  const written = [];
+  const { forge, root, plane } = await agentReadingAttempt(
+    t,
+    "chuggy-reads-own-",
+    ownReadingLine,
+    async (_file, password) => {
+      written.push(password);
+    },
+  );
+
+  const answered = (await readFile(join(root, "own-password"), "utf8")).trim();
+  assert.ok(plane.ownReads.includes(answered), "git was answered no read");
+  assert.ok(written.length > 0, "the clone wrote nothing");
+  for (const password of written)
+    assert.ok(plane.ownReads.includes(password), "a write was written");
+  const fetched = presentedTo(forge, projectRepositories.own);
+  assert.ok(fetched.length > 0, "the agent never fetched its own");
+  for (const password of fetched)
+    assert.ok(plane.ownReads.includes(password), "a write was presented");
+  assert.ok(!credentialAsks(plane).includes(undefined));
 });

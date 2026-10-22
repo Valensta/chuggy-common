@@ -1,7 +1,7 @@
 /**
  * The reads every git a job runs, or a session's shell does, makes of the
- * other repositories its project binds: a credential git asks this pod's own
- * process for, and the configuration that sends git to ask.
+ * repositories its project binds, its own among them: a credential git asks
+ * this pod's own process for, and the configuration that sends git to ask.
  *
  * GIT ASKS THROUGH ITS OWN CACHE CLIENT. Every git the attempt runs once its
  * workspace is cloned is configured to ask `git credential-cache` at a socket
@@ -15,16 +15,17 @@
  * process's stderr: every read is then absent, and nothing else would say so.
  * The job runs on without them.
  *
- * ONLY ANOTHER REPOSITORY IS ASKED FOR HERE. The plane answers the job's own
- * repository with the job's own credential, a work attempt's push among it, so
- * that name is never asked for: git reaches the job's own repository with the
- * askpass its clone and its push present, and with nothing anywhere else. Any
- * other the plane mints a read where the project binds it and nothing where it
- * does not, and where it mints nothing the cache client answers git nothing:
- * git goes on to whatever else it holds, and outside the push the attempt
- * hands it nothing more. A hook the push runs holds the push's askpass, so a
- * git it runs can present the job's own credential to another repository, as
- * any hook's git could before reads were served.
+ * EVERY ANSWER IS A READ. The plane mints a read of the job's own repository
+ * where it is named, and of any other where the project binds it, and nothing
+ * where it does not; where it mints nothing the cache client answers git
+ * nothing, git goes on to whatever else it holds, and outside the push the
+ * attempt hands it nothing more. The push asks for the job's own repository
+ * by no name, which a work attempt is minted the write for, and presents it
+ * through its askpass: `projectReadsPushed` leaves no helper for the one URL
+ * it pushes to. A hook the push runs holds what the push holds, so a git it
+ * runs reaches the job's own repository with the write, and can present it to
+ * another repository the plane mints nothing for, as any hook's git could
+ * before reads were served.
  *
  * A REPOSITORY IS ASKED FOR BY ITS CLONE URL, which is what a binding is named
  * by: the forge's origin, the path git names, and `.git` where that path ends
@@ -33,10 +34,11 @@
  * WHAT GIT HANDS BACK IS NEVER KEPT. The configuration first clears every
  * helper the image or the workspace names for the forge, so the cache client
  * is the only one git asks, and the only one git hands a credential that
- * worked, the job's own at its push among them. A store or an erase is read
- * and dropped, so no token rests in any file, and every answer is the plane's.
- * The plane answers a token only while it is still usable, so one that
- * expired is minted again the next time git asks.
+ * worked; the URL a push reaches has none, so the push's credential is handed
+ * to nothing. A store or an erase is read and dropped, so no token rests in
+ * any file, and every answer is the plane's. The plane answers a token only
+ * while it is still usable, so one that expired is minted again the next time
+ * git asks.
  *
  * AN SSH ADDRESS ON THE FORGE IS FETCHED OVER HTTPS, so a submodule written as
  * `git@github.com:owner/name.git` reaches the same repository with the same
@@ -89,7 +91,7 @@ export function projectReadsGitTooOld(printed) {
 
 /** The warning a job whose git is `version` is given. */
 export function projectReadsGitWarning(version) {
-  return `this image's git ${version} predates GIT_CONFIG_COUNT, so the project's other repositories and ssh submodule URLs are not available to it; use an image with git ${projectReadsGitFirstText} or later`;
+  return `this image's git ${version} predates GIT_CONFIG_COUNT, so reads of the project's repositories, its own included, and ssh submodule URLs are not available to it; use an image with git ${projectReadsGitFirstText} or later`;
 }
 
 /** Warns, by `warn`, where the git `gitVersion` answers for is too old to read the configuration; nothing where it cannot be asked. */
@@ -144,6 +146,18 @@ export function projectReadsConfiguration(forge, socket) {
   ];
 }
 
+/**
+ * `git` as the push to `repository` is handed it: where it configures any
+ * reads, followed by an empty helper for that one URL, which git reads as
+ * clearing every helper named for it before, so the push asks its askpass
+ * rather than the cache client. Every other URL keeps its reads.
+ */
+export function projectReadsPushed(git, repository) {
+  return git.length === 0
+    ? git
+    : [...git, [`credential.${repository}.helper`, ""]];
+}
+
 /** Each `key=value` line of one request, the first of a key being the one read. */
 export function projectReadsFields(text) {
   const fields = new Map();
@@ -170,13 +184,13 @@ function projectReadsLine(value) {
 }
 
 /**
- * What one request is answered: for a `get` naming another repository on the
- * forge, the credential the plane minted for it, and otherwise nothing.
+ * What one request is answered: for a `get` naming a repository on the forge,
+ * the credential the plane minted for it, and otherwise nothing.
  */
 async function projectReadsAnswer(read, fields) {
   if (fields.get("action") !== "get") return "";
   const repository = projectReadsRepository(read.forge, fields);
-  if (repository === undefined || repository === read.repositoryId) return "";
+  if (repository === undefined) return "";
   let minted;
   try {
     minted = await read.mint(repository);
@@ -223,9 +237,9 @@ function projectReadsListening(server, socket) {
 /**
  * The reads served under `directory` for a job whose own repository is
  * `repositoryId`, and `git`, the entries that send every git the attempt runs
- * to them. `mint(repository)` is the plane's answer for another repository,
- * nothing where it mints none; `keep` holds each password answered, once;
- * `gitVersion` answers what the job's git prints for `git --version`.
+ * to them. `mint(repository)` is the plane's answer for a repository on the
+ * forge, nothing where it mints none; `keep` holds each password answered,
+ * once; `gitVersion` answers what the job's git prints for `git --version`.
  * `close` drops every client and removes the socket.
  */
 export async function projectReadsServed({
@@ -242,7 +256,6 @@ export async function projectReadsServed({
   const held = new Set();
   const read = {
     forge,
-    repositoryId,
     mint,
     warn,
     keep: (password) => {

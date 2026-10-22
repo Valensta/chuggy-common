@@ -6,6 +6,7 @@ import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocum
 
 import { workerGitEnvironment, workerStageEnvironment } from "./checks.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
+import { projectReadsPushed } from "./projectReads.mjs";
 import { runCommitFailed, runPushFailed, runStep } from "./runEvidence.mjs";
 
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
@@ -199,15 +200,17 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * programs are, and the push is handed the credential's environment, which
  * is that and its askpass. The commit and the push are handed `git`, the
  * attempt's git configuration, as well, since the hooks they run are the
- * project's.
+ * project's; the push's ends with `projectReadsPushed`, so the URL it pushes
+ * to is answered by that askpass rather than by the reads.
  *
  * THE PUSH ASKS FOR ITS CREDENTIAL AGAIN. `refresh` is present where the plane
- * minted the one the clone used: a minted token expires, an attempt may outlive
- * one, and the push is the last thing it does — so the credential is taken
- * immediately before it rather than carried from the clone. Where the launcher
- * mounted the credential there is nothing to refresh, and the clone's own
- * environment is what pushes. The push is tried again as `gitRemote.mjs` says,
- * under that one credential, with `pause` between tries.
+ * minted the one the clone used: that one is a read, a minted token expires,
+ * an attempt may outlive one, and the push is the last thing it does — so the
+ * credential is taken immediately before it rather than carried from the
+ * clone. Where the launcher mounted the credential there is nothing to
+ * refresh, and the clone's own environment is what pushes. The push is tried
+ * again as `gitRemote.mjs` says, under that one credential, with `pause`
+ * between tries.
  *
  * EACH HALF IS A STEP. A failure up to and including the secret check fails
  * the commit step, and one taking the credential or pushing the push step.
@@ -241,7 +244,13 @@ export async function commitAndPushSource({
         () =>
           command("git", ["push", repository, `${commit}:${ref}`], {
             cwd: directory,
-            env: { ...pushing, ...workerGitEnvironment(pushing, git) },
+            env: {
+              ...pushing,
+              ...workerGitEnvironment(
+                pushing,
+                projectReadsPushed(git, repository),
+              ),
+            },
           }),
         { pause },
       );
