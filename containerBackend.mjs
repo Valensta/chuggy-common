@@ -1425,7 +1425,8 @@ function ownerVolumeWithheldLine(source) {
 
 /**
  * What a personal runner's doctor says of a volume listed as its project's,
- * which it cannot look for before a job names its project.
+ * which it does not look for: the runner serves its member across projects,
+ * and doctor holds no job's project to look under.
  *
  * @param {string} source
  */
