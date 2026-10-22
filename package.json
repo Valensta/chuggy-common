@@ -7,7 +7,7 @@
   },
   "private": true,
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.14.0/chuggy-worker-contract-1.14.0.tgz"
+    "@chuggy/worker-contract": "file:../../chuggy-effort/valensta-fixes-2026-10-21/r2b/contract/chuggy-worker-contract-1.15.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

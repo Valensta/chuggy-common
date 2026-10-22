@@ -2734,12 +2734,94 @@ test("a volume listed as its project's that is there labelled as that project's 
   );
 });
 
-test("a personal runner's jobs mount no volume listed as its project's, which its first job says once, and a session or a backend that places nothing never", async (t) => {
-  const personal = {
-    kind: /** @type {const} */ ("Personal"),
-    tenant: "vteng",
-    owner: "28:https://auth.chuggy.example/geoff",
+/** A member's personal runner in `pool`'s tenant. */
+const personal = {
+  kind: /** @type {const} */ ("Personal"),
+  tenant: "vteng",
+  owner: "28:https://auth.chuggy.example/geoff",
+};
+
+/**
+ * What a job placed through chuggy's runtime in `project` ran with on a
+ * runner whose owner lists `projectMount`: the volume calls it made, and its
+ * container's mounts.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {import("./poolIdentity.mjs").PoolIdentity} identity
+ * @param {string} [project] the project its assignment names
+ * @param {Record<string, {labels: Record<string, string>}>} [there] the volumes there before it
+ */
+async function projectMountPlaced(t, identity, project, there = {}) {
+  const context = await harness(t, {
+    pool: identity,
+    volumes: [projectMount],
+  });
+  for (const [name, volume] of Object.entries(there))
+    context.state.volumes.set(name, volume);
+  context.state.images.add(image);
+  context.state.images.add(runtime);
+  await context.backend.place(
+    assignment({ runtime, ...(project === undefined ? {} : { project }) }),
+    "Job",
+  );
+  await context.backend.settled();
+  return {
+    context,
+    made: context.state.calls
+      .filter(({ argv }) => argv[0] === "volume" && argv[1] === "create")
+      .map(({ argv }) => argv)
+      .filter((argv) => argv.some((value) => value.startsWith("sccache"))),
+    mounts: (
+      context.state.containers.get(containerName(identity, "asg-1"))?.volumes ??
+      []
+    ).filter((value) => value.startsWith("sccache")),
   };
+}
+
+test("a personal runner's job mounts the volume a pool's job in its project does: one name, made with one label, so the two share it", async (t) => {
+  const pooled = await projectMountPlaced(t, pool);
+  const ownersJob = await projectMountPlaced(t, personal, "chuggy");
+  assert.equal(pooled.made.length, 1);
+  assert.deepEqual(ownersJob.made, pooled.made);
+  assert.deepEqual(ownersJob.mounts, pooled.mounts);
+  assert.deepEqual(ownersJob.mounts, [
+    `${projectVolume}:/cache/sccache:nocopy`,
+  ]);
+  assert.deepEqual(ownersJob.context.state.volumes.get(projectVolume), {
+    labels: projectVolumeLabels,
+  });
+  const shared = await projectMountPlaced(t, personal, "chuggy", {
+    [projectVolume]: { labels: projectVolumeLabels },
+  });
+  assert.deepEqual(shared.made, [], "a volume a pool made was made again");
+  assert.deepEqual(shared.mounts, pooled.mounts);
+});
+
+test("a personal runner's jobs in two projects mount two volumes, each made as its own project's, and one labelled as another's is refused", async (t) => {
+  const other = await projectMountPlaced(t, personal, "other");
+  const otherVolume = `sccache-${String(poolProjectDigest(personal, "other"))}`;
+  assert.notEqual(otherVolume, projectVolume);
+  assert.deepEqual(other.mounts, [`${otherVolume}:/cache/sccache:nocopy`]);
+  assert.deepEqual(other.context.state.volumes.get(otherVolume), {
+    labels: {
+      ...ownerVolumeLabels,
+      "io.chuggy.owner-volume.project": "vteng/other",
+    },
+  });
+  const mislabelled = await projectMountPlaced(t, personal, "other", {
+    [otherVolume]: { labels: projectVolumeLabels },
+  });
+  assert.deepEqual(mislabelled.made, []);
+  assert.equal(mislabelled.context.state.containers.size, 0);
+  const [ended] = await endsNamed(mislabelled.context.backend);
+  assert.ok(ended?.kind === "Job");
+  assert.equal(
+    ended.why,
+    `its container was not started: its owner's volume ${otherVolume} is labelled as vteng/chuggy's, not vteng/other's`,
+  );
+});
+
+test("a personal runner's job whose assignment names no project mounts none listed as its project's, and each says so; a session never", async (t) => {
   const context = await harness(t, {
     pool: personal,
     volumes: [...ownerMounts, projectMount],
@@ -2763,9 +2845,10 @@ test("a personal runner's jobs mount no volume listed as its project's, which it
   }
   assert.deepEqual(
     context.log.filter((line) => line.includes("sccache")),
-    [
-      `${containerName(personal, "asg-1")}: its owner's volume sccache is scoped per project, and a personal runner mounts no volume scoped per project: its jobs run without it, and a project's own pool is how to get one`,
-    ],
+    ["asg-1", "asg-2"].map(
+      (job) =>
+        `${containerName(personal, job)}: its owner's volume sccache is scoped per project, and this job's assignment names no project: it runs without it`,
+    ),
   );
 });
 

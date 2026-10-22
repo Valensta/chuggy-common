@@ -143,7 +143,26 @@ test("no two projects share a project label or digest, whatever their names hold
   }
 });
 
-test("a personal runner serves no one project, so it has no project label or digest", () => {
+test("a project's digest is the one the volumes already made for it are named by", () => {
+  assert.equal(poolProjectDigest(shame), "4c98dbae06cb18f9a603");
+});
+
+test("a pool's job is in its pool's project, whatever its assignment names", () => {
+  assert.equal(poolProjectLabelValue(shame, "other"), "vteng/chuggy");
+  assert.equal(poolProjectDigest(shame, "other"), poolProjectDigest(shame));
+});
+
+test("a personal runner's job is in the project its assignment names, in its tenant, keyed as a pool's job there is, and in none where it names none", () => {
+  assert.equal(poolProjectLabelValue(geoff, "chuggy"), "vteng/chuggy");
+  assert.equal(poolProjectDigest(geoff, "chuggy"), poolProjectDigest(shame));
+  assert.notEqual(
+    poolProjectDigest(geoff, "other"),
+    poolProjectDigest(geoff, "chuggy"),
+  );
+  assert.notEqual(
+    poolProjectDigest({ ...geoff, tenant: "newtenant" }, "chuggy"),
+    poolProjectDigest(geoff, "chuggy"),
+  );
   assert.equal(poolProjectLabelValue(geoff), undefined);
   assert.equal(poolProjectDigest(geoff), undefined);
 });
