@@ -54,17 +54,28 @@ test("where creating a file is slow, no server judges a lock before it names its
     judged.push(pid);
     return fileLockHolderAlive(pid);
   };
+  let waitedOnHolder;
+  const contended = new Promise((resolve) => {
+    waitedOnHolder = resolve;
+  });
   let holding = 0;
   let overlapped = false;
   await Promise.all(
     Array.from({ length: 2 }, () =>
       localTokenStore(path, {
         holderAlive,
-        wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms / 20)),
+        wait: (ms) => {
+          if (judged.length > 0) waitedOnHolder();
+          return new Promise((resolve) => setTimeout(resolve, ms / 20));
+        },
       }).locked(async () => {
         holding += 1;
         overlapped ||= holding > 1;
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        // Held until the other has judged it and waited, so the two contend.
+        await Promise.race([
+          contended,
+          new Promise((resolve) => setTimeout(resolve, 10_000).unref()),
+        ]);
         holding -= 1;
       }),
     ),
