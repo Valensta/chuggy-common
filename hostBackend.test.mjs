@@ -376,7 +376,7 @@ test("a job is told the kind of its host's Claude credential, and only where the
   );
 });
 
-test("a job past its deadline is killed and named so", async (t) => {
+test("a job past its deadline is killed and named timed out", async (t) => {
   const { backend } = await harness(t, "sleep");
   await backend.place(assignment({ deadlineSecs: 1 }), "Job");
   await backend.settled();
@@ -386,6 +386,7 @@ test("a job past its deadline is killed and named so", async (t) => {
       kind: "Job",
       job: { assignment: "asg-1", callbackUrl, bearer },
       why: "the job ran past its deadline and was killed",
+      timedOut: true,
     },
   ]);
 });

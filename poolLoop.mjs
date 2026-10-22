@@ -62,6 +62,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {WorkerPoolAttempt} job
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
  * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job for its image's fault rather than ran it, `why` being the refusal's evidence
+ * @property {true} [timedOut] where the backend killed it at its deadline
  *
  * @typedef {object} WorkerPoolJobRefusal
  * @property {WorkerImageFault} fault what the job's image lacks

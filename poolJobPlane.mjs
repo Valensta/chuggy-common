@@ -21,7 +21,11 @@ import {
 } from "@chuggy/worker-contract/workerPlane";
 
 import { workerReportText } from "./checks.mjs";
-import { credentialScrub, workerErrorPath } from "./runEvidence.mjs";
+import {
+  credentialScrub,
+  runTimedOut,
+  workerErrorPath,
+} from "./runEvidence.mjs";
 import { workerPlaneHeaders } from "./transport.mjs";
 import { rosterLabel, routePath } from "./wire.mjs";
 
@@ -139,7 +143,8 @@ async function poolJobErrorLeft(settings, fetcher, ended, text) {
 
 /**
  * The error text first, since only a live attempt takes it: the end is what
- * matters, and is asked for either way.
+ * matters, and is asked for either way. A job its backend killed at its
+ * deadline ends timed out, and any other failed.
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
@@ -158,7 +163,9 @@ async function poolJobPlaneEnded(settings, fetcher, ended) {
         {
           method: workerPlaneRoutes.runEnded.method,
           contentType: "application/json",
-          body: JSON.stringify({ evidence: runFailed }),
+          body: JSON.stringify({
+            evidence: ended.timedOut === true ? runTimedOut : runFailed,
+          }),
         },
       ),
     );

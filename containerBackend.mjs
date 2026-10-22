@@ -233,6 +233,7 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {string} why in this backend's words, which a job's end carries
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
  * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
+ * @property {true} [timedOut] where `held` killed it at its deadline, which a job's end carries
  *
  * @typedef {object} State
  * @property {ContainerBackendSettings} settings
@@ -700,6 +701,7 @@ function containerEnded(container) {
 const deadlineEnd = {
   why: "its container passed its deadline and was killed",
   succeeded: false,
+  timedOut: true,
 };
 
 /**
@@ -717,9 +719,13 @@ function workloadEnd(kind, attempt, end) {
       session: attempt,
       phase: end.succeeded ? "Succeeded" : "Failed",
     };
-  return end.refusal === undefined
-    ? { kind, job: attempt, why: end.why }
-    : { kind, job: attempt, why: end.why, refusal: end.refusal };
+  return {
+    kind,
+    job: attempt,
+    why: end.why,
+    ...(end.refusal === undefined ? {} : { refusal: end.refusal }),
+    ...(end.timedOut === true ? { timedOut: true } : {}),
+  };
 }
 
 /**

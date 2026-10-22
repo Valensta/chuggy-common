@@ -743,7 +743,7 @@ test("a name another assignment holds is a placement that failed", async (t) => 
   );
 });
 
-test("a running container past its deadline is killed, its logs saved, and removed", async (t) => {
+test("a running container past its deadline is killed, its logs saved, removed, and its end named timed out", async (t) => {
   const { backend, state, clock, settings } = await harness(t);
   const name = seeded(state, "asg-late", "running", startMs / 1000 + 10);
   clock.nowMs += 10_000;
@@ -765,6 +765,7 @@ test("a running container past its deadline is killed, its logs saved, and remov
       kind: "Job",
       job: seededAttempt("asg-late"),
       why: "its container passed its deadline and was killed",
+      timedOut: true,
     },
   ]);
 });
