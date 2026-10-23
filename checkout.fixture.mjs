@@ -56,9 +56,17 @@ export async function headOf(directory) {
 /**
  * What a record of one program's environment names: the image's value of a
  * variable `check.sh` moves aside, the name `check.sh` keeps that value under,
- * and the task document.
+ * the task document, and `setupPassedVariable`.
  */
-const recordedNames = ["NODE_PATH", "CHUG_IMAGE_NODE_PATH", "CHUG_WORKER_TASK"];
+const recordedNames = [
+  "NODE_PATH",
+  "CHUG_IMAGE_NODE_PATH",
+  "CHUG_WORKER_TASK",
+  "SUITE_PASSED",
+];
+
+/** A variable a project's setup may pass on, which the image's own programs are never handed. */
+export const setupPassedVariable = recordedNames[3];
 
 /** What a pod whose image set `NODE_PATH` holds once `check.sh` has run. */
 const podHolding = {
@@ -67,12 +75,18 @@ const podHolding = {
 };
 
 /** A record's names as the image's own programs are handed them. */
-export const handedAsTheImage = ["/the/image/node_modules", "unset", "unset"];
+export const handedAsTheImage = [
+  "/the/image/node_modules",
+  "unset",
+  "unset",
+  "unset",
+];
 
 /** A shell line appending `label` and the value of each recorded name to `log`. */
 function recordsHanded(label, log) {
   const fields = recordedNames.map((name) => `"\${${name}-unset}"`).join(" ");
-  return `printf '%s\\t%s\\t%s\\t%s\\n' ${label} ${fields} >> '${log}'`;
+  const format = Array.from({ length: recordedNames.length + 1 }, () => "%s");
+  return `printf '${format.join("\\t")}\\n' ${label} ${fields} >> '${log}'`;
 }
 
 /**

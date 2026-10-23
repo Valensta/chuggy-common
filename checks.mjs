@@ -38,6 +38,12 @@
  * pins, and its stage as a configuration's keys spell it. Every attempt knows
  * each of them, so each is always set, and one the pod inherited is dropped.
  *
+ * THOSE SHELLS ARE HANDED WHAT THE JOB'S SETUP LINES PASSED ON
+ * (`setupEnvironment.mjs`), over what the image set and under every variable
+ * chuggy sets itself. A setup line is told the file it passes variables on in
+ * under `workerSetupEnvironmentVariable`, and one the pod inherited is dropped,
+ * so no other shell finds it set.
+ *
  * THOSE SHELLS ARE HANDED THE ATTEMPT'S GIT CONFIGURATION, through the
  * variables git reads entries from after every file it reads, appended to any
  * the pod holds. The pod's own entries are named again beside the attempt's,
@@ -45,13 +51,15 @@
  * drops any name holding `KEY`, would leave git a count whose keys are gone,
  * which git refuses. Cargo is told to fetch a git dependency through git,
  * which reads those entries, rather than through libgit2, which does not; a
- * value the pod already holds for that variable is left to stand.
+ * value the pod or the job's setup already holds for that variable is left to
+ * stand.
  *
  * AN AGENT'S SHELL IS HANDED WHAT THOSE SHELLS ARE, so that a check the agent
  * runs is handed what the stage's would be. The agent is started from what
  * they inherit, and its shell is handed the moved values, the attempt's own
  * change base, which job it is in and its git configuration by the agent's own
- * means, beside what the agent itself was given to run with.
+ * means, with what its setup passed on, beside what the agent itself was given
+ * to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -172,6 +180,9 @@ const checkTaskDocuments = [workerTaskVariable, sessionTaskVariable];
 /** The variable a stage's shells find the commit the change started from in. */
 export const workerChangeBaseVariable = "CHUG_CHANGE_BASE";
 
+/** The variable a setup line finds the file it passes variables on in named by. */
+export const workerSetupEnvironmentVariable = "CHUG_ENV";
+
 /** The variables a job's shells find which job they are in, by what each names. */
 export const workerJobVariables = {
   tenant: "CHUG_TENANT",
@@ -242,9 +253,9 @@ function workerUnkeptEnvironment(environment) {
 }
 
 /**
- * What the pod holds, less the documents that placed it and any change base or
- * job's identity it inherited. Everything else stands, the site's own
- * variables among it.
+ * What the pod holds, less the documents that placed it and any change base,
+ * setup file or job's identity it inherited. Everything else stands, the
+ * site's own variables among it.
  */
 export function workerInheritedEnvironment(environment) {
   return Object.fromEntries(
@@ -252,6 +263,7 @@ export function workerInheritedEnvironment(environment) {
       ([name]) =>
         !checkTaskDocuments.includes(name) &&
         name !== workerChangeBaseVariable &&
+        name !== workerSetupEnvironmentVariable &&
         !checkJobVariableNames.includes(name),
     ),
   );
@@ -311,6 +323,14 @@ function workerGitEntryVariables(index) {
   ];
 }
 
+/** Whether `name` is one of the variables git reads configuration entries from. */
+export function workerGitVariable(name) {
+  return (
+    name === workerGitCountVariable ||
+    /^GIT_CONFIG_(?:KEY|VALUE)_[0-9]+$/u.test(name)
+  );
+}
+
 /** How many configuration entries `environment` hands git, refused where git would refuse it. */
 function workerGitCount(environment) {
   const count = environment[workerGitCountVariable] ?? "";
@@ -355,19 +375,21 @@ export function workerGitEnvironment(environment, git) {
 /**
  * What a stage's shells are handed beyond that, which an agent's shell is
  * handed by the agent's own means: each variable `check.sh` moved aside, back
- * under its own name; `handed.changeBase` where the attempt knows one;
+ * under its own name; `handed.setupEnvironment`, what the job's setup lines
+ * passed on, over those; `handed.changeBase` where the attempt knows one;
  * `handed.job`, what `workerJobEnvironment` tells a job's shells; and
  * `handed.git`, the entries the attempt's git configuration adds.
  */
 export function workerShellEnvironment(environment, handed = {}) {
-  const { changeBase, job = {}, git = [] } = handed;
+  const { setupEnvironment = {}, changeBase, job = {}, git = [] } = handed;
   return {
     ...workerImageEnvironment(environment),
+    ...setupEnvironment,
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
     ...job,
-    ...workerGitEnvironment(environment, git),
+    ...workerGitEnvironment({ ...environment, ...setupEnvironment }, git),
   };
 }
 
@@ -507,9 +529,9 @@ function checkReport(commands, ran, scrub) {
  * Runs one check stage: every command in order, stopping at the first that does
  * not exit cleanly, and reporting each command's own status through the
  * caller's credential scrub. `context` names the directory the commands run in,
- * the commit the change started from where the attempt knows it, what a job's
- * shells are told of which job they are in, and the attempt's git
- * configuration where it has one.
+ * what the job's setup lines passed on, the commit the change started from
+ * where the attempt knows it, what a job's shells are told of which job they
+ * are in, and the attempt's git configuration where it has one.
  */
 export async function runChecks(context, commands, services = {}) {
   if (commands.length === 0)
@@ -520,6 +542,7 @@ export async function runChecks(context, commands, services = {}) {
     scrub = checkNoScrub,
   } = services;
   const environment = workerStageEnvironment(process.env, {
+    setupEnvironment: context.setupEnvironment,
     changeBase: context.changeBase,
     job: context.job,
     git: context.git,

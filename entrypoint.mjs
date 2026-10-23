@@ -92,6 +92,7 @@ import {
   workerEnvironmentWithout,
   workerJobEnvironment,
   workerReportText,
+  workerSetupEnvironmentVariable,
   workerShellEnvironment,
   workerStageEnvironment,
   workerSummaryText,
@@ -122,6 +123,12 @@ import {
   runStep,
   workerErrorPath,
 } from "./runEvidence.mjs";
+import {
+  setupEnvironmentDirectory,
+  setupEnvironmentFile,
+  setupEnvironmentMerged,
+  setupEnvironmentWritten,
+} from "./setupEnvironment.mjs";
 import { runConfigurationSnapshot } from "./snapshot.mjs";
 import { commitAndPushSource, resultDocument } from "./source.mjs";
 import {
@@ -305,11 +312,55 @@ function setupFailureLine(setup, failure) {
 }
 
 /**
- * The files and the setup lines a worker block asks for, in the workspace it
- * runs in, its lines handed what the attempt hands the stage's commands. A
- * file that cannot be written, or a line that fails, fails the setup step.
+ * Each of `lines` run in order in `directory`, handed what the attempt hands
+ * the stage's commands, what the lines before it passed on, and a file of its
+ * own to pass variables on in; what they all passed on, once the last has run.
+ * A line that fails, or passes on what setup may not, fails the setup step.
  */
-export async function prepareWorker(task, directory, handed) {
+async function prepareWorkerSetup(lines, directory, handed) {
+  if (lines.length === 0) return {};
+  const files = await setupEnvironmentDirectory();
+  try {
+    let passed = {};
+    for (const [index, setup] of lines.entries()) {
+      const file = await runStep(runSetupFailed, () =>
+        setupEnvironmentFile(files, index),
+      );
+      await runStep(
+        runSetupFailed,
+        () =>
+          command("/bin/sh", ["-eu", "-c", setup], {
+            cwd: directory,
+            env: {
+              ...workerStageEnvironment(process.env, {
+                ...handed,
+                setupEnvironment: passed,
+              }),
+              [workerSetupEnvironmentVariable]: file,
+            },
+          }),
+        (failure) => setupFailureLine(setup, failure),
+      );
+      passed = await runStep(
+        runSetupFailed,
+        async () =>
+          setupEnvironmentMerged(passed, await setupEnvironmentWritten(file)),
+        () => `${setup} passed on what setup may not`,
+      );
+    }
+    return passed;
+  } finally {
+    await rm(files, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The files and the setup lines a worker block asks for, in the workspace it
+ * runs in, its lines handed what the attempt hands the stage's commands; what
+ * those lines passed on. A file that cannot be written, or a line that fails
+ * or passes on what setup may not, fails the setup step.
+ */
+export async function prepareWorker(task, directory, handed = {}) {
   const provisioned = [];
   for (const file of task.worker?.files ?? []) {
     const target = await runStep(runSetupFailed, async () => {
@@ -321,17 +372,11 @@ export async function prepareWorker(task, directory, handed) {
     provisioned.push(relative(directory, target));
   }
   await excludedFromWork(directory, provisioned);
-  for (const setup of task.worker?.setup ?? []) {
-    await runStep(
-      runSetupFailed,
-      () =>
-        command("/bin/sh", ["-eu", "-c", setup], {
-          cwd: directory,
-          env: workerStageEnvironment(process.env, handed),
-        }),
-      (failure) => setupFailureLine(setup, failure),
-    );
-  }
+  const setupEnvironment = await prepareWorkerSetup(
+    task.worker?.setup ?? [],
+    directory,
+    handed,
+  );
   const { stdout: status } = await command(
     "git",
     ["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
@@ -344,6 +389,7 @@ export async function prepareWorker(task, directory, handed) {
       .filter((entry) => entry.startsWith("?? "))
       .map((entry) => entry.slice(3)),
   );
+  return setupEnvironment;
 }
 
 async function captureConfiguration(context, argv, init) {
@@ -433,6 +479,7 @@ async function runAgent(context) {
   const task = ticketImagesBriefed(context.task, await agentImages(context));
   const shell = await context.agent.prepareShell(
     workerShellEnvironment(process.env, {
+      setupEnvironment: context.setupEnvironment,
       changeBase: context.changeBase,
       job: context.job,
       git: context.git,
@@ -773,6 +820,7 @@ export async function runWorkerTask(context, commands) {
   const run = await runChecks(
     {
       directory: context.directory,
+      setupEnvironment: context.setupEnvironment,
       changeBase: context.changeBase,
       job: context.job,
       git: context.git,
@@ -995,8 +1043,8 @@ function workerProjectReads({
 
 /**
  * What one attempt does in the workspace it cloned, every git it runs handed
- * `git` and every shell told which job it is in: its setup, its run, and what
- * that run leaves behind.
+ * `git` and every shell told which job it is in: its setup, its run, handed
+ * what that setup passed on, and what that run leaves behind.
  */
 async function workerAttemptWorked(attempt, workspace, git) {
   const { task, bearer, evidence, scrub } = attempt;
@@ -1005,13 +1053,18 @@ async function workerAttemptWorked(attempt, workspace, git) {
     job: workerJobEnvironment(task, workspace.repositoryId),
     git,
   };
-  await prepareWorker(task, workspace.directory, handed);
+  const setupEnvironment = await prepareWorker(
+    task,
+    workspace.directory,
+    handed,
+  );
   const run = await runWorkerTask(
     {
       task,
       bearer,
       directory: workspace.directory,
       ...handed,
+      setupEnvironment,
       images: workspace.images,
       agentEnvironment: attempt.agentEnvironment,
       agentWithheld: attempt.agentWithheld,

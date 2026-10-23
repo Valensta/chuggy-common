@@ -41,6 +41,7 @@ import {
   inCheckout,
   recordingGit,
   remoteRefs,
+  setupPassedVariable,
 } from "./checkout.fixture.mjs";
 import {
   workerAgentEnvironment,
@@ -49,6 +50,7 @@ import {
   workerEnvironmentWithout,
   workerImageVariable,
   workerJobVariables,
+  workerSetupEnvironmentVariable,
   workerSummaryCharsMax,
 } from "./checks.mjs";
 import {
@@ -837,6 +839,79 @@ test("a setup line sees the pod's environment but not the task document", async 
   }
 });
 
+/** How a setup line names the file it passes variables on in. */
+const setupFile = `"$${workerSetupEnvironmentVariable}"`;
+
+/**
+ * Catches what a setup line writes to its file not reaching the lines after
+ * it, or reaching them as written rather than as the later value; a line
+ * handed a file an earlier line wrote to; and the files left behind.
+ */
+test("a setup line passes on what it writes to its file to the lines after it", async () => {
+  await inCheckout(async ({ directory }) => {
+    const files = join(directory, "files");
+    const recordsFile = `printf "%s\\n" ${setupFile} >> '${files}'`;
+
+    const passed = await prepareWorker(
+      {
+        worker: {
+          setup: [
+            `printf 'FIRST=one\\nLINES<<EOF\\ntwo\\nlines\\nEOF\\n' >> ${setupFile}; ${recordsFile}`,
+            `echo FIRST=again >> ${setupFile}; ${recordsFile}`,
+            `printf "%s|%s|%s" "$FIRST" "$LINES" "$(wc -c < ${setupFile} | tr -d ' ')" > seen; ${recordsFile}`,
+          ],
+        },
+      },
+      directory,
+    );
+
+    assert.deepEqual(passed, { FIRST: "again", LINES: "two\nlines" });
+    assert.equal(
+      await readFile(join(directory, "seen"), "utf8"),
+      "again|two\nlines|0",
+    );
+    const handed = (await readFile(files, "utf8")).trim().split("\n");
+    assert.equal(new Set(handed).size, 3);
+    for (const file of handed)
+      await assert.rejects(stat(file), { code: "ENOENT" }, file);
+  });
+});
+
+/**
+ * Catches a line passing on a name of chuggy's ending the run as anything but
+ * the setup step, carrying on to the lines after it, or printing the value it
+ * set, which nothing scrubs; and its file left behind.
+ */
+test("a setup line that passes on a name of chuggy's fails the setup step, naming the line and the name and never the value", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-setup-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const temporary = await mkdtemp(join(tmpdir(), "chuggy-temporary-"));
+  t.after(() => rm(temporary, { recursive: true, force: true }));
+  podHolds(t, { TMPDIR: temporary });
+  const setup = `printf '${workerJobVariables.stage}=%s%s\\n' hid den >> ${setupFile}`;
+
+  const failed = await prepareWorker(
+    { worker: { setup: ["true", setup, "touch after"] } },
+    directory,
+  ).catch((failure) => failure);
+
+  assert.ok(failed instanceof RunStepFailure);
+  assert.equal(failed.evidence, runSetupFailed);
+  assert.equal(
+    failed.message.split("\n")[0],
+    `${setup} passed on what setup may not`,
+  );
+  assert.match(
+    failed.message,
+    new RegExp(`sets ${workerJobVariables.stage}, which is chuggy's`, "u"),
+  );
+  assert.ok(!failed.message.includes("hidden"));
+  await assert.rejects(readFile(join(directory, "after")), {
+    code: "ENOENT",
+  });
+  assert.deepEqual(await readdir(temporary), []);
+});
+
 /**
  * Catches a failing setup line ending the run as anything but the setup step,
  * or named by anything but the line itself: its text leads with the line and
@@ -985,10 +1060,16 @@ const printsChangeBase = `printf "%s" "\${${workerChangeBaseVariable}-unset}"`;
  * One commanded attempt at `answered` run whole in a real checkout, over a
  * plane answering its input as the repository, the checkout's own commit, and
  * whatever `references` names given that commit; and what `prints` printed in
- * its setup line and in its command, which then fails, so nothing is pushed.
- * The pod holds a base of its own throughout, which no run may pass on.
+ * its setup line, run after the lines `setUpFirst`, and in its command, which
+ * then fails, so nothing is pushed. The pod holds a base of its own
+ * throughout, which no run may pass on.
  */
-async function attemptPrinted(answered, prints, references = () => []) {
+async function attemptPrinted(
+  answered,
+  prints,
+  references = () => [],
+  setUpFirst = [],
+) {
   let printed;
   let setUp;
   process.env[workerChangeBaseVariable] = "f".repeat(40);
@@ -1006,7 +1087,7 @@ async function attemptPrinted(answered, prints, references = () => []) {
                     type: "Commands",
                     commands: [`${prints} > told; false`],
                   },
-                  setup: [`${prints} > set-up`],
+                  setup: [...setUpFirst, `${prints} > set-up`],
                   files: [],
                 },
               }),
@@ -1137,6 +1218,22 @@ test("a job's setup lines and commands are told which job they are in", async (t
       printsJob,
     ),
     told("Evaluation:2"),
+  );
+});
+
+/**
+ * Catches what a job's setup passed on not reaching its commands, and the
+ * file a setup line passes variables on in reaching them, where a command
+ * writing to it would be writing to what nothing reads.
+ */
+test("what a job's setup passes on reaches its commands, and its setup file does not", async () => {
+  const prints = `printf "%s|%s" "\${PASSED-unset}" "\${${workerSetupEnvironmentVariable}:+set}"`;
+
+  assert.deepEqual(
+    await attemptPrinted(workAnswered, prints, () => [], [
+      `echo PASSED=on >> ${setupFile}`,
+    ]),
+    { printed: "on|", setUp: "on|set" },
   );
 });
 
@@ -1797,6 +1894,39 @@ test("an agent's shell is handed no change base where the attempt knows none", a
 
   assert.equal(preparedWith.length, 1);
   assert.ok(!Object.hasOwn(preparedWith[0], workerChangeBaseVariable));
+});
+
+/**
+ * Catches what the job's setup passed on not reaching the agent's shell, or
+ * losing there to the image's value it replaces; and reaching the agent's own
+ * process, which is chuggy's runtime and not the project's shell.
+ */
+test("an agent's shell is handed what the job's setup passed on, and the agent's own process is not", async (t) => {
+  podHolds(t, { [workerImageVariable("NODE_PATH")]: "/image/node_modules" });
+  const preparedWith = [];
+  const ended = `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s %s"}}\\n' "\${PASSED-dropped}" "\${NODE_PATH-dropped}"`;
+
+  const run = await runWorkerTask({
+    task,
+    directory: process.cwd(),
+    setupEnvironment: { PASSED: "on", NODE_PATH: "/setup/node_modules" },
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: async (handed) => {
+        preparedWith.push(handed);
+        return { environment: {}, arguments: [] };
+      },
+      invocation: () => ["-c", ended],
+    },
+  });
+
+  assert.equal(run.result.summary, "dropped dropped");
+  assert.deepEqual(preparedWith, [
+    { NODE_PATH: "/setup/node_modules", PASSED: "on" },
+  ]);
 });
 
 /**
@@ -2821,10 +2951,11 @@ test("an agent whose runner names its kind is started on that credential alone, 
 });
 
 /**
- * A plane serving one commanded work attempt that passes, its setup line
- * installing `hooks` as the clone's hooks and its block provisioning a file,
- * and its input pinning `base` of `remote` as where it starts and where its
- * change started.
+ * A plane serving one commanded work attempt that passes, its setup lines
+ * installing `hooks` as the clone's hooks and then passing on
+ * `setupPassedVariable`, which its command passes only where it is handed,
+ * its block provisioning a file, and its input pinning `base` of `remote` as
+ * where it starts and where its change started.
  */
 function hookedPlane(remote, base, hooks) {
   return servedPlane((route) => {
@@ -2835,8 +2966,14 @@ function hookedPlane(remote, base, hooks) {
           body: workTaskAnswerSchema.parse({
             ...fetchedAnswer,
             worker: {
-              mode: { type: "Commands", commands: ["true"] },
-              setup: [`git config core.hooksPath '${hooks}'`],
+              mode: {
+                type: "Commands",
+                commands: [`[ "$${setupPassedVariable}" = on ]`],
+              },
+              setup: [
+                `git config core.hooksPath '${hooks}'`,
+                `echo ${setupPassedVariable}=on >> ${setupFile}`,
+              ],
               files: [{ path: ".provisioned", content: "set up\n" }],
             },
           }),
@@ -2867,10 +3004,11 @@ function hookedPlane(remote, base, hooks) {
  * A project's setup may install hooks, as husky does on `npm ci`, and an
  * image's git and those hooks may need a value `check.sh` moved aside. Catches
  * any git a work attempt runs itself, from its clone to its push, or a hook
- * one of them runs, handed the core's own environment: without that value, or
- * with the task document, which carries the attempt's bearer.
+ * one of them runs, handed the core's own environment: without that value,
+ * with what the project's setup passed on in its place, or with the task
+ * document, which carries the attempt's bearer.
  */
-test("a work attempt's git, from its clone to its push, and the hooks its setup installs are handed the image's environment and no task document", async (t) => {
+test("a work attempt's git, from its clone to its push, and the hooks its setup installs are handed the image's environment, nothing its setup passed on and no task document", async (t) => {
   await inCheckout(async ({ remote, directory, base }) => {
     await git("git", ["push", remote, `${base}:refs/heads/main`], {
       cwd: directory,

@@ -76,6 +76,7 @@
     "sessionStop.mjs",
     "sessionStore.mjs",
     "sessionTransport.mjs",
+    "setupEnvironment.mjs",
     "snapshot.mjs",
     "source.mjs",
     "ticketImages.mjs",

@@ -38,6 +38,8 @@ import {
   workerJobEnvironment,
   workerJobStage,
   workerJobVariables,
+  workerSetupEnvironmentVariable,
+  workerShellEnvironment,
   workerStageEnvironment,
   workerSummaryCharsMax,
   workerSummaryText,
@@ -635,6 +637,79 @@ test("what a pod's runtime inherits holds no job's identity", () => {
     }),
     { PATH: "/bin" },
   );
+});
+
+/**
+ * Catches a setup file the pod held reaching what is not a setup line: a
+ * command or an agent's shell writing to it would be writing to a file nothing
+ * reads, or to one a setup line of another job is handed.
+ */
+test("what a pod's runtime inherits holds no setup file", () => {
+  assert.deepEqual(
+    workerInheritedEnvironment({
+      PATH: "/bin",
+      [workerSetupEnvironmentVariable]: "/the/pod's",
+    }),
+    { PATH: "/bin" },
+  );
+});
+
+/**
+ * Catches what the job's setup passed on not reaching a stage's commands, or
+ * losing to the value the image or the pod set, which a setup line that puts a
+ * tool on `PATH` or tunes `NODE_OPTIONS` is there to replace.
+ */
+test("a stage's commands are handed what its setup passed on, over what the image and the pod set", async () => {
+  Object.assign(process.env, {
+    [workerImageVariable("NODE_OPTIONS")]: "the image's",
+    CHUG_SUITE_STANDING: "the pod's",
+  });
+  try {
+    const { output } = await runChecks(
+      {
+        ...workspace,
+        setupEnvironment: {
+          NODE_OPTIONS: "setup's",
+          CHUG_SUITE_STANDING: "setup's",
+          PASSED: "on",
+        },
+      },
+      ['printf "%s|%s|%s" "$NODE_OPTIONS" "$CHUG_SUITE_STANDING" "$PASSED"'],
+      { write: () => undefined },
+    );
+
+    assert.equal(output.checks[0].output, "setup's|setup's|on");
+  } finally {
+    delete process.env[workerImageVariable("NODE_OPTIONS")];
+    delete process.env.CHUG_SUITE_STANDING;
+  }
+});
+
+/**
+ * Catches a value setup passed on standing over one chuggy sets itself, which
+ * setup is refused before it could pass, and Cargo's fetch overridden where
+ * setup said how, as the pod's own say on it is not.
+ */
+test("what chuggy sets in a stage's shells stands over what setup passed on, and Cargo's fetch is setup's to say", () => {
+  const job = { [workerJobVariables.stage]: "Work" };
+  const shells = workerShellEnvironment(
+    { PATH: "/bin" },
+    {
+      setupEnvironment: {
+        [workerChangeBaseVariable]: "setup's",
+        [workerJobVariables.stage]: "setup's",
+        CARGO_NET_GIT_FETCH_WITH_CLI: "false",
+      },
+      changeBase: "a".repeat(40),
+      job,
+      git: attemptGit,
+    },
+  );
+
+  assert.equal(shells[workerChangeBaseVariable], "a".repeat(40));
+  assert.equal(shells[workerJobVariables.stage], "Work");
+  assert.equal(shells.GIT_CONFIG_COUNT, String(attemptGit.length));
+  assert.equal(shells.CARGO_NET_GIT_FETCH_WITH_CLI, "false");
 });
 
 test("each command runs in the workspace the stage was given", async () => {
