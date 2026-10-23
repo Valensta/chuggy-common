@@ -49,10 +49,18 @@ import {
 import { reservedJobVariables } from "./job.mjs";
 
 /**
- * The bytes one argument of a process may hold on Linux, its terminating NUL
- * among them: the kernel's `MAX_ARG_STRLEN`. The suite asks the kernel.
+ * The page `MAX_ARG_STRLEN` is taken at: the smallest Linux has, so the limit
+ * is the least any Linux kernel holds an argument to.
  */
-export const setupEnvironmentArgumentBytesMax = 131_072;
+export const setupEnvironmentArgumentPageBytes = 4096;
+
+/**
+ * The bytes one argument of a process may hold on Linux, its terminating NUL
+ * among them: the kernel's `MAX_ARG_STRLEN`, which is pages of it. The suite
+ * asks the kernel where the page is this one.
+ */
+export const setupEnvironmentArgumentBytesMax =
+  32 * setupEnvironmentArgumentPageBytes;
 
 /** What that argument leaves the variables chuggy hands Codex's shell itself and the image's, which setup's may not take. */
 const setupEnvironmentArgumentRoomBytes = 16_384;

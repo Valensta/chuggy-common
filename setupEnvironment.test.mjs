@@ -26,6 +26,7 @@ import { reservedJobVariables } from "./job.mjs";
 import { projectReadsConfiguration } from "./projectReads.mjs";
 import {
   setupEnvironmentArgumentBytesMax,
+  setupEnvironmentArgumentPageBytes,
   setupEnvironmentBytesMax,
   setupEnvironmentDirectory,
   setupEnvironmentFile,
@@ -266,9 +267,8 @@ function spawnedWith(argument) {
 /**
  * Catches a bound that lets what setup passes overflow the one argument Codex
  * is told its shell in, which would leave Codex unstarted with an error naming
- * nothing setup did: the heaviest set at the bound, beside a job's own, fits.
- * The kernel is asked where the limit the bound is taken from falls, and that
- * the heaviest argument is under it.
+ * nothing setup did: the heaviest set at the bound, beside a job's own, fits,
+ * and so does an argument one byte under the limit the bound is taken from.
  */
 test("the heaviest set setup may pass fits the one argument Codex is handed its shell in", () => {
   const [name, value] = heaviestVariable(setupEnvironmentBytesMax);
@@ -283,11 +283,30 @@ test("the heaviest set setup may pass fits the one argument Codex is handed its 
     spawnedWith("x".repeat(setupEnvironmentArgumentBytesMax - 1)).status,
     0,
   );
-  assert.equal(
-    spawnedWith("x".repeat(setupEnvironmentArgumentBytesMax)).error?.code,
-    "E2BIG",
-  );
 });
+
+/**
+ * Catches a limit taken as larger than the kernel's. Only Linux bounds one
+ * argument, at a size that grows with its page, so the kernel is asked only
+ * where the page is the one the limit is stated for.
+ */
+test(
+  "the kernel refuses an argument at the limit the bound is taken from",
+  {
+    skip:
+      (process.platform !== "linux" ||
+        spawnSync("getconf", ["PAGESIZE"], {
+          encoding: "utf8",
+        }).stdout.trim() !== String(setupEnvironmentArgumentPageBytes)) &&
+      "only Linux at that page bounds one argument there",
+  },
+  () => {
+    assert.equal(
+      spawnedWith("x".repeat(setupEnvironmentArgumentBytesMax)).error?.code,
+      "E2BIG",
+    );
+  },
+);
 
 /**
  * Catches a file read past the bound, which leaves one line able to fill the
