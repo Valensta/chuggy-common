@@ -1020,6 +1020,7 @@ const everyToolArgument = {
   session: "s-1",
   artifact: "image/png:a-1",
   expectedVersion: 1,
+  expectedRevision: 1,
   authoringVersion: 1,
   configurationRevision: "r-1",
   configurationDigest: "d-1",

@@ -11,6 +11,7 @@ import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane"
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
+  briefLineCharsMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -1411,6 +1412,41 @@ test("a draft write's expected version says it is the draft's authoringVersion, 
   }
 });
 
+/**
+ * A new draft's fence is the project's journal head, which moves under any
+ * command at all, so the parameter says where it is read, that a stale one is
+ * answered with the head to send again, and that a project which is not active
+ * refuses at every head: a session told only "stale" reads again for ever.
+ */
+test("a new draft's expected project sequence says it is the project head, and what a stale one and an inactive project answer", () => {
+  for (const name of ["create_draft", "file_dependent"]) {
+    const tool = chuggyProjectTools.find((held) => held.name === name);
+    const described = tool?.shape(z).expectedProjectSequence?.description ?? "";
+
+    for (const said of [
+      /`fence\.projectSequence` initialize_draft answered/,
+      /every command anywhere in the project moves/,
+      /\(DraftInitializationStale\) with the head it is at now as `currentProjectSequence`/,
+      /the same write may be sent again with/,
+      /\(ProjectNotActive\), naming its `lifecycle`/,
+    ])
+      assert.match(described, said, name);
+  }
+});
+
+/**
+ * A revision replaces the brief whole, so what read_draft answered and the
+ * session leaves out is cleared: the parameter names each field a session
+ * would not think to send back.
+ */
+test("a revision's brief says to send back the repository and the images read_draft answered", () => {
+  const tool = chuggyProjectTools.find((held) => held.name === "revise_draft");
+  assert.match(
+    tool?.shape(z).brief?.description ?? "",
+    /send back the `repository` and `images` read_draft answered or the revision clears them/,
+  );
+});
+
 test("a write names the media type only when it sends a body", async () => {
   const { api, call } = toolsOf();
 
@@ -1551,6 +1587,40 @@ test("revoking a ticket submits one operation naming that ticket and nothing els
   assert.ok(answer.isError === undefined);
 });
 
+test("updating a ticket submits one operation naming the ticket, the revision read and the draft's, and answers its id", async () => {
+  const accepted = JSON.stringify({ operation: "o", state: "Pending" });
+  const { api, call } = toolsOf({}, () => ({ status: 202, body: accepted }));
+
+  const answer = await call("update_ticket", {
+    ticket: 26,
+    expectedRevision: 3,
+    authoringVersion: 2,
+    configurationRevision: "r1",
+  });
+
+  assert.equal(api.calls.length, 1);
+  assert.equal(api.calls[0].method, "POST");
+  assert.equal(
+    api.calls[0].path,
+    "/api/v1/tenants/vteng/projects/chuggy/operations",
+  );
+  const body = JSON.parse(api.calls[0].init.body);
+  assert.deepEqual(Object.keys(body).sort(), ["mutation", "operation"]);
+  assert.deepEqual(body.mutation, {
+    mutation: "UpdateTicket",
+    ticket: 26,
+    expectedRevision: 3,
+    authoringVersion: 2,
+    configurationRevision: "r1",
+  });
+  assert.equal(
+    body.operation,
+    chuggyOperationIdentity("turn-1", body.mutation),
+  );
+  assert.equal(api.calls[0].init.headers["idempotency-key"], body.operation);
+  assert.equal(textOf(answer), `HTTP 202\n${accepted}`);
+});
+
 test("one call revokes one ticket: a list, a ticket that is no number and no ticket at all reach nothing", async () => {
   const { api, call } = toolsOf();
 
@@ -1621,8 +1691,14 @@ test("the configuration read says where the agent that does the work is named", 
  * default one. Every tool that takes a brief says it on its `brief` parameter.
  */
 const briefClaims = [
-  /`commandedCheckStage`, counted from zero/,
-  /`commandedCheckStageNote` \(the stage counted from one and, for a catalog, its plan, or that none does and which plans would\)/,
+  /\{title\?, intent, links, images\?, checks\?/,
+  /`images` are this project's images the work is handed, each by the identity fetch_image takes/,
+  new RegExp(
+    `each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it`,
+    "u",
+  ),
+  /`commandedCheckStage`, its program stage key, counted from one/,
+  /`commandedCheckStageNote` \(the same stage and, for a catalog, its plan, or that none does and which plans would\)/,
   /run only in a program that reaches that stage/,
   /where it answers none a draft carrying checks is refused/,
   /\(BriefChecksUncommanded\)/,
@@ -1634,6 +1710,7 @@ const briefClaims = [
   /`landing`, the mode and target it stored, and its `source`: Brief, Finalizer, Repository, or Default for a brief naming no repository/,
   /never the default branch/,
   /\(ProposalBaseIsHead\)/,
+  /A 400 names the rule the brief broke, and for a check its position in `checks`, counted from zero/,
 ];
 
 test("every tool that takes a brief says on its parameter what the server does with one", () => {
@@ -1684,7 +1761,7 @@ test("the descriptions say what the server does where a session reads it", () =>
       /run in that order/,
       /a failed stage ends evaluation/,
       /`choices\.programStagesMax`/,
-      /`commandedCheckStage` is the stage a brief's `checks` join, counted from zero/,
+      /`commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults\.program` keys are/,
       /`commandedCheckStageNote` says it in words/,
     ],
     read_ticket: [
@@ -1718,6 +1795,29 @@ test("the descriptions say what the server does where a session reads it", () =>
 
   for (const [tool, claims] of Object.entries(said))
     for (const claim of claims) assert.match(described(tool), claim, tool);
+});
+
+/**
+ * A revised draft changes nothing its Pending ticket runs until update_ticket
+ * releases it, so revise_draft says so, and update_ticket says whose word it
+ * takes, what it is fenced on and the refusals that fence answers.
+ */
+test("updating a ticket says whose word it takes and what refuses it, and a revision that it waits for one", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+
+  for (const claim of [
+    /on your owner's word only/,
+    /`expectedRevision` is the ticket's `revision` as read_ticket answers it/,
+    /\(TicketNotPending\)/,
+    /\(TicketRevisionStale\)/,
+    /same turn is the same operation/,
+  ])
+    assert.match(described("update_ticket"), claim);
+  assert.match(
+    described("revise_draft"),
+    /A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it/,
+  );
 });
 
 /**
@@ -2036,6 +2136,12 @@ const projectToolArguments = {
   },
   create_draft: origination,
   revoke_ticket: { ticket: 26 },
+  update_ticket: {
+    ticket: 26,
+    expectedRevision: 3,
+    authoringVersion: 2,
+    configurationRevision: "r1",
+  },
 };
 
 /**
@@ -2069,7 +2175,7 @@ test("every project tool reaches its own session's project and nothing outside i
   }
 });
 
-test("origination and revocation are registered for a thread's roster and for no lead's", () => {
+test("origination, revocation and updating are registered for a thread's roster and for no lead's", () => {
   const registered = (capabilities) =>
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
@@ -2081,8 +2187,9 @@ test("origination and revocation are registered for a thread's roster and for no
   assert.deepEqual(registered(["DraftOriginate"]), [
     "create_draft",
     "revoke_ticket",
+    "update_ticket",
   ]);
-  for (const tool of ["create_draft", "revoke_ticket"]) {
+  for (const tool of ["create_draft", "revoke_ticket", "update_ticket"]) {
     assert.ok(registered([...threadRoster]).includes(tool), tool);
     assert.ok(
       !registered([...leadRoster]).includes(tool),
