@@ -88,8 +88,9 @@
  * a session is opened with is the provisioning root's, not this image's, so
  * what is true here is the mapping: a roster without `DraftOriginate` cannot
  * reach the tool, and the derived-work rule is that mapping rather than a
- * sentence in a description. `revoke_ticket` is under that capability too,
- * which is what keeps it from a roster that does not hold it.
+ * sentence in a description. `revoke_ticket` and `update_ticket` are under
+ * that capability too, which is what keeps them from a roster that does not
+ * hold it.
  * `Prerequisite` is admitted by the schema only so its refusal can name the
  * reason — a released ticket's dependencies are immutable in chuggy's
  * `model/domain.qnt`, which names re-authoring machinery as deliberately absent.
@@ -111,6 +112,7 @@ import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
   allDependentRelations,
+  briefLineCharsMax,
   builtInToolCapabilities,
   chuggyToolCapabilities,
   chuggyToolImageResponseBytesMax,
@@ -147,7 +149,7 @@ const chuggySelectionDescription = `\`selection\` is for a configuration that is
  * describes the `brief` parameter rather than each tool, since it is longer
  * than the part of a tool's description Claude Code passes an agent.
  */
-const chuggyBriefDescription = `\`brief\` is {title?, intent, links, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`checks\` are command lines added to the first Check stage the configuration runs as commands, which initialize_draft answers as \`commandedCheckStage\`, counted from zero, and in words as \`commandedCheckStageNote\` (the stage counted from one and, for a catalog, its plan, or that none does and which plans would), so they run only in a program that reaches that stage, and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke.`;
+const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`images\` are this project's images the work is handed, each by the identity fetch_image takes; \`checks\` are command lines added to the first Check stage the configuration runs as commands, each one line of 1 to ${String(briefLineCharsMax)} characters with no tab or line break in it, and initialize_draft answers that stage as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would), so they run only in a program that reaches that stage, and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
 
 /** What the same call made again within one turn answers, which is that operation as it now stands. */
 export const chuggySubmissionRepeatDescription = `The same call again in the same turn is the same operation, answered as it now stands: a \`state\` other than Pending is the outcome it already settled on, not a new attempt.`;
@@ -155,11 +157,14 @@ export const chuggySubmissionRepeatDescription = `The same call again in the sam
 /** What a submitted command answers: the operation, and what the same call made again answers. */
 const chuggySubmissionDescription = `Answers the operation's id and its \`state\`; read_operation answers what it did, a refusal's \`code\` included. ${chuggySubmissionRepeatDescription}`;
 
+/** What a new draft is fenced on, which is the project's head and not any one ticket's. */
+const chuggyExpectedProjectSequenceDescription = `The \`fence.projectSequence\` initialize_draft answered: the project's journal head, which every command anywhere in the project moves. A stale one is refused (DraftInitializationStale) with the head it is at now as \`currentProjectSequence\`, which the same write may be sent again with; a project that is not active refuses the write at any head (ProjectNotActive), naming its \`lifecycle\`.`;
+
 /** What a draft write is fenced on, which is a field of the draft and not of its ticket. */
 const chuggyExpectedVersionDescription = `The draft's \`authoringVersion\`, as read_draft answers it or as the write that last changed the draft did; a new draft is at 1. A stale one is refused with the draft's \`currentVersion\`.`;
 
 /** What a refusal ledger holds, which is what an empty one is read against. */
-const chuggyRefusalLedgerDescription = `A refusal ledger holds the lead's refusals to dispatch a released ticket and their lifts, and nothing else, so it is empty until the lead refuses one. A refused command is never in it: read_operation answers a refused release or revocation, and a refused draft write is answered by that write itself.`;
+const chuggyRefusalLedgerDescription = `A refusal ledger holds the lead's refusals to dispatch a released ticket and their lifts, and nothing else, so it is empty until the lead refuses one. A refused command is never in it: read_operation answers a refused release, revocation or update, and a refused draft write is answered by that write itself.`;
 
 /**
  * How many times the entry the runtime mirrors carries one answer's text. The
@@ -867,7 +872,7 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, counted from zero and absent where none takes them, and `commandedCheckStageNote` says it in words: the stage counted from one and, for a catalog, the plan and the stage's name, or that none does and which plans would.",
+      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would.",
     shape: (z) => ({
       revision: identity(z),
       work: identity(z).optional(),
@@ -889,7 +894,9 @@ export const chuggyProjectTools = [
       relation: z.enum(allDependentRelations),
       configurationRevision: identity(z),
       configurationDigest: identity(z),
-      expectedProjectSequence: count(z),
+      expectedProjectSequence: count(z).describe(
+        chuggyExpectedProjectSequenceDescription,
+      ),
       authoring: anyObject(z),
       brief: anyObject(z).describe(chuggyBriefDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
@@ -919,7 +926,7 @@ export const chuggyProjectTools = [
   {
     name: "revise_draft",
     description:
-      "Replaces one open draft's authoring, brief and selection, fenced on `expectedVersion`.",
+      "Replaces one open draft's authoring, brief and selection, fenced on `expectedVersion`. A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it.",
     shape: (z) => ({
       ticket: ticket(z),
       expectedVersion: authoringVersion(z).describe(
@@ -928,7 +935,7 @@ export const chuggyProjectTools = [
       configurationRevision: identity(z),
       authoring: anyObject(z),
       brief: anyObject(z).describe(
-        `${chuggyBriefDescription} It is replaced whole, so send back the \`repository\` read_draft answered or the revision clears it.`,
+        `${chuggyBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
       ),
       selection: anyObject(z)
         .optional()
@@ -989,7 +996,9 @@ export const chuggyProjectTools = [
     shape: (z) => ({
       configurationRevision: identity(z),
       configurationDigest: identity(z),
-      expectedProjectSequence: count(z),
+      expectedProjectSequence: count(z).describe(
+        chuggyExpectedProjectSequenceDescription,
+      ),
       authoring: anyObject(z),
       brief: anyObject(z).describe(chuggyBriefDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
@@ -1010,6 +1019,24 @@ export const chuggyProjectTools = [
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       submit(context, { mutation: "RevokeTicket", ticket: args.ticket }),
+  },
+  {
+    name: "update_ticket",
+    description: `Submits the update of one Pending ticket to its draft as revise_draft last left it, on your owner's word only. \`expectedRevision\` is the ticket's \`revision\` as read_ticket answers it, and \`authoringVersion\` and \`configurationRevision\` are the draft's as read_draft or that revision answers them. A ticket no longer Pending is refused (TicketNotPending), and one whose revision moved since it was read is refused (TicketRevisionStale), so read_ticket it again. ${chuggySubmissionDescription}`,
+    shape: (z) => ({
+      ticket: ticket(z),
+      expectedRevision: ticket(z),
+      authoringVersion: count(z),
+      configurationRevision: identity(z),
+    }),
+    call: (context, args) =>
+      submit(context, {
+        mutation: "UpdateTicket",
+        ticket: args.ticket,
+        expectedRevision: args.expectedRevision,
+        authoringVersion: args.authoringVersion,
+        configurationRevision: args.configurationRevision,
+      }),
   },
 ];
 

@@ -1104,6 +1104,7 @@ test("a thread is served origination, revocation and the thread reads, and no de
   for (const tool of [
     "create_draft",
     "revoke_ticket",
+    "update_ticket",
     "list_threads",
     "read_thread",
     "read_thread_transcript",
@@ -1144,7 +1145,7 @@ test("a lead is served neither origination nor revocation, and each is disallowe
   const registered = seen.options.mcpServers.chuggy.tools.map(
     ({ name }) => name,
   );
-  for (const tool of ["create_draft", "revoke_ticket"]) {
+  for (const tool of ["create_draft", "revoke_ticket", "update_ticket"]) {
     assert.ok(!registered.includes(tool), `a lead was served ${tool}`);
     assert.ok(
       seen.options.disallowedTools.includes(`${chuggyToolPrefix}${tool}`),

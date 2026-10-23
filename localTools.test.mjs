@@ -160,7 +160,11 @@ test("a submitted command is described as a new operation each call, and every o
       assert.ok(config.description.includes(localToolRepeatDescription));
     } else assert.equal(config.description, pod.description);
   }
-  assert.deepEqual(submissions.sort(), ["release_draft", "revoke_ticket"]);
+  assert.deepEqual(submissions.sort(), [
+    "release_draft",
+    "revoke_ticket",
+    "update_ticket",
+  ]);
 });
 
 test("the end of the agent's input closes the server", async () => {
