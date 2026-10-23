@@ -1694,7 +1694,7 @@ const briefClaims = [
   /\{title\?, intent, links, images\?, checks\?/,
   /`images` are this project's images the work is handed, each by the identity fetch_image takes/,
   new RegExp(
-    `each one line of 1 to ${String(briefLineCharsMax)} characters with no tab or line break in it`,
+    `each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it`,
     "u",
   ),
   /`commandedCheckStage`, its program stage key, counted from one/,
