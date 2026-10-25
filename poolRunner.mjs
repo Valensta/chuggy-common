@@ -65,13 +65,15 @@ export function poolRunnerTokens(credentials) {
 /**
  * @param {PoolCredentials} credentials
  * @param {RunnerIdentity} [runner] the runner's package and version, which each poll names
+ * @param {readonly string[]} [capabilities] the runner's capabilities, which each poll names; none, and the set its registration recorded stands
  * @returns {WorkerPoolClient["plane"]}
  */
-export function poolRunnerPlane(credentials, runner) {
+export function poolRunnerPlane(credentials, runner, capabilities) {
   return poolPlaneClient({
     baseUrl: credentials.planeUrl,
     ...planeSettings,
     ...(runner === undefined ? {} : { runner }),
+    ...(capabilities === undefined ? {} : { capabilities }),
   });
 }
 
@@ -81,13 +83,13 @@ export function poolRunnerPlane(credentials, runner) {
  * @param {PoolCredentials} credentials
  * @param {WorkerPoolBackend} backend
  * @param {PoolRunnerLimits} limits
- * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, runner?: RunnerIdentity}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by when not the global one, and the runner each poll names
+ * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[]}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by when not the global one, and the runner and the capabilities each poll names
  * @returns {WorkerPoolClient}
  */
 export function poolRunnerClient(credentials, backend, limits, seams = {}) {
   return {
     tokens: seams.tokens ?? poolRunnerTokens(credentials),
-    plane: poolRunnerPlane(credentials, seams.runner),
+    plane: poolRunnerPlane(credentials, seams.runner, seams.capabilities),
     jobs: poolJobPlaneClient(jobPlaneSettings, seams.fetch),
     sessions: poolSessionPlaneClient(sessionPlaneSettings, seams.fetch),
     backend,
