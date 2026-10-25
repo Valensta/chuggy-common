@@ -53,6 +53,25 @@ function failing(status) {
   return new globalThis.Response("{}", { status });
 }
 
+/** A refusal as Hydra words one. */
+function refusal(status, error) {
+  return new globalThis.Response(
+    JSON.stringify({
+      error,
+      error_description: "Client authentication failed.",
+    }),
+    { status, headers: { "content-type": "application/json;charset=UTF-8" } },
+  );
+}
+
+/** What traefik answers in place of a service with no endpoint ready. */
+function proxyNotFound() {
+  return new globalThis.Response("404 page not found\n", {
+    status: 404,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
 /** An issuer recording each grant request and answering the attempt's number with `response`. */
 function mintingTransport(minted, response) {
   return async (input, init) => {
@@ -208,10 +227,7 @@ test("a refused mint is not held and the next caller mints again", async () => {
     credentials({
       fetch: mintingTransport(minted, (attempt) =>
         attempt === 1
-          ? new globalThis.Response("{}", {
-              status: 401,
-              headers: { "content-length": "2" },
-            })
+          ? refusal(401, "invalid_client")
           : grantResponse("recovered", 900),
       ),
       monotonicMs: () => elapsedMs,
@@ -528,11 +544,61 @@ test("a failed attempt still waits the whole configured cooldown", async () => {
   assert.equal(failed.minted.length, 2);
 });
 
+test("a proxy's plain-text 404 from the token URL is an outage", async () => {
+  assert.deepEqual(
+    await poolClientTokens(
+      credentials({ fetch: async () => proxyNotFound() }),
+    ).acquire(),
+    {
+      acquired: "Unavailable",
+      evidence: "client credentials grant returned 404",
+    },
+  );
+});
+
+test("Hydra's 401 invalid_client is a denial naming its code", async () => {
+  assert.deepEqual(
+    await poolClientTokens(
+      credentials({ fetch: async () => refusal(401, "invalid_client") }),
+    ).acquire(),
+    {
+      acquired: "Denied",
+      evidence: "client credentials grant returned 401 invalid_client",
+    },
+  );
+});
+
 test("a grant the issuer refused is a denial and everything else is an outage, neither naming the secret", async () => {
+  const oversized = JSON.stringify({
+    error: "invalid_client",
+    error_description: "x".repeat(10_000),
+  });
   for (const [answer, expected] of [
-    [async () => failing(400), "Denied"],
-    [async () => failing(401), "Denied"],
-    [async () => failing(403), "Denied"],
+    ...[
+      "invalid_request",
+      "invalid_client",
+      "invalid_grant",
+      "unauthorized_client",
+      "unsupported_grant_type",
+      "invalid_scope",
+    ].map((code) => [async () => refusal(400, code), "Denied"]),
+    [async () => refusal(403, "invalid_client"), "Unavailable"],
+    [async () => refusal(404, "invalid_client"), "Unavailable"],
+    [async () => refusal(401, "server_error"), "Unavailable"],
+    [async () => refusal(400, "temporarily_unavailable"), "Unavailable"],
+    [async () => failing(400), "Unavailable"],
+    [async () => failing(401), "Unavailable"],
+    [
+      async () =>
+        new globalThis.Response(JSON.stringify("invalid_client"), {
+          status: 401,
+        }),
+      "Unavailable",
+    ],
+    [
+      async () => new globalThis.Response(oversized, { status: 401 }),
+      "Unavailable",
+    ],
     [async () => failing(500), "Unavailable"],
     [async () => failing(503), "Unavailable"],
     [
@@ -639,4 +705,50 @@ test("a plane that refuses every token costs one grant per cooldown, not one per
   issuer.advance(5_000);
   await workerPoolClientPass(running);
   assert.equal(issuer.minted.length, 2);
+});
+
+test("a run backs off through a proxy's 404 in front of the issuer and of the plane, and ends on the issuer refusing its client", async () => {
+  const minted = [];
+  const issued = [
+    proxyNotFound,
+    () => grantResponse("token-1", 900),
+    () => refusal(401, "invalid_client"),
+  ];
+  let nowEpochMs = 1_000_000;
+  let elapsedMs = 0;
+  const config = credentials({
+    refreshMarginMs: 60_000,
+    mintCooldownMs: 5_000,
+    fetch: mintingTransport(minted, (attempt) => issued[attempt - 1]()),
+    currentTimeEpochMs: () => nowEpochMs,
+    monotonicMs: () => elapsedMs,
+  });
+  const polled = [];
+  const plane = poolPlaneClient(
+    {
+      baseUrl: "https://pool-plane.invalid",
+      pollTimeoutMs: 1_000,
+      settleTimeoutMs: 1_000,
+    },
+    async (input) => {
+      polled.push(String(input));
+      return proxyNotFound();
+    },
+  );
+  let slept = 0;
+  const passed = await workerPoolClientRun(
+    pool({ config }, plane, 10),
+    async () => {
+      slept += 1;
+      nowEpochMs += 841_000;
+      elapsedMs += 841_000;
+    },
+  );
+  assert.deepEqual(passed, {
+    passed: "Denied",
+    evidence: "client credentials grant returned 401 invalid_client",
+  });
+  assert.equal(slept, 2);
+  assert.equal(minted.length, 3);
+  assert.equal(polled.length, 1);
 });

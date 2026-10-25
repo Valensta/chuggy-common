@@ -56,6 +56,29 @@ const clientCredentialsGrantSchema = z.object({
 });
 
 /**
+ * The codes RFC 6749 §5.2 refuses a grant with. Each is the issuer's word on
+ * this client's credential, its registration or the request this client sends,
+ * so the same credential presented again is refused again; any other code is
+ * read as an outage.
+ */
+const clientCredentialsRefusalCodes = /** @type {const} */ ([
+  "invalid_request",
+  "invalid_client",
+  "invalid_grant",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_scope",
+]);
+
+/** The statuses RFC 6749 §5.2 refuses a grant with: 401 for a client that failed authentication, 400 for the rest. */
+const clientCredentialsRefusalStatuses = new Set([400, 401]);
+
+/** RFC 6749 lets a refusal carry more than its code, and a client ignores the rest. */
+const clientCredentialsRefusalSchema = z.object({
+  error: z.enum(clientCredentialsRefusalCodes),
+});
+
+/**
  * @param {ClientCredentialsConfig} config
  * @returns {ClientCredentialsConfig}
  */
@@ -116,11 +139,54 @@ function clientCredentialsHoldMs(lifetimeMs, refreshMarginMs) {
  * not change; an issuer that could not be reached is an ordinary `Error`.
  */
 export class ClientCredentialsRefused extends Error {
-  /** @param {number} status */
-  constructor(status) {
-    super(`client credentials grant returned ${String(status)}`);
+  /**
+   * @param {number} status
+   * @param {string} code
+   */
+  constructor(status, code) {
+    super(`client credentials grant returned ${String(status)} ${code}`);
     this.name = "ClientCredentialsRefused";
     this.status = status;
+  }
+}
+
+/**
+ * An answer's body as JSON, read under the configured bounds.
+ *
+ * @param {ClientCredentialsConfig} config
+ * @param {Response} response
+ * @returns {Promise<unknown>}
+ */
+async function clientCredentialsAnswer(config, response) {
+  const bytes = await boundedResponseBytes(
+    response,
+    config.responseBytesMax,
+    config.responseReadsMax,
+  );
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+
+/**
+ * The code a failed grant was refused with, or nothing where the answer is no
+ * refusal: a proxy in front of an issuer it cannot reach answers a status of
+ * its own, never one.
+ *
+ * @param {ClientCredentialsConfig} config
+ * @param {Response} response
+ * @returns {Promise<string | undefined>}
+ */
+async function clientCredentialsRefusalCode(config, response) {
+  if (!clientCredentialsRefusalStatuses.has(response.status)) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  try {
+    const refusal = clientCredentialsRefusalSchema.safeParse(
+      await clientCredentialsAnswer(config, response),
+    );
+    return refusal.success ? refusal.data.error : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -149,20 +215,15 @@ async function clientCredentialsMinted(config, transport, atEpochMs) {
     signal: globalThis.AbortSignal.timeout(config.requestTimeoutMs),
   });
   if (response.status !== 200) {
-    await response.body?.cancel();
-    throw response.status >= 400 && response.status < 500
-      ? new ClientCredentialsRefused(response.status)
-      : new Error(
+    const code = await clientCredentialsRefusalCode(config, response);
+    throw code === undefined
+      ? new Error(
           `client credentials grant returned ${String(response.status)}`,
-        );
+        )
+      : new ClientCredentialsRefused(response.status, code);
   }
-  const bytes = await boundedResponseBytes(
-    response,
-    config.responseBytesMax,
-    config.responseReadsMax,
-  );
   const grant = clientCredentialsGrantSchema.parse(
-    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+    await clientCredentialsAnswer(config, response),
   );
   if (grant.token_type.toLowerCase() !== clientCredentialsTokenType)
     throw new Error("client credentials grant is not a bearer token");
