@@ -104,13 +104,19 @@ const inspectedImagesSchema = z.array(
   }),
 );
 
-/** A cleanup that holds, records and removes nothing, for a backend given no record. */
+/**
+ * A cleanup that holds, records and removes nothing, for a backend given no
+ * record, whose reclaim begins at once unless its signal aborted.
+ */
 export const imageCleanupNone = /** @type {ImageCleanup} */ ({
   held: async () => undefined,
   used: async () => undefined,
   pulledId: async () => undefined,
   due: () => undefined,
-  reclaimed: async () => [],
+  reclaimed: async (signal, made) => {
+    if (!signal.aborted) made?.begun?.();
+    return [];
+  },
   settled: async () => undefined,
 });
 

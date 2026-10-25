@@ -3460,6 +3460,31 @@ test("a backend given no measurement, or a floor of 0, keeps none and takes jobs
     );
 });
 
+test("a backend given a floor and no record of its images still kills a job under half of it", async (t) => {
+  const { backend, state } = await harness(
+    t,
+    { diskFreeBytesMin: 20 * gib },
+    {
+      diskFree: async () => ({ free: 5 * gib, where: "/var/lib/docker" }),
+      sleep: (_ms, signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    },
+  );
+  runningJob(state, "asg-1", 0);
+  assert.deepEqual(await backend.held(), []);
+  assert.deepEqual(
+    state.calls
+      .filter((call) => call.argv[0] === "kill")
+      .map((call) => call.argv),
+    [["kill", "id-asg-1"]],
+  );
+  assert.equal(backend.jobsTaken(), false);
+});
+
 test("a disk under its floor has a reclaim remove what it may, oldest first, until it is over, and says each way once", async (t) => {
   const context = await floorHarness(t);
   const { backend, state, log, disk } = context;
