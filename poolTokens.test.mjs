@@ -6,6 +6,7 @@ import { URL, URLSearchParams } from "node:url";
 
 import { workerPoolClientPass, workerPoolClientRun } from "./poolLoop.mjs";
 import { poolPlaneClient } from "./poolPlane.mjs";
+import { poolRunnerLoop } from "./poolRunner.mjs";
 import {
   clientCredentialsMonotonicMs,
   clientCredentialsTokenSource,
@@ -28,6 +29,7 @@ function credentials(overrides = {}) {
     responseReadsMax: 100,
     refreshMarginMs: 1_000,
     mintCooldownMs: 500,
+    refusalConfirmMs: 60_000,
     ...overrides,
   };
 }
@@ -356,6 +358,7 @@ test("a bound that is not a positive safe integer is refused", () => {
     ["responseReadsMax", "response read bound"],
     ["refreshMarginMs", "refresh margin"],
     ["mintCooldownMs", "mint cooldown"],
+    ["refusalConfirmMs", "refusal confirmation"],
   ])
     for (const refused of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2])
       assert.throws(
@@ -556,19 +559,20 @@ test("a proxy's plain-text 404 from the token URL is an outage", async () => {
   );
 });
 
-test("Hydra's 401 invalid_client is a denial naming its code", async () => {
+test("Hydra's 401 invalid_client is an outage while it is confirmed, naming its code", async () => {
   assert.deepEqual(
     await poolClientTokens(
       credentials({ fetch: async () => refusal(401, "invalid_client") }),
     ).acquire(),
     {
-      acquired: "Denied",
-      evidence: "client credentials grant returned 401 invalid_client",
+      acquired: "Unavailable",
+      evidence:
+        "client credentials grant returned 401 invalid_client, a refusal being confirmed: 0s of 60s",
     },
   );
 });
 
-test("a grant the issuer refused is a denial and everything else is an outage, neither naming the secret", async () => {
+test("a grant the issuer refused is a denial, one a failed lookup also gives is confirmed first, and everything else is an outage, neither naming the secret", async () => {
   const oversized = JSON.stringify({
     error: "invalid_client",
     error_description: "x".repeat(10_000),
@@ -576,12 +580,12 @@ test("a grant the issuer refused is a denial and everything else is an outage, n
   for (const [answer, expected] of [
     ...[
       "invalid_request",
-      "invalid_client",
       "invalid_grant",
       "unauthorized_client",
       "unsupported_grant_type",
       "invalid_scope",
     ].map((code) => [async () => refusal(400, code), "Denied"]),
+    [async () => refusal(400, "invalid_client"), "Unavailable"],
     [async () => refusal(403, "invalid_client"), "Unavailable"],
     [async () => refusal(404, "invalid_client"), "Unavailable"],
     [async () => refusal(401, "server_error"), "Unavailable"],
@@ -661,7 +665,9 @@ function planeAnswering(status, presented = []) {
     async (_input, init) => {
       presented.push(init.headers.authorization);
       return new globalThis.Response(
-        status === 200 ? JSON.stringify({ assignments: [], stop: [] }) : "{}",
+        status === 200
+          ? JSON.stringify({ assignments: [], sessions: [], stop: [] })
+          : "{}",
         { status },
       );
     },
@@ -707,22 +713,36 @@ test("a plane that refuses every token costs one grant per cooldown, not one per
   assert.equal(issuer.minted.length, 2);
 });
 
-test("a run backs off through a proxy's 404 in front of the issuer and of the plane, and ends on the issuer refusing its client", async () => {
+/**
+ * A pool over an issuer answering each grant from `issued` in turn, the last
+ * from then on, and a plane answering every poll empty, on clocks that move
+ * only by what `sleep` moves them.
+ *
+ * @param {Array<() => Response>} issued
+ */
+function issuedPool(issued, plane = planeAnswering(200)) {
   const minted = [];
-  const issued = [
-    proxyNotFound,
-    () => grantResponse("token-1", 900),
-    () => refusal(401, "invalid_client"),
-  ];
-  let nowEpochMs = 1_000_000;
-  let elapsedMs = 0;
+  const clock = { nowEpochMs: 1_000_000, elapsedMs: 0 };
   const config = credentials({
     refreshMarginMs: 60_000,
     mintCooldownMs: 5_000,
-    fetch: mintingTransport(minted, (attempt) => issued[attempt - 1]()),
-    currentTimeEpochMs: () => nowEpochMs,
-    monotonicMs: () => elapsedMs,
+    fetch: mintingTransport(minted, (attempt) =>
+      issued[Math.min(attempt, issued.length) - 1](),
+    ),
+    currentTimeEpochMs: () => clock.nowEpochMs,
+    monotonicMs: () => clock.elapsedMs,
   });
+  return {
+    minted,
+    running: pool({ config }, plane, 10),
+    sleep: (milliseconds) => async () => {
+      clock.nowEpochMs += milliseconds;
+      clock.elapsedMs += milliseconds;
+    },
+  };
+}
+
+test("a run backs off through a proxy's 404 in front of the issuer and of the plane, and ends on the issuer refusing its client", async () => {
   const polled = [];
   const plane = poolPlaneClient(
     {
@@ -735,20 +755,87 @@ test("a run backs off through a proxy's 404 in front of the issuer and of the pl
       return proxyNotFound();
     },
   );
-  let slept = 0;
-  const passed = await workerPoolClientRun(
-    pool({ config }, plane, 10),
-    async () => {
-      slept += 1;
-      nowEpochMs += 841_000;
-      elapsedMs += 841_000;
-    },
+  const issuer = issuedPool(
+    [
+      proxyNotFound,
+      () => grantResponse("token-1", 900),
+      () => refusal(401, "invalid_client"),
+    ],
+    plane,
   );
+  let slept = 0;
+  const passed = await workerPoolClientRun(issuer.running, async () => {
+    slept += 1;
+    await issuer.sleep(841_000)();
+  });
   assert.deepEqual(passed, {
     passed: "Denied",
     evidence: "client credentials grant returned 401 invalid_client",
   });
-  assert.equal(slept, 2);
-  assert.equal(minted.length, 3);
+  assert.equal(slept, 3);
+  assert.equal(issuer.minted.length, 4);
   assert.equal(polled.length, 1);
+});
+
+test("an invalid_client the issuer gives once and then grants past keeps the run going", async () => {
+  const issuer = issuedPool([
+    () => refusal(401, "invalid_client"),
+    () => grantResponse("token-1", 900),
+  ]);
+  const passed = await workerPoolClientRun(issuer.running, issuer.sleep(5_000));
+  assert.equal(passed.passed, "Reconciled");
+  assert.equal(issuer.minted.length, 2);
+});
+
+/**
+ * Each grant is a pass and a back-off apart. The refusal is confirmed by the
+ * first grant at least the interval after the first refused, and by no
+ * earlier one.
+ */
+test("an invalid_client the issuer gives every grant across the interval ends the run, logged as being confirmed until then", async () => {
+  const issuer = issuedPool([() => refusal(401, "invalid_client")]);
+  const log = [];
+  const passed = await poolRunnerLoop(issuer.running, {
+    sleep: issuer.sleep(30_000),
+    log: (line) => log.push(line),
+  });
+  assert.deepEqual(passed, {
+    passed: "Denied",
+    evidence: "client credentials grant returned 401 invalid_client",
+  });
+  assert.deepEqual(log, [
+    "outage: client credentials grant returned 401 invalid_client, a refusal being confirmed: 0s of 60s",
+    "outage: client credentials grant returned 401 invalid_client, a refusal being confirmed: 30s of 60s",
+    "the plane denied this pool: client credentials grant returned 401 invalid_client",
+  ]);
+  assert.equal(issuer.minted.length, 3);
+});
+
+/**
+ * Each pass is longer apart than the interval, so a refusal carried across
+ * the answer between would be final at the third pass rather than the fourth.
+ */
+test("a refusal any other answer breaks is confirmed afresh from the next", async () => {
+  for (const [broken, between] of [
+    [() => grantResponse("token-1", 61), "Reconciled"],
+    [proxyNotFound, "Unavailable"],
+    [() => refusal(400, "invalid_client"), "Unavailable"],
+  ]) {
+    const issuer = issuedPool([
+      () => refusal(401, "invalid_client"),
+      broken,
+      () => refusal(401, "invalid_client"),
+    ]);
+    const passes = [];
+    for (let pass = 0; pass < 4; pass += 1) {
+      passes.push((await workerPoolClientPass(issuer.running)).passed);
+      await issuer.sleep(70_000)();
+    }
+    assert.deepEqual(
+      passes,
+      ["Unavailable", between, "Unavailable", "Denied"],
+      String(broken),
+    );
+    assert.equal(issuer.minted.length, 4);
+  }
 });
