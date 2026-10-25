@@ -164,22 +164,30 @@ function refusalBody(schema) {
   return refusalBodies(schema).at(-1);
 }
 
-/** The response one status of one route is, refused where the route's map does not name it. */
-function answered(plane, route, status, body) {
+/**
+ * The response one status of one route is, refused where the route's map does
+ * not name it, naming `release` as a plane names its own on every answer, or
+ * no release where it is `null`.
+ */
+function answered(plane, route, status, body, release) {
   const schema = plane.answers[route][status];
   if (schema === undefined)
     throw violated(`${route} never answers ${String(status)}`);
+  const named =
+    release === null
+      ? {}
+      : { [workerContractHeader]: release ?? workerContractRelease };
   if (schema === "empty") {
     if (body !== undefined)
       throw violated(`${route} answers ${String(status)} with no body`);
-    return new globalThis.Response(null, { status });
+    return new globalThis.Response(null, { status, headers: named });
   }
   if (schema === "bytes") {
     if (!(body instanceof Uint8Array))
       throw violated(`${route} answers ${String(status)} with bytes`);
     return new globalThis.Response(body, {
       status,
-      headers: { "content-type": workerPlaneBytesMediaType },
+      headers: { ...named, "content-type": workerPlaneBytesMediaType },
     });
   }
   const sent = body ?? refusalBody(schema);
@@ -187,13 +195,14 @@ function answered(plane, route, status, body) {
     throw violated(`${route} never answers ${String(status)} with that body`);
   return new globalThis.Response(JSON.stringify(sent), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { ...named, "content-type": "application/json" },
   });
 }
 
 /**
  * A `fetch` for one wire. `answer(route, asked, signal)` names the status and,
- * for a status whose body is not a refusal, the body; `signal` is the
+ * for a status whose body is not a refusal, the body, and may name the
+ * release the plane answers under, this pod's where none; `signal` is the
  * request's own, for an answer that is held until its asker lets go.
  */
 export function planeFetch(plane, answer) {
@@ -210,8 +219,12 @@ export function planeFetch(plane, answer) {
       const body = offeredBody(plane, route, init);
       const request = { route, path: `${pathname}${search}`, method, body };
       asked.push(request);
-      const { status, body: sent } = await answer(route, request, init.signal);
-      return answered(plane, route, status, sent);
+      const {
+        status,
+        body: sent,
+        release: answeredUnder,
+      } = await answer(route, request, init.signal);
+      return answered(plane, route, status, sent, answeredUnder);
     },
   };
 }

@@ -4,13 +4,15 @@
  * the room left, stops what it is told to and places what it is offered.
  * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
  * TypeScript, and a change to one is a change to both, but for a runner's
- * update of itself, which that cluster client never makes.
+ * update of itself, which that cluster client never makes, and a backend
+ * that takes no job while its disk is low, which a cluster leaves to its
+ * kubelet.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
  * room nor a job a session's, a pool that names no session ceiling asks for
- * none, and one whose job ceiling is 0 asks for no job. Each kind's end is
- * reported to its own plane.
+ * none, and one whose job ceiling is 0, or whose backend takes no job, asks
+ * for no job. Each kind's end is reported to its own plane.
  *
  * A JOB THE BACKEND REFUSED AFTER TAKING IT IS SETTLED REFUSED, not ended: its
  * text is left on its attempt, which only a live attempt takes, and its
@@ -63,7 +65,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {WorkerPoolAttempt} job
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
  * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job for its image's fault rather than ran it, `why` being the refusal's evidence
- * @property {true} [timedOut] where the backend killed it at its deadline
+ * @property {"Deadline" | "DiskLow"} [killed] where the backend killed it: at its deadline, or for its machine's low disk
  *
  * @typedef {object} WorkerPoolJobRefusal
  * @property {WorkerImageFault} fault what the job's image lacks
@@ -81,6 +83,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent, whichever kind it is
  * @property {() => Promise<readonly WorkerPoolHeld[]>} held every workload of either kind, each with the kind it was placed as
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
+ * @property {() => boolean} [jobsTaken] whether it takes a job now, as its last `held` found; false while its machine's disk is low, and true for a backend without it
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
  *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease}
@@ -392,20 +395,21 @@ function workerPoolClientOutcome(placement) {
  * Places what there is room for of one kind and settles the rest as
  * `Unavailable`: the poll asked for no more than the room, so the rest is a
  * plane that offered past it. Room is the kind's ceiling less what is running
- * of it and what this pass has placed of it, and none while the pool drains.
+ * of it and what this pass has placed of it, and none while the pool takes
+ * none of the kind.
  *
  * @param {WorkerPoolClient} client
  * @param {string} token
  * @param {readonly WorkerPoolAssignment[]} offered
  * @param {WorkerPoolWorkloadKind} kind
- * @param {{running: number, draining: boolean}} room
+ * @param {{running: number, taking: boolean}} room
  */
 async function workerPoolClientPlaced(client, token, offered, kind, room) {
   const tally = { placed: 0, refused: 0 };
   const { running } = room;
-  const ceiling = room.draining
-    ? 0
-    : workerPoolClientCeiling(client.settings, kind);
+  const ceiling = room.taking
+    ? workerPoolClientCeiling(client.settings, kind)
+    : 0;
   for (const assignment of offered) {
     const placement =
       running + tally.placed < ceiling
@@ -623,12 +627,13 @@ export async function workerPoolClientPass(client, updating) {
   const ended = await workerPoolClientEnded(client, minted.token);
   const restart = updating?.restart(held);
   if (restart !== undefined) return { passed: "Updated", version: restart };
-  const draining = updating?.draining() ?? false;
+  const sessionsTaken = !(updating?.draining() ?? false);
+  const jobsTaken = sessionsTaken && (client.backend.jobsTaken?.() ?? true);
   const polled = await client.plane.poll(
     minted.token,
     held.map(({ assignment }) => assignment),
-    draining ? 0 : workerPoolClientRoom(client.settings, held, "Job"),
-    draining ? 0 : workerPoolClientRoom(client.settings, held, "Session"),
+    jobsTaken ? workerPoolClientRoom(client.settings, held, "Job") : 0,
+    sessionsTaken ? workerPoolClientRoom(client.settings, held, "Session") : 0,
   );
   if (polled.polled === "Stale") {
     client.tokens.invalidate(minted.token);
@@ -643,7 +648,10 @@ export async function workerPoolClientPass(client, updating) {
     minted.token,
     polled.assignments,
     "Job",
-    { running: workerPoolClientRunning(held, "Job", polled.stop), draining },
+    {
+      running: workerPoolClientRunning(held, "Job", polled.stop),
+      taking: jobsTaken,
+    },
   );
   const sessions = await workerPoolClientPlaced(
     client,
@@ -652,7 +660,7 @@ export async function workerPoolClientPass(client, updating) {
     "Session",
     {
       running: workerPoolClientRunning(held, "Session", polled.stop),
-      draining,
+      taking: sessionsTaken,
     },
   );
   await updating?.named(polled.release);

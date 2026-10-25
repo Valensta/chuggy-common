@@ -384,6 +384,40 @@ test("a pool whose job ceiling is 0 asks for no job and places none it is offere
   ]);
 });
 
+test("a backend that takes no job is asked for none after its read and places none it is offered, while it takes sessions, and is asked again once it takes them", async () => {
+  const placer = placingKinds([]);
+  const offer = offeringKinds([assignment("job")], [sessionOffer("session")]);
+  const read = { taken: true };
+  const backend = {
+    ...placer.backend,
+    held: async () => {
+      read.taken = !read.taken;
+      return [];
+    },
+    jobsTaken: () => read.taken,
+  };
+  const pooled = client({
+    settings: { ...settings, sessionsMax: 1 },
+    backend,
+    plane: offer.plane,
+  });
+  await workerPoolClientPass(pooled);
+  await workerPoolClientPass(pooled);
+  assert.deepEqual(offer.rooms, [
+    { wanted: 0, wantedSessions: 1 },
+    { wanted: 1, wantedSessions: 1 },
+  ]);
+  assert.deepEqual(placer.placed, [
+    ["session", "Session"],
+    ["job", "Job"],
+    ["session", "Session"],
+  ]);
+  assert.deepEqual(offer.posted.slice(0, 2), [
+    ["job", "Unavailable"],
+    ["session", "Accepted"],
+  ]);
+});
+
 test("a pool that names no session ceiling asks for none and places none it is offered", async () => {
   const placer = placingKinds([]);
   const offer = offeringKinds([assignment("job")], [sessionOffer("session")]);

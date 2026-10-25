@@ -29,11 +29,13 @@ const ended = {
 
 /**
  * A job plane answering `ending` to the end and `left` to the error text,
- * recording each request as the contract reads it and the bearer it came under.
+ * that one under `release`, recording each request as the contract reads it
+ * and the bearer it came under.
  */
-function jobPlane(ending, left = 204) {
+function jobPlane(ending, left = 204, release = undefined) {
   const plane = planeFetch(planes.job, (route) => ({
     status: route === "runEnded" ? ending : left,
+    ...(route === "runEnded" ? {} : { release }),
   }));
   const authorized = [];
   return {
@@ -71,11 +73,47 @@ test("a workload its backend killed at its deadline is ended as a run that timed
   const answered = await poolJobPlaneClient(settings, plane.fetch).end({
     ...ended,
     why: "its container passed its deadline and was killed",
-    timedOut: true,
+    killed: "Deadline",
   });
 
   assert.equal(answered, "Ended");
   assert.deepEqual(plane.asked.at(-1)?.body, { evidence: "RunTimedOut" });
+});
+
+/** A job its backend killed for its machine's low disk. */
+const diskLow = {
+  ...ended,
+  why: "its container was killed because this runner's disk had 8.2 GiB free at /var/lib/docker, under half its floor of 20 GiB. Free space on this runner, then resume the ticket",
+  killed: "DiskLow",
+};
+
+test("a workload its backend killed for low disk is ended so where its error text was answered under a release that takes that, and as a failed run where under an older one or none", async () => {
+  for (const [release, evidence] of [
+    [undefined, "RunDiskLow"],
+    ["1.17.0", "RunDiskLow"],
+    ["1.18.2", "RunDiskLow"],
+    ["1.16.0", "RunFailed"],
+    ["2.0.0", "RunFailed"],
+    ["not a release", "RunFailed"],
+    [null, "RunFailed"],
+  ]) {
+    const plane = jobPlane(204, 204, release);
+    assert.equal(
+      await poolJobPlaneClient(settings, plane.fetch).end(diskLow),
+      "Ended",
+    );
+    assert.equal(
+      Buffer.from(plane.asked[0].body).toString("utf8"),
+      `Worker exited before reporting: ${diskLow.why}\n`,
+    );
+    assert.deepEqual(plane.asked.at(-1)?.body, { evidence }, String(release));
+  }
+  const plane = jobPlane(204);
+  await poolJobPlaneClient(settings, async (url, init) => {
+    if (init.method === "PUT") throw new TypeError("fetch failed");
+    return plane.fetch(url, init);
+  }).end(diskLow);
+  assert.deepEqual(plane.asked.at(-1)?.body, { evidence: "RunFailed" });
 });
 
 test("an attempt the plane will not end is refused, and one it could not be asked about is unavailable", async () => {
