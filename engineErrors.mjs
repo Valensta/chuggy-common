@@ -1,13 +1,14 @@
 /**
  * What an engine's failure was, read off its stderr in this one place. Docker
  * and podman word the same failures differently, and the suite holds each
- * class to the words both engines were seen to print.
+ * class to the words both engines were seen to print, or, where no run of an
+ * engine was seen, to the words its source prints.
  */
 
 /**
  * @typedef {import("./engine.mjs").EngineAnswer} EngineAnswer
  *
- * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "Unauthorized" | "NotFound" | "Other"} EngineFailure
+ * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "NotFound" | "Other"} EngineFailure
  */
 
 const engineFailures = /** @type {const} */ ([
@@ -18,6 +19,10 @@ const engineFailures = /** @type {const} */ ([
   ["NoSuchContainer", /no such container/iu],
   ["NoSuchVolume", /no such volume/iu],
   ["NameConflict", /is already in use/iu],
+  [
+    "ImageInUse",
+    /is using its referenced image|image is being used by (?:running|stopped) container|image is in use by a container/iu,
+  ],
   [
     "Unauthorized",
     /unauthorized|authentication required|no basic auth credentials/iu,

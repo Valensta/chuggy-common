@@ -6,6 +6,7 @@
  * reads as an unreachable engine.
  */
 
+import { Buffer } from "node:buffer";
 import { execFile, spawn } from "node:child_process";
 
 /**
@@ -19,13 +20,58 @@ import { execFile, spawn } from "node:child_process";
  * @property {Readonly<Record<string, string>>} [environment] added to this process's own
  * @property {AbortSignal} [signal] which replaces the call cap, for a call bounded by a deadline of its own
  *
+ * @typedef {EngineAnswer & {tail: Buffer, cut: boolean, lines: number}} EngineTail
+ * what a call printed on both streams, as it arrived: only its last bytes in
+ * `tail`, whether more came before them in `cut`, and how many lines it
+ * printed in all; the answer's `stderr` is the end of its own
+ *
  * @typedef {object} Engine
  * @property {(argv: readonly string[], call?: EngineCall) => Promise<EngineAnswer>} exec
- * @property {(argv: readonly string[], fd: number) => Promise<EngineAnswer>} execToFd both streams into `fd`, for output of any length
+ * @property {(argv: readonly string[], bytesMax: number) => Promise<EngineTail>} execTail both streams, for output of any length, of which the last `bytesMax` bytes are kept
  */
 
 /** Far above an inspection of every container one pool could hold. */
 const engineAnswerBytesMax = 16 * 1024 * 1024;
+
+/** Far above the line a failed call's stderr ends with. */
+const engineTailStderrBytesMax = 64 * 1024;
+
+/**
+ * The last `bytesMax` bytes of what is added to it, however much is.
+ *
+ * @param {number} bytesMax
+ */
+function tailKept(bytesMax) {
+  /** @type {Buffer[]} */
+  const chunks = [];
+  let length = 0;
+  let seen = 0;
+  let lines = 0;
+  return {
+    /** @param {Buffer} chunk */
+    add: (chunk) => {
+      chunks.push(chunk);
+      length += chunk.length;
+      seen += chunk.length;
+      for (
+        let at = chunk.indexOf(10);
+        at !== -1;
+        at = chunk.indexOf(10, at + 1)
+      )
+        lines += 1;
+      while (chunks.length > 1 && length - chunks[0].length >= bytesMax)
+        length -= /** @type {Buffer} */ (chunks.shift()).length;
+    },
+    done: () => {
+      const whole = Buffer.concat(chunks);
+      return {
+        tail: whole.subarray(Math.max(0, whole.length - bytesMax)),
+        cut: seen > bytesMax,
+        lines,
+      };
+    },
+  };
+}
 
 /**
  * @param {Error & {code?: unknown, killed?: boolean}} error
@@ -70,24 +116,38 @@ export function containerEngine(binary, callTimeoutMs) {
           },
         );
       }),
-    execToFd: (argv, fd) =>
+    execTail: (argv, bytesMax) =>
       new Promise((resolve) => {
+        const kept = tailKept(bytesMax);
+        const stderr = tailKept(engineTailStderrBytesMax);
         const child = spawn(binary, argv, {
-          stdio: ["ignore", fd, fd],
+          stdio: ["ignore", "pipe", "pipe"],
           timeout: callTimeoutMs,
         });
-        child.once("error", (error) => resolve(engineAnswered(error, "", "")));
+        child.stdout.on("data", kept.add);
+        child.stderr.on("data", (chunk) => {
+          kept.add(chunk);
+          stderr.add(chunk);
+        });
+        child.once("error", (error) =>
+          resolve({ ...engineAnswered(error, "", ""), ...kept.done() }),
+        );
         child.once("close", (code, signal) =>
-          resolve(
-            code === null
+          resolve({
+            ...(code === null
               ? {
                   code: -1,
                   stdout: "",
                   stderr: `stopped by ${String(signal)}`,
-                  failed: "Interrupted",
+                  failed: /** @type {const} */ ("Interrupted"),
                 }
-              : { code, stdout: "", stderr: "" },
-          ),
+              : {
+                  code,
+                  stdout: "",
+                  stderr: stderr.done().tail.toString("utf8"),
+                }),
+            ...kept.done(),
+          }),
         );
       }),
   };

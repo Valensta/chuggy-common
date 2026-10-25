@@ -4,9 +4,17 @@
  * suite decides how long one takes and how it ends, and so does a `run --rm`,
  * which is how chuggy's runtime is copied into a volume: its container holds
  * the volumes it mounts until then, and goes once it has answered.
+ *
+ * AN IMAGE IS EACH NAME OF IT IN `images`, by the id `imageIds` gives that
+ * name, or one of its own digest. An inspection lists a name with a digest
+ * among an image's `RepoDigests` and any other among its `RepoTags`, as docker
+ * 28 does, and a removal of the last name of an image a container was run
+ * from is refused in docker 28's words.
  */
 
-import { readFileSync, writeSync } from "node:fs";
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { dirname } from "node:path";
 
@@ -24,6 +32,7 @@ import { dirname } from "node:path";
  * @property {string[]} [volumes] each `--volume` it was run with
  * @property {string[]} [command] what it was run with after its image
  * @property {string} [entrypoint]
+ * @property {string} [log] what `logs` prints of it, which is a line naming it where none
  *
  * @typedef {object} FakeVolume
  * @property {Record<string, string>} labels
@@ -144,6 +153,27 @@ export function unstartedEntrypoint(entrypoint) {
   );
 }
 
+/**
+ * What `logs` prints of a container, from its last `--tail` lines, kept as
+ * `execTail` keeps it.
+ *
+ * @param {FakeContainer} container
+ * @param {string[]} argv
+ * @param {number} bytesMax
+ */
+function logTail(container, argv, bytesMax) {
+  const [tail] = flagValues(argv, "--tail");
+  const lines = (container.log ?? `the log of ${container.name}\n`)
+    .split(/(?<=\n)/u)
+    .slice(-Number(tail ?? Infinity));
+  const printed = Buffer.from(lines.join(""));
+  return {
+    tail: printed.subarray(Math.max(0, printed.length - bytesMax)),
+    cut: printed.length > bytesMax,
+    lines: lines.filter((line) => line.endsWith("\n")).length,
+  };
+}
+
 /** @param {AbortSignal | undefined} signal */
 function aborted(signal) {
   return new Promise((_resolve, reject) => {
@@ -159,7 +189,20 @@ function fakeEngineState() {
   const state = {
     /** @type {Map<string, FakeContainer>} */
     containers: new Map(),
+    /** @type {Set<string>} each name of every image */
     images: new Set(),
+    /**
+     * The id of the image a name names, where it is not one of its own.
+     *
+     * @type {Map<string, string>}
+     */
+    imageIds: new Map(),
+    /**
+     * When an image was built, by its id, where it is not the start of 2026.
+     *
+     * @type {Map<string, string>}
+     */
+    imageCreated: new Map(),
     networks: new Set(),
     /** @type {Map<string, FakeVolume>} */
     volumes: new Map(),
@@ -174,6 +217,13 @@ function fakeEngineState() {
     calls: [],
     unreachable: false,
     logsFail: false,
+    /**
+     * What a `logs` that fails prints on stderr, where not the words of a
+     * container that is not there.
+     *
+     * @type {string | undefined}
+     */
+    logsStderr: /** @type {string | undefined} */ (undefined),
     /** Whether a kill runs past the engine's cap, which the engine answers as interrupted. */
     killInterrupted: false,
     /** Whether a run runs past the engine's cap after its container started, which the engine answers as interrupted. */
@@ -487,6 +537,105 @@ function volumed(state, call) {
 }
 
 /**
+ * The id of the image a name names.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} name
+ */
+export function fakeImageId(state, name) {
+  return (
+    state.imageIds.get(name) ??
+    `sha256:${createHash("sha256").update(name).digest("hex")}`
+  );
+}
+
+/**
+ * The names of the image of this id.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} id
+ */
+function imageNames(state, id) {
+  return [...state.images].filter((name) => fakeImageId(state, name) === id);
+}
+
+/**
+ * An image's inspection, as docker 28 answers one without `--format`.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} id
+ */
+function imageInspected(state, id) {
+  const names = imageNames(state, id);
+  return {
+    Id: id,
+    RepoTags: names.filter((name) => !name.includes("@")),
+    RepoDigests: names.filter((name) => name.includes("@")),
+    Created: state.imageCreated.get(id) ?? "2026-01-01T00:00:00Z",
+  };
+}
+
+/**
+ * A removal of one name of an image, which docker refuses where it is the
+ * image's last and a container was run from the image.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} name
+ */
+function imageRemoved(state, name) {
+  if (!state.images.has(name))
+    return failed(`Error response from daemon: No such image: ${name}`);
+  const id = fakeImageId(state, name);
+  const user = [...state.containers.values()].find(
+    (container) => fakeImageId(state, container.image) === id,
+  );
+  if (user !== undefined && imageNames(state, id).length === 1)
+    return failed(
+      `Error response from daemon: conflict: unable to remove repository reference "${name}" (must force) - container ${user.id.slice(0, 12)} is using its referenced image ${id.replace("sha256:", "").slice(0, 12)}`,
+    );
+  state.images.delete(name);
+  return answered(
+    `Untagged: ${name}\n${imageNames(state, id).length === 0 ? `Deleted: ${id}\n` : ""}`,
+  );
+}
+
+/**
+ * `image inspect`, by `--format {{.Id}}` of one name or whole by ids, `image
+ * ls` and `image rm`.
+ *
+ * @param {FakeEngineState} state
+ * @param {FakeCall} call
+ */
+function imaged(state, call) {
+  const [, verb, ...rest] = call.argv;
+  if (verb === "ls")
+    return answered(
+      [...new Set([...state.images].map((name) => fakeImageId(state, name)))]
+        .map((id) => `${id}\n`)
+        .join(""),
+    );
+  if (verb === "rm") return imageRemoved(state, rest.at(-1) ?? "");
+  if (rest[0] === "--format") {
+    const name = rest.at(-1) ?? "";
+    return state.images.has(name)
+      ? answered(`${fakeImageId(state, name)}\n`)
+      : failed(`Error response from daemon: No such image: ${name}`);
+  }
+  const absent = rest.find((id) => imageNames(state, id).length === 0);
+  const stdout = `${JSON.stringify(
+    rest
+      .filter((id) => id !== absent && imageNames(state, id).length > 0)
+      .map((id) => imageInspected(state, id)),
+  )}\n`;
+  return absent === undefined
+    ? answered(stdout)
+    : {
+        ...failed(`Error response from daemon: No such image: ${absent}`),
+        stdout,
+      };
+}
+
+/**
  * @param {FakeEngineState} state
  * @param {FakeCall} call
  * @returns {EngineAnswer | Promise<EngineAnswer>}
@@ -497,10 +646,7 @@ function answer(state, call) {
   if (state.unreachable) return failed(unreachable);
   const intercepted = state.intercept(call);
   if (intercepted !== undefined) return intercepted;
-  if (verb === "image")
-    return state.images.has(last)
-      ? answered("sha256:1\n")
-      : failed(`Error response from daemon: No such image: ${last}`);
+  if (verb === "image") return imaged(state, call);
   if (verb === "pull") return pulled(state, call);
   if (verb === "version") return answered(`${state.podmanVersion}\n`);
   if (verb === "info" && call.argv[2] === "{{.Host.ServiceIsRemote}}")
@@ -552,14 +698,17 @@ export function fakeEngine() {
       engineCall.signal?.throwIfAborted();
       return Promise.race([answer(state, call), aborted(engineCall.signal)]);
     },
-    execToFd: async (argv, fd) => {
+    execTail: async (argv, bytesMax) => {
       state.calls.push({ argv: [...argv], environment: {} });
       const reference = argv.at(-1) ?? "";
       const container = found(state, reference);
-      if (state.unreachable) return failed(unreachable);
-      if (state.logsFail || container === undefined) return missing(reference);
-      writeSync(fd, `the log of ${container.name}\n`);
-      return answered();
+      const none = { tail: Buffer.alloc(0), cut: false, lines: 0 };
+      if (state.unreachable) return { ...failed(unreachable), ...none };
+      if (state.logsFail && state.logsStderr !== undefined)
+        return { ...failed(state.logsStderr), ...none };
+      if (state.logsFail || container === undefined)
+        return { ...missing(reference), ...none };
+      return { ...answered(), ...logTail(container, argv, bytesMax) };
     },
   };
   return { engine, state };

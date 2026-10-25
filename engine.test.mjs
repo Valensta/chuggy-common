@@ -3,9 +3,6 @@
  * the same `execFile` and `spawn` a container engine is run with.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, open, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 
 import { containerEngine } from "./engine.mjs";
@@ -82,21 +79,48 @@ test("a call with a signal of its own is not capped, and rejects when it aborts"
   await assert.rejects(aborted, { name: "AbortError" });
 });
 
-test("output of any length goes to a file descriptor, both streams", async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), "chuggy-engine-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const file = join(directory, "log");
-  const handle = await open(file, "w");
-  const answer = await node.execToFd(
+test("output of any length is kept to its last bytes, with whether more came and how many lines it had", async () => {
+  const answer = await node.execTail(
+    ["-e", "process.stdout.write('x\\n'.repeat(1 << 20))"],
+    1024,
+  );
+  assert.equal(answer.code, 0);
+  assert.equal(answer.tail.toString("utf8"), "x\n".repeat(512));
+  assert.equal(answer.cut, true);
+  assert.equal(answer.lines, 1 << 20);
+
+  const whole = await node.execTail(
+    ["-e", "process.stdout.write('a\\nb')"],
+    1024,
+  );
+  assert.deepEqual(
+    { tail: whole.tail.toString("utf8"), cut: whole.cut, lines: whole.lines },
+    { tail: "a\nb", cut: false, lines: 1 },
+  );
+});
+
+test("both streams are kept as they arrive, and stderr is answered as itself too", async () => {
+  const answer = await node.execTail(
     [
       "-e",
-      "process.stdout.write('x'.repeat(1 << 20)); process.stderr.write('end')",
+      "process.stderr.write('err\\n'); setTimeout(() => process.stdout.write('out\\n'), 100)",
     ],
-    handle.fd,
+    1024,
   );
-  await handle.close();
-  assert.deepEqual(answer, { code: 0, stdout: "", stderr: "" });
-  const text = await readFile(file, "utf8");
-  assert.equal(text.length, (1 << 20) + 3);
-  assert.ok(text.endsWith("end"));
+  assert.equal(answer.tail.toString("utf8"), "err\nout\n");
+  assert.equal(answer.stderr, "err\n");
+});
+
+test("a call kept to its tail that failed answers its status and the end of its stderr", async () => {
+  const answer = await node.execTail(
+    ["-e", "process.stderr.write('No such container: c1'); process.exit(1)"],
+    1024,
+  );
+  assert.equal(answer.code, 1);
+  assert.equal(answer.stderr, "No such container: c1");
+  const unstarted = await containerEngine(
+    "/nonexistent/chuggy-engine",
+    10_000,
+  ).execTail(["logs", "c1"], 1024);
+  assert.equal(unstarted.failed, "Unstarted");
 });

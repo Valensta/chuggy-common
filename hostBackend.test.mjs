@@ -27,6 +27,7 @@ import {
   hostRoutedBackend,
   hostRuns,
 } from "./hostBackend.mjs";
+import { savedLogCutLine, savedLogLinesMax } from "./savedLog.mjs";
 
 /**
  * A stand-in for the worker core: it writes what it was started with to
@@ -54,6 +55,10 @@ if (mode === "readonly") {
 }
 writeFileSync(out, JSON.stringify(seen));
 process.stdout.write("fixture output\\n");
+if (mode === "loud") {
+  process.stdout.write("loud\\n".repeat(3 * 1024 * 1024));
+  process.exit(0);
+}
 if (mode?.startsWith("exit:")) process.exit(Number(mode.slice(5)));
 if (mode === "orphan" || mode === "readonly") setTimeout(() => process.exit(0), 100);
 setInterval(() => {}, 1000);
@@ -215,6 +220,19 @@ test("a job that ended of itself is named once, after held stops naming it, its 
       "utf8",
     ),
     "fixture output\n",
+  );
+});
+
+test("a job's output is kept to its last lines once the job ends, saying it was cut", async (t) => {
+  const { backend, settings } = await harness(t, "loud");
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.equal(
+    await readFile(
+      join(settings.logDir, `${hostJobName("asg-1")}.log`),
+      "utf8",
+    ),
+    `${savedLogCutLine}${"loud\n".repeat(savedLogLinesMax)}`,
   );
 });
 

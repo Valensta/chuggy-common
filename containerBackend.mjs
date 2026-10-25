@@ -61,6 +61,18 @@
  * neither that container nor its volumes. A session is never handed the
  * engine.
  *
+ * AN ENDED CONTAINER'S LOGS ARE SAVED BEFORE IT IS REMOVED, their tail as
+ * `savedLog.mjs` bounds it. One whose logs could not be saved is kept for a
+ * later pass to try again, until `logSaveFailureDwellMs` after the first
+ * failure, when it is removed without them, which is logged: a machine whose
+ * log directory cannot be written is one whose containers would otherwise
+ * never go.
+ *
+ * THIS MACHINE'S IMAGES ARE SWEPT where the runner names a record of them,
+ * as `imageCleanup.mjs` says: each placement holds what it is about to use
+ * before it looks, and records the use once `run` has answered. With no
+ * record, no image is held, recorded or removed.
+ *
  * A JOB MOUNTS EACH VOLUME ITS OWNER LISTS, a named volume or a directory of
  * this machine, whatever image it runs and however it starts. A named volume
  * that is not there is made, labelled as this runner's, before the job that
@@ -84,7 +96,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, posix } from "node:path";
 
 import {
@@ -150,8 +162,18 @@ import {
   poolProjectDigest,
   poolProjectLabelValue,
 } from "./poolIdentity.mjs";
+import {
+  imageCleanup,
+  imageCleanupNone,
+  imageUnusedSecsMaxDefault,
+} from "./imageCleanup.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
+import {
+  savedLogBytesMax,
+  savedLogLinesMax,
+  savedLogWritten,
+} from "./savedLog.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
@@ -187,6 +209,8 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {import("./engineArgv.mjs").EngineSocket} [engineSocket] this machine's engine, which each job is handed through its socket and no session is; none, and no workload is
  * @property {readonly OwnerImage[]} [images] what a job whose assignment pins no image runs in; none, and no such job is taken
  * @property {readonly OwnerVolumeListed[]} [volumes] what its owner mounts into each job and no session; none, and nothing is
+ * @property {string} [imageRecord] the file `imageCleanup.mjs` keeps this machine's images' record in, one for every runner using this engine as this user; none, and no image is held, recorded or removed
+ * @property {number} [imageUnusedSecsMax] how long a job's image this runner pulled may go unused before it is removed, 0 keeping them; `imageUnusedSecsMaxDefault` where none
  *
  * @typedef {z.infer<typeof ownerVolumesSchema>[number]} OwnerVolumeListed a volume as its owner lists it, which `ownerVolumesServed` makes one a job mounts
  *
@@ -218,9 +242,10 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {InFlightPlacement & {
  *   runtime: PlacementRuntime | undefined,
  *   volumes: readonly OwnerVolume[] | undefined,
+ *   pulled: Map<string, string>,
  *   controller: AbortController,
  *   done: Promise<void>,
- * }} Placement
+ * }} Placement each image it pulled in `pulled`, by the id it was pulled as
  *
  * @typedef {object} PoolContainer
  * @property {string} id
@@ -236,8 +261,9 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @typedef {WorkerPoolBackend & {
  *   inFlight: () => InFlightPlacement[],
  *   containers: () => Promise<PoolContainer[]>,
+ *   imagesReclaimed: (signal: AbortSignal) => Promise<string[]>,
  *   settled: () => Promise<void>,
- * }} ContainerBackend
+ * }} ContainerBackend `imagesReclaimed` removes what `imageCleanup.mjs`'s reclaim does, answering the names it removed
  *
  * @typedef {object} Ends what `ended` names next, and what it never will
  * @property {WorkerPoolEnded[]} pending failed placements' ends, which the next `held` makes ready unless it lists their containers
@@ -257,6 +283,8 @@ import { runtimeScratch } from "./runtimeScratch.mjs";
  * @property {Map<string, Placement>} placements
  * @property {Ends} ends
  * @property {boolean} strays whether volumes of chuggy's runtime that nothing answers for may be left: from the start, since a predecessor may have left some, and after any removal of one failed
+ * @property {import("./imageCleanup.mjs").ImageCleanup} images
+ * @property {Map<string, number>} logFailures when each listed container's logs first could not be saved, by its id
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -325,6 +353,13 @@ function checkedImageFault(exitCode) {
  * runtime slow to pull before it takes none of it.
  */
 export const pullFailureDwellMs = 120_000;
+
+/**
+ * How long after an ended container's logs first could not be saved it is
+ * kept for a later pass to try again: several of the passes a long poll
+ * paces.
+ */
+export const logSaveFailureDwellMs = 600_000;
 
 /**
  * An inspection or a pull of an image the engine answered as failed, kept
@@ -407,6 +442,13 @@ export function checkedContainerBackendSettings(settings) {
       `pool ${segment} cannot name a container; register it under a name of letters, digits, '_', '.' and '-'`,
     );
   claudeCredentialCarried(settings.claudeCredential);
+  const unused = settings.imageUnusedSecsMax;
+  if (unused !== undefined && (!Number.isSafeInteger(unused) || unused < 0))
+    throw new RangeError(
+      "imageUnusedSecsMax must be a whole number of seconds, 0 or more",
+    );
+  if (settings.imageRecord !== undefined && settings.imageRecord.length === 0)
+    throw new RangeError("imageRecord must name a file");
   return settings;
 }
 
@@ -494,26 +536,75 @@ async function poolContainers(state) {
 }
 
 /**
- * A container's logs into a file only its owner can read, since what a
- * workload printed before its core began scrubbing can hold a secret.
+ * Why a call for a container's logs failed, by how it ended alone: what it
+ * printed on stderr can be the workload's own output, which is never logged.
+ *
+ * @param {string} engine
+ * @param {import("./engine.mjs").EngineAnswer} answer
+ */
+function logsFailure(engine, answer) {
+  if (answer.failed === "Unstarted") return `${engine} could not be started`;
+  if (answer.failed === "Interrupted")
+    return `${engine} logs did not answer in time`;
+  return `${engine} logs exited ${String(answer.code)}`;
+}
+
+/**
+ * A container's logs saved as `savedLog.mjs` bounds them, answering the file,
+ * or why they could not be: how the engine's call ended, or this machine's
+ * failure.
  *
  * @param {State} state
  * @param {PoolContainer} container
+ * @returns {Promise<{file: string} | {why: string}>}
  */
 async function savedLogs(state, container) {
-  await mkdir(state.settings.logDir, { recursive: true, mode: 0o700 });
-  const file = join(state.settings.logDir, `${container.name}.log`);
-  const handle = await open(file, "w", 0o600);
   try {
-    await handle.chmod(0o600);
-    const answer = await state.seams.engine.execToFd(
-      logsArgv(container.id),
-      handle.fd,
+    const answer = await state.seams.engine.execTail(
+      logsArgv(container.id, savedLogLinesMax + 1),
+      savedLogBytesMax,
     );
-    return answer.code === 0 ? file : undefined;
-  } finally {
-    await handle.close();
+    if (answer.code !== 0)
+      return { why: logsFailure(state.settings.engine, answer) };
+    await mkdir(state.settings.logDir, { recursive: true, mode: 0o700 });
+    const file = join(state.settings.logDir, `${container.name}.log`);
+    await savedLogWritten(
+      file,
+      answer.tail,
+      answer.cut || answer.lines > savedLogLinesMax,
+    );
+    return { file };
+  } catch (failure) {
+    return {
+      why: failure instanceof Error ? failure.message : String(failure),
+    };
   }
+}
+
+/**
+ * Whether a container whose logs could not be saved is kept for a later pass
+ * to try again, which it is until `logSaveFailureDwellMs` after the first
+ * pass that could not.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ * @param {string} why
+ * @param {string} cause why its logs could not be saved
+ */
+function unsavedKept(state, container, why, cause) {
+  const nowMs = state.seams.nowMs();
+  const firstMs = state.logFailures.get(container.id) ?? nowMs;
+  state.logFailures.set(container.id, firstMs);
+  if (nowMs - firstMs < logSaveFailureDwellMs) {
+    state.seams.log(
+      `${container.name} ${why}; its logs could not be saved: ${cause}`,
+    );
+    return true;
+  }
+  state.seams.log(
+    `${container.name} ${why}; its logs could not be saved since ${new Date(firstMs).toISOString()}, and are lost with it: ${cause}`,
+  );
+  return false;
 }
 
 /**
@@ -645,23 +736,23 @@ async function strayVolumesRemoved(state, listed) {
 /**
  * Saves a container's logs and removes it, and the volumes of chuggy's
  * runtime it was started through with it. A container whose logs could not
- * be saved is left for the next pass to try again, rather than lost with them.
+ * be saved is left for the next pass to try again, rather than lost with
+ * them, until `unsavedKept` says it has been kept long enough.
  *
  * @param {State} state
  * @param {PoolContainer} container
  * @param {string} why
  */
 async function retired(state, container, why) {
-  const file = await savedLogs(state, container);
-  if (file === undefined) {
-    state.seams.log(`${container.name} ${why}; its logs could not be saved`);
-    return;
-  }
+  const saved = await savedLogs(state, container);
+  if ("why" in saved && unsavedKept(state, container, why, saved.why)) return;
   const removed = await state.seams.engine.exec(removeArgv(container.id));
+  if (removed.code === 0) state.logFailures.delete(container.id);
+  const kept = "file" in saved ? `logs saved to ${saved.file}` : "logs lost";
   state.seams.log(
     removed.code === 0
-      ? `${container.name} ${why}; logs saved to ${file}, container removed`
-      : `${container.name} ${why}; logs saved to ${file}, not removed: ${engineFailureLine(removed)}`,
+      ? `${container.name} ${why}; ${kept}, container removed`
+      : `${container.name} ${why}; ${kept}, not removed: ${engineFailureLine(removed)}`,
   );
   if (removed.code === 0)
     await runtimeVolumesRemoved(state, container.name, [
@@ -845,6 +936,7 @@ async function heldAssignments(state) {
     ]),
   );
   const placing = new Set(held.keys());
+  state.images.due();
   const failed = state.ends.pending.splice(0);
   for (const ended of failed)
     state.ends.accounted.delete(endedAssignment(ended));
@@ -854,6 +946,9 @@ async function heldAssignments(state) {
     inspected,
     container: poolContainer(inspected),
   }));
+  const ids = new Set(containers.map(({ container }) => container.id));
+  for (const id of state.logFailures.keys())
+    if (!ids.has(id)) state.logFailures.delete(id);
   if (state.strays)
     await strayVolumesRemoved(
       state,
@@ -1139,6 +1234,20 @@ function placementSignal(state, placement, late) {
  * @param {string} named how a failure names the image: `its image` for the job's own
  */
 async function pulled(state, placement, image, named) {
+  await pullMade(state, placement, image, named);
+  const id = await state.images.pulledId(image);
+  if (id !== undefined) placement.pulled.set(image, id);
+}
+
+/**
+ * The pull `pulled` makes.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {string} image
+ * @param {string} named how a failure names the image: `its image` for the job's own
+ */
+async function pullMade(state, placement, image, named) {
   const { settings, seams } = state;
   const host = imageRegistryHost(image);
   const late = `${named} was not pulled`;
@@ -1682,6 +1791,60 @@ async function started(state, placement, assignment, envelope) {
 }
 
 /**
+ * A placement's images, each as the assignment named it and with what it was
+ * used as.
+ *
+ * @param {Placement} placement
+ * @returns {import("./imageRecord.mjs").ImageUse[]}
+ */
+function placementImages(placement) {
+  /** @param {string} reference */
+  const pulledId = (reference) => {
+    const id = placement.pulled.get(reference);
+    return id === undefined ? {} : { pulledId: id };
+  };
+  return [
+    {
+      reference: placement.image,
+      kind: placement.kind,
+      ...pulledId(placement.image),
+    },
+    ...(placement.runtime === undefined
+      ? []
+      : [
+          {
+            reference: placement.runtime.image,
+            kind: /** @type {const} */ ("Runtime"),
+            ...pulledId(placement.runtime.image),
+          },
+        ]),
+  ];
+}
+
+/**
+ * Starts a placement, its images held in the record from before it looks for
+ * them until its `run` has answered, when their use is recorded, whether or
+ * not it started.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {WorkerPoolAssignment} assignment
+ * @param {string} envelope
+ */
+async function placementRun(state, placement, assignment, envelope) {
+  await state.images.held(
+    placement.name,
+    placementImages(placement).map(({ reference }) => reference),
+    placement.deadlineEpochSecs * 1000,
+  );
+  try {
+    await placementStarted(state, placement, assignment, envelope);
+  } finally {
+    await state.images.used(placement.name, placementImages(placement));
+  }
+}
+
+/**
  * Gets what a placement starts from and starts it: chuggy's runtime first
  * where the job starts through one, then the job's image, then the job's
  * volumes of the runtime, then its owner's. The runtime's are removed where
@@ -1695,7 +1858,7 @@ async function started(state, placement, assignment, envelope) {
  * @param {WorkerPoolAssignment} assignment
  * @param {string} envelope
  */
-async function placementRun(state, placement, assignment, envelope) {
+async function placementStarted(state, placement, assignment, envelope) {
   const { runtime } = placement;
   let outcome;
   try {
@@ -1799,6 +1962,7 @@ async function placed(state, assignment, kind) {
         ? { image: assignment.runtime, made: [], volumes: undefined }
         : undefined,
     volumes: volumes?.served,
+    pulled: new Map(),
     controller: new globalThis.AbortController(),
     done: Promise.resolve(),
   };
@@ -1957,6 +2121,18 @@ export function containerBackend(settings, seams) {
     placements: new Map(),
     ends: { pending: [], ready: [], accounted: new Set() },
     strays: true,
+    images:
+      checked.imageRecord === undefined
+        ? imageCleanupNone
+        : imageCleanup(
+            {
+              record: checked.imageRecord,
+              unusedSecsMax:
+                checked.imageUnusedSecsMax ?? imageUnusedSecsMaxDefault,
+            },
+            seams,
+          ),
+    logFailures: new Map(),
   };
   return {
     place: (assignment, kind) => placed(state, assignment, kind),
@@ -1973,10 +2149,12 @@ export function containerBackend(settings, seams) {
         deadlineEpochSecs: placement.deadlineEpochSecs,
       })),
     containers: async () => (await poolContainers(state)).map(poolContainer),
+    imagesReclaimed: (signal) => state.images.reclaimed(signal),
     settled: async () => {
       await Promise.all(
         [...state.placements.values()].map((placement) => placement.done),
       );
+      await state.images.settled();
     },
   };
 }
