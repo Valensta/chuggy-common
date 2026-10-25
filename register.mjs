@@ -401,7 +401,7 @@ export const registerDeclaredSchema = workerPoolCapabilitiesSchema.superRefine(
  * @property {import("./job.mjs").JobCredentialFiles} files
  * @property {readonly {capabilities: readonly string[]}[]} images what its owner listed
  * @property {boolean} host whether a job that pins no image runs on the machine itself, as the pool file says
- * @property {readonly string[] | undefined} declared what its own file declares, as `registerDeclaredSchema` reads it, where the file names any
+ * @property {readonly string[] | undefined} declared what its own file declares, as `registerDeclaredSchema` reads it, where the file names the key
  * @property {readonly string[]} recorded what the pool file says the pool was registered with
  */
 
@@ -409,7 +409,7 @@ export const registerDeclaredSchema = workerPoolCapabilitiesSchema.superRefine(
  * The capabilities a runner names on each poll, whose set replaces the one
  * its registration recorded: its platforms first, then its operator's and the
  * agents `registerAgents` finds, each once. Its operator's are what its own
- * file declares where that declares any, and otherwise what the pool was
+ * file declares where it names the key, and otherwise what the pool was
  * registered with, less the platforms, which a runner finds of itself, and
  * less any agent it has no image or host to run, whose job it would be
  * offered and refuse.
