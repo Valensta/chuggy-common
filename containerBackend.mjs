@@ -153,6 +153,9 @@ import {
   enginePullRefused,
 } from "./engineErrors.mjs";
 import {
+  jobClaudeAgent,
+  jobCredentialFilesChecked,
+  jobCredentialHanded,
   jobEngineSocketEnvironment,
   jobEnvelope,
   jobEnvironmentAttempt,
@@ -206,8 +209,9 @@ import {
  * @typedef {object} ContainerBackendSettings
  * @property {"docker" | "podman"} engine
  * @property {PoolIdentity} pool
- * @property {string} tokenFile the Claude credential file, which each workload mounts
+ * @property {string} tokenFile the Claude credential file, which each workload mounts but one whose job requires another agent
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a workload's core reads it as a subscription's token, as it does a site pool's
+ * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent mounts in place of `tokenFile`; none, and such a job is refused
  * @property {string | undefined} registryHost the one registry the pool's token is presented to
  * @property {string | undefined} dockerHost the endpoint docker's context names, which a pull of the pool's registry is told; docker's alone
  * @property {number} timeoutSecsMax
@@ -234,7 +238,7 @@ import {
  * @typedef {object} ContainerBackendSeams
  * @property {Engine} engine
  * @property {WorkerPoolTokens} tokens the pool's own, which the loop shares
- * @property {(tokenFile: string) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the Claude token file the backend mounts, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
+ * @property {(file: string, agent: string) => Promise<string | undefined>} tokenFileRefusal why this machine cannot hand a job the credential file the backend mounts, which is `agent`'s, or nothing: the runner's to judge, since whether a job can read it turns on how its engine maps users
  * @property {() => number} nowMs
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
@@ -254,6 +258,7 @@ import {
  * @property {import("./engineArgv.mjs").RuntimeVolumes | undefined} volumes once both are made, and the container that fills them can have been run
  *
  * @typedef {InFlightPlacement & {
+ *   credential: import("./job.mjs").JobCredential,
  *   runtime: PlacementRuntime | undefined,
  *   volumes: readonly OwnerVolume[] | undefined,
  *   pulled: Map<string, string>,
@@ -463,6 +468,7 @@ export function checkedContainerBackendSettings(settings) {
       `pool ${segment} cannot name a container; register it under a name of letters, digits, '_', '.' and '-'`,
     );
   claudeCredentialCarried(settings.claudeCredential);
+  jobCredentialFilesChecked(settings);
   const unused = settings.imageUnusedSecsMax;
   if (unused !== undefined && (!Number.isSafeInteger(unused) || unused < 0))
     throw new RangeError(
@@ -1264,13 +1270,14 @@ export function containerImageOf(images, assignment) {
 }
 
 /**
- * Why this machine will not take an assignment, or nothing.
+ * Why this machine will not take an assignment, its credential aside, or
+ * nothing.
  *
  * @param {State} state
  * @param {WorkerPoolAssignment} assignment
- * @returns {Promise<string | undefined>}
+ * @returns {string | undefined}
  */
-async function placementRefusal(state, assignment) {
+function placementRefusal(state, assignment) {
   const { machine } = state.settings;
   if (containerImageOf(state.settings.images ?? [], assignment) === undefined)
     return "the assignment pins no image, and no image this pool's owner listed meets it: a Linux one declaring every capability it names";
@@ -1278,7 +1285,7 @@ async function placementRefusal(state, assignment) {
     return `the assignment asks for ${String(assignment.cpuMillis)} CPU millis and this machine has ${String(machine.cpuMillis)}`;
   if (assignment.memoryMib > machine.memoryMib)
     return `the assignment asks for ${String(assignment.memoryMib)} MiB and this machine has ${String(machine.memoryMib)}`;
-  return state.seams.tokenFileRefusal(state.settings.tokenFile);
+  return undefined;
 }
 
 /**
@@ -1788,10 +1795,10 @@ function workloadEngineSocket(settings, placement) {
 
 /**
  * The environment a workload's env file carries beside its envelope: the
- * runner's, then the kind of Claude credential it mounts where the runner
- * names one, what a job handed this machine's engine is told of it, and for a
- * job started through chuggy's runtime the workspace its check is to find
- * writable, which is the one its envelope names.
+ * runner's, then the kind of Claude credential where it mounts Claude's and
+ * the runner names one, what a job handed this machine's engine is told of
+ * it, and for a job started through chuggy's runtime the workspace its check
+ * is to find writable, which is the one its envelope names.
  *
  * @param {ContainerBackendSettings} settings
  * @param {Placement} placement
@@ -1800,7 +1807,9 @@ function workloadEnvironment(settings, placement) {
   const socket = workloadEngineSocket(settings, placement);
   return {
     ...settings.environment,
-    ...claudeCredentialCarried(settings.claudeCredential),
+    ...(placement.credential.agent === jobClaudeAgent
+      ? claudeCredentialCarried(settings.claudeCredential)
+      : {}),
     ...(socket === undefined
       ? {}
       : jobEngineSocketEnvironment(settings.engine, socket.path)),
@@ -1865,7 +1874,7 @@ async function started(state, placement, assignment, envelope) {
         envFile,
         cpuMillis: assignment.cpuMillis,
         memoryMib: assignment.memoryMib,
-        tokenFile: settings.tokenFile,
+        credentialFile: placement.credential.file,
         network: settings.network,
         image: placement.image,
         runtime: placement.runtime?.volumes,
@@ -2035,8 +2044,15 @@ async function placed(state, assignment, kind) {
       `an assignment was placed as ${String(kind)}, which is no workload's kind`,
     );
   if (state.placements.has(assignment.assignment)) return { placed: "Placed" };
-  const refusal = await placementRefusal(state, assignment);
+  const refusal = placementRefusal(state, assignment);
   if (refusal !== undefined) return { placed: "Refused", evidence: refusal };
+  const credential = await jobCredentialHanded(
+    settings,
+    assignment.capabilities,
+    seams.tokenFileRefusal,
+  );
+  if ("refused" in credential)
+    return { placed: "Refused", evidence: credential.refused };
   const bounds = workloadBounds(settings, assignment, kind);
   let envelope;
   try {
@@ -2064,6 +2080,7 @@ async function placed(state, assignment, kind) {
     deadlineEpochSecs:
       Math.floor(placedMs / 1000) +
       Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    credential,
     runtime:
       kind === "Job" && assignment.runtime !== undefined
         ? { image: assignment.runtime, made: [], volumes: undefined }

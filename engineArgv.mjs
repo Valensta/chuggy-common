@@ -34,7 +34,7 @@ import {
  * @property {string} envFile
  * @property {number} cpuMillis
  * @property {number} memoryMib
- * @property {string} tokenFile
+ * @property {string} credentialFile what is mounted at `jobProviderCredentialFile`
  * @property {string} network
  * @property {string} image
  * @property {RuntimeVolumes} [runtime] the volumes of a job started through chuggy's runtime in place of its image's entrypoint; none, and the image's own entrypoint runs
@@ -402,7 +402,7 @@ export function runArgv(engine, workload) {
     "--memory",
     `${String(workload.memoryMib)}m`,
     "--mount",
-    `type=bind,source=${workload.tokenFile},target=${jobProviderCredentialFile},readonly`,
+    `type=bind,source=${workload.credentialFile},target=${jobProviderCredentialFile},readonly`,
     ...runArgvEngineSocket(engine, workload.engineSocket),
     ...runArgvOwnerVolumes(workload.volumes ?? []),
     "--tmpfs",

@@ -16,6 +16,7 @@ import test from "node:test";
 import { URL } from "node:url";
 
 import {
+  registerAgents,
   registerEndpointRefusal,
   registerPoolDirectory,
   registerPoolFileName,
@@ -345,6 +346,64 @@ test("a request declares the host's platforms and the operator's capabilities af
     over.refused,
     /at most 64 capabilities, its platforms among them/u,
   );
+});
+
+/**
+ * Catches a runner declaring an agent it holds no credential for, or has no
+ * image or host to run, which would take jobs requiring it and refuse them;
+ * or one it can run left undeclared.
+ */
+test("a runner declares each agent it holds a credential file for and has an image declaring, or runs on its host", () => {
+  const files = { tokenFile: "/t", agentCredentialFiles: { Codex: "/c" } };
+  const images = (...capabilities) => [
+    { capabilities: ["Tool:Bazel"] },
+    { capabilities },
+  ];
+  assert.deepEqual(
+    registerAgents(files, images("Agent:Claude", "Agent:Codex"), false),
+    ["Agent:Claude", "Agent:Codex"],
+  );
+  assert.deepEqual(registerAgents(files, images("Agent:Codex"), false), [
+    "Agent:Codex",
+  ]);
+  assert.deepEqual(registerAgents(files, images(), false), []);
+  assert.deepEqual(registerAgents(files, [], true), [
+    "Agent:Claude",
+    "Agent:Codex",
+  ]);
+  assert.deepEqual(
+    registerAgents(
+      { tokenFile: "/t" },
+      images("Agent:Claude", "Agent:Codex"),
+      false,
+    ),
+    ["Agent:Claude"],
+  );
+});
+
+/**
+ * Catches an agent declared twice where the operator also declared it, which
+ * chuggy would refuse, or declared before the operator's capabilities.
+ */
+test("a request declares the runner's agents after the operator's capabilities, once each", () => {
+  const asked = {
+    api: "https://chuggy.example/",
+    token: "t",
+    pool: undefined,
+    capabilities: ["Agent:Codex", "Tool:Xcode"],
+  };
+  const answer = registerRequest(asked, {
+    hostname: "shame",
+    arch: "x64",
+    agents: ["Agent:Claude", "Agent:Codex"],
+  });
+  assert.ok("request" in answer);
+  assert.deepEqual(answer.request.capabilities, [
+    "Platform:Linux:Amd64",
+    "Agent:Codex",
+    "Tool:Xcode",
+    "Agent:Claude",
+  ]);
 });
 
 test("a 201 declaring the capabilities asked for in another order is the pool asked for", async () => {

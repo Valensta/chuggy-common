@@ -20,9 +20,9 @@
  * EACH JOB HAS A DIRECTORY OF ITS OWN, where a container has mounts: its
  * workspace, its home, its temporary files and the credentials it mints, as
  * `jobHostPlaces` names them. It inherits the runner's environment, then the
- * owner's and the kind of its Claude credential, then the job's own places,
- * and the directory goes when the job does. Any a predecessor left are removed
- * the first time `held` is asked.
+ * owner's and, where it reads Claude's credential, that credential's kind,
+ * then the job's own places, and the directory goes when the job does. Any a
+ * predecessor left are removed the first time `held` is asked.
  *
  * WHAT ENDED OF ITSELF IS NAMED ONCE, after `held` stopped naming it, with this
  * backend's own reason and never the job's output, which is written to the log
@@ -42,7 +42,14 @@ import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 
 import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
-import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
+import {
+  jobClaudeAgent,
+  jobCredentialFilesChecked,
+  jobCredentialHanded,
+  jobEnvelope,
+  jobHostPlaces,
+  reservedJobVariables,
+} from "./job.mjs";
 import { savedLogTrimmed } from "./savedLog.mjs";
 
 /**
@@ -60,8 +67,9 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {readonly string[]} platforms the platform tokens this host is
  * @property {string} directory where each job's directory is made, this pool's alone
  * @property {string} logDir where each ended job's output is kept
- * @property {string} tokenFile the Claude credential file, which a job reads where it is
+ * @property {string} tokenFile the Claude credential file, which a job reads where it is unless it requires another agent
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a job's core reads it as a subscription's token
+ * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent reads in place of `tokenFile`; none, and such a job is refused
  * @property {number} timeoutSecsMax
  * @property {number} outputBytesMax
  * @property {Readonly<Record<string, string>>} environment the owner's, over the runner's own
@@ -73,7 +81,7 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {(pid: number, signal: NodeJS.Signals) => void} [kill] signals a process group
  * @property {Readonly<Record<string, string | undefined>>} [environment] the runner's own, which a job inherits
  * @property {(onExit: () => void) => void} [atExit] runs `onExit` as the runner ends, `hostExitWatched` where absent
- * @property {(tokenFile: string) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the token file, or nothing
+ * @property {(file: string, agent: string) => Promise<string | undefined>} tokenFileRefusal why a job cannot read the credential file, which is `agent`'s, or nothing
  * @property {(line: string) => void} log
  * @property {() => number} [nowMs]
  *
@@ -141,6 +149,7 @@ export function checkedHostBackendSettings(settings) {
       `a host job's timeout is at most ${String(hostTimeoutSecsMax)} seconds`,
     );
   claudeCredentialCarried(settings.claudeCredential);
+  jobCredentialFilesChecked(settings);
   for (const platform of settings.platforms)
     if (!/^Platform:[A-Za-z0-9]+:[A-Za-z0-9]+$/u.test(platform))
       throw new RangeError(`${platform} is no platform token`);
@@ -204,15 +213,15 @@ export function hostJobName(assignment) {
 }
 
 /**
- * Why this host will not take an assignment, or nothing.
+ * Why this host will not take an assignment, its credential aside, or
+ * nothing.
  *
  * @param {HostBackendSettings} settings
- * @param {HostBackendSeams} seams
  * @param {WorkerPoolAssignment} assignment
  * @param {WorkerPoolWorkloadKind} kind
- * @returns {Promise<string | undefined>}
+ * @returns {string | undefined}
  */
-async function hostRefusal(settings, seams, assignment, kind) {
+function hostRefusal(settings, assignment, kind) {
   if (kind !== "Job")
     return "a session runs in a container, never on its runner's host";
   if (assignment.image !== undefined)
@@ -223,7 +232,7 @@ async function hostRefusal(settings, seams, assignment, kind) {
     return `the assignment asks for ${String(assignment.cpuMillis)} CPU millis and this machine has ${String(settings.machine.cpuMillis)}`;
   if (assignment.memoryMib > settings.machine.memoryMib)
     return `the assignment asks for ${String(assignment.memoryMib)} MiB and this machine has ${String(settings.machine.memoryMib)}`;
-  return seams.tokenFileRefusal(settings.tokenFile);
+  return undefined;
 }
 
 /**
@@ -377,13 +386,15 @@ async function hostSwept(state) {
 
 /**
  * A job's own directory, made with every place in it, and the envelope that
- * names them; or why the assignment makes none, its directory gone.
+ * names them and the credential file it reads; or why the assignment makes
+ * none, its directory gone.
  *
  * @param {State} state
  * @param {WorkerPoolAssignment} assignment
+ * @param {string} credentialFile
  * @returns {Promise<{directory: string, envelope: string} | {refused: string}>}
  */
-async function hostJobDirectory(state, assignment) {
+async function hostJobDirectory(state, assignment, credentialFile) {
   const { settings } = state;
   await mkdir(settings.directory, { recursive: true, mode: 0o700 });
   await mkdir(settings.logDir, { recursive: true, mode: 0o700 });
@@ -398,7 +409,7 @@ async function hostJobDirectory(state, assignment) {
       },
       {
         workspace: places.workspace,
-        providerCredentialFile: settings.tokenFile,
+        providerCredentialFile: credentialFile,
       },
     );
     for (const place of [...Object.values(places), join(directory, "tmp")])
@@ -417,9 +428,10 @@ async function hostJobDirectory(state, assignment) {
  * @param {State} state
  * @param {string} name
  * @param {{directory: string, envelope: string}} made
+ * @param {string} agent whose credential file the job reads
  * @returns {Promise<{child: ChildProcess, log: import("node:fs/promises").FileHandle} | undefined>}
  */
-async function hostJobSpawned(state, name, made) {
+async function hostJobSpawned(state, name, made, agent) {
   const log = await open(
     join(state.settings.logDir, `${name}.log`),
     "a",
@@ -433,7 +445,9 @@ async function hostJobSpawned(state, name, made) {
         state.inherited,
         {
           ...state.settings.environment,
-          ...claudeCredentialCarried(state.settings.claudeCredential),
+          ...(agent === jobClaudeAgent
+            ? claudeCredentialCarried(state.settings.claudeCredential)
+            : {}),
         },
         made.directory,
         made.envelope,
@@ -513,12 +527,19 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
 async function hostPlaced(state, assignment, kind) {
   const { settings, seams } = state;
   if (state.jobs.has(assignment.assignment)) return { placed: "Placed" };
-  const refusal = await hostRefusal(settings, seams, assignment, kind);
+  const refusal = hostRefusal(settings, assignment, kind);
   if (refusal !== undefined) return { placed: "Refused", evidence: refusal };
-  const made = await hostJobDirectory(state, assignment);
+  const credential = await jobCredentialHanded(
+    settings,
+    assignment.capabilities,
+    seams.tokenFileRefusal,
+  );
+  if ("refused" in credential)
+    return { placed: "Refused", evidence: credential.refused };
+  const made = await hostJobDirectory(state, assignment, credential.file);
   if ("refused" in made) return { placed: "Refused", evidence: made.refused };
   const name = hostJobName(assignment.assignment);
-  const started = await hostJobSpawned(state, name, made);
+  const started = await hostJobSpawned(state, name, made, credential.agent);
   if (started === undefined) return { placed: "Unavailable" };
   const deadlineSecs = Math.min(
     assignment.deadlineSecs,
