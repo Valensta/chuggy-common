@@ -25,8 +25,10 @@
  * the first time `held` is asked.
  *
  * WHAT ENDED OF ITSELF IS NAMED ONCE, after `held` stopped naming it, with this
- * backend's own reason and never the job's output, which is saved to the log
- * directory and can hold a secret. One this pool stopped is never named.
+ * backend's own reason and never the job's output, which is written to the log
+ * directory as it runs, can hold a secret, and is cut to its end as
+ * `savedLog.mjs` bounds a saved log once the job ends. One this pool stopped
+ * is never named.
  */
 
 import { spawn as spawnDefault } from "node:child_process";
@@ -41,6 +43,7 @@ import { workerTaskVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { claudeCredentialCarried } from "./claudeCredential.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import { jobEnvelope, jobHostPlaces, reservedJobVariables } from "./job.mjs";
+import { savedLogTrimmed } from "./savedLog.mjs";
 
 /**
  * @typedef {import("@chuggy/worker-contract/workerPool").WorkerPoolAssignment} WorkerPoolAssignment
@@ -473,6 +476,13 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
       void (async () => {
         try {
           await log.close().catch(() => undefined);
+          await savedLogTrimmed(
+            join(state.settings.logDir, `${name}.log`),
+          ).catch((failure) =>
+            state.seams.log(
+              `${name}: its log could not be cut to its end: ${failure instanceof Error ? failure.message : String(failure)}`,
+            ),
+          );
           await hostDirectoryRemoved(state, job.directory);
         } finally {
           if (state.jobs.get(job.assignment) === job)

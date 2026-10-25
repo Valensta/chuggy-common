@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -22,12 +31,14 @@ import {
   containerImageOf,
   containerImageFaultTexts,
   containerName,
+  logSaveFailureDwellMs,
   ownerVolumesSchema,
   pullFailureDwellMs,
 } from "./containerBackend.mjs";
 import {
   deferred,
   fakeEngine,
+  fakeImageId,
   unstartedEntrypoint,
 } from "./engine.fixture.mjs";
 import { ownerVolumeCreateArgv, ownerVolumesOpenArgv } from "./engineArgv.mjs";
@@ -38,6 +49,12 @@ import {
   jobRunDirectory,
 } from "./job.mjs";
 import { poolProjectDigest } from "./poolIdentity.mjs";
+import { imageSweepIntervalMs } from "./imageCleanup.mjs";
+import {
+  savedLogBytesMax,
+  savedLogCutLine,
+  savedLogLinesMax,
+} from "./savedLog.mjs";
 
 const pool = { tenant: "vteng", project: "chuggy", pool: "shame" };
 const image = "registry.chuggy.example/worker@sha256:" + "a".repeat(64);
@@ -1128,7 +1145,7 @@ test("a stop of a running container kills it, saves its logs, and removes it wit
       ],
       ["kill", "id-asg-2"],
       ["container", "inspect", "id-asg-2"],
-      ["logs", "id-asg-2"],
+      ["logs", "--tail", String(savedLogLinesMax + 1), "id-asg-2"],
       ["rm", "-v", "id-asg-2"],
     ],
   );
@@ -1162,7 +1179,10 @@ test("a stop whose logs could not be saved ends the job, and keeps its container
   assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
   assert.equal(state.containers.get(name)?.status, "exited");
   assert.ok(!verbs(state).includes("rm"));
-  assert.match(log.at(-1) ?? "", /was stopped; its logs could not be saved$/u);
+  assert.match(
+    log.at(-1) ?? "",
+    /was stopped; its logs could not be saved: Error response from daemon: No such container: id-asg-2$/u,
+  );
 
   state.logsFail = false;
   assert.deepEqual(await backend.held(), []);
@@ -2890,5 +2910,384 @@ test("a volume another project's labels or none mark, or one listed unscoped tha
     const [ended] = await endsNamed(context.backend);
     assert.ok(ended?.kind === "Job");
     assert.equal(ended.why, `its container was not started: ${why}`);
+  }
+});
+
+/**
+ * A harness whose backend keeps its images' record, and what the record
+ * holds now.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {Partial<import("./containerBackend.mjs").ContainerBackendSettings>} [overrides]
+ */
+async function recordHarness(t, overrides = {}) {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-images-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const imageRecord = join(directory, "images", "podman.json");
+  const context = await harness(t, { imageRecord, ...overrides });
+  return {
+    ...context,
+    imageRecord,
+    /** @returns {import("./imageRecord.mjs").ImageRecord} */
+    record: () => JSON.parse(readFileSync(imageRecord, "utf8")),
+  };
+}
+
+const runtimeRepository = "registry.chuggy.example/runtime";
+const dayMs = 86_400_000;
+
+/**
+ * A runtime image pulled by digest alone, built `days` before the harness's
+ * start, here.
+ *
+ * @param {ReturnType<typeof fakeEngine>["state"]} state
+ * @param {string} hex
+ * @param {number} days
+ */
+function runtimeHere(state, hex, days) {
+  const reference = `${runtimeRepository}@sha256:${hex.repeat(64)}`;
+  state.images.add(reference);
+  state.imageCreated.set(
+    fakeImageId(state, reference),
+    new Date(startMs - days * dayMs).toISOString(),
+  );
+  return reference;
+}
+
+/**
+ * A record begun a month before the harness's start that knows the
+ * runtime's repository and these images.
+ *
+ * @param {string} file
+ * @param {Record<string, unknown>} [images]
+ */
+async function recordWritten(file, images = {}) {
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      createdMs: startMs - 30 * dayMs,
+      repositories: { [runtimeRepository]: { kinds: ["Runtime"] } },
+      images,
+      holds: {},
+    }),
+  );
+}
+
+/** @param {ReturnType<typeof fakeEngine>["state"]} state */
+const imageCalls = (state) =>
+  state.calls
+    .filter((call) => call.argv[0] === "image" && call.argv[1] !== "inspect")
+    .map((call) => call.argv.slice(1).join(" "));
+
+test("a placement holds its images in the record before it first looks for one, and records their use and what it pulled once run answered", async (t) => {
+  const { backend, state, record, imageRecord } = await recordHarness(t);
+  state.images.add(runtime);
+  /** @type {import("./imageRecord.mjs").ImageRecord | undefined} */
+  let looked;
+  state.intercept = (call) => {
+    if (looked === undefined && call.argv[0] === "image")
+      looked = JSON.parse(readFileSync(imageRecord, "utf8"));
+    return undefined;
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  const name = containerName(pool, "asg-1");
+  assert.ok(state.containers.has(name));
+  assert.deepEqual(looked?.holds, {
+    [name]: { images: [image, runtime], untilMs: startMs + 3_600_000 },
+  });
+  const after = record();
+  assert.deepEqual(after.holds, {});
+  assert.deepEqual(after.images, {
+    [image]: {
+      kinds: ["Job"],
+      usedMs: startMs,
+      pulledId: fakeImageId(state, image),
+    },
+    [runtime]: { kinds: ["Runtime"], usedMs: startMs },
+  });
+  assert.deepEqual(after.repositories, {
+    [runtimeRepository]: { kinds: ["Runtime"] },
+  });
+});
+
+test("a placement that never started drops its hold, and records what it pulled", async (t) => {
+  const { backend, state, record } = await recordHarness(t);
+  state.images.add(runtime);
+  state.containers.set(containerName(pool, "asg-1"), {
+    id: "id-other",
+    name: containerName(pool, "asg-1"),
+    labels: {},
+    status: "running",
+    image,
+  });
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.deepEqual(record().holds, {});
+  assert.equal(record().images[image]?.pulledId, fakeImageId(state, image));
+});
+
+test("a backend given no record holds, records and sweeps nothing, and a reclaim removes nothing", async (t) => {
+  const { backend, state, clock } = await harness(t);
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  for (let pass = 0; pass < 2; pass++) {
+    await backend.held();
+    clock.nowMs += 2 * 3_600_000;
+  }
+  await backend.settled();
+  assert.deepEqual(
+    await backend.imagesReclaimed(new globalThis.AbortController().signal),
+    [],
+  );
+  assert.deepEqual(
+    state.calls
+      .filter((call) => call.argv[0] === "image")
+      .map((call) => call.argv),
+    [["image", "inspect", "--format", "{{.Id}}", image]],
+  );
+});
+
+test("a record or a retention that names nothing a backend can keep is refused", () => {
+  const settings = {
+    engine: /** @type {const} */ ("podman"),
+    pool,
+    tokenFile: "/run/claude-token",
+    timeoutSecsMax: 7200,
+    outputBytesMax: 1024,
+    environment: {},
+    network: "chuggy-jobs",
+    runtimeDir: "/run/runtime",
+    logDir: "/run/logs",
+    machine: { cpuMillis: 8000, memoryMib: 16384 },
+    pullRetryMs: 5000,
+  };
+  assert.equal(checkedContainerBackendSettings(settings), settings);
+  assert.throws(
+    () => checkedContainerBackendSettings({ ...settings, imageRecord: "" }),
+    /^RangeError: imageRecord must name a file$/u,
+  );
+  for (const imageUnusedSecsMax of [-1, 1.5, Number.NaN])
+    assert.throws(
+      () =>
+        checkedContainerBackendSettings({ ...settings, imageUnusedSecsMax }),
+      /^RangeError: imageUnusedSecsMax must be a whole number of seconds, 0 or more$/u,
+    );
+});
+
+test("a sweep is made behind the pass that found it due, once an interval for every backend sharing the record", async (t) => {
+  const first = await recordHarness(t);
+  const second = await harness(t, { imageRecord: first.imageRecord });
+  await recordWritten(first.imageRecord);
+  await first.backend.held();
+  await first.backend.settled();
+  assert.deepEqual(imageCalls(first.state), ["ls --quiet --no-trunc"]);
+  assert.equal(first.record().sweptMs, startMs);
+  await second.backend.held();
+  second.clock.nowMs += imageSweepIntervalMs - 1;
+  await second.backend.held();
+  await second.backend.settled();
+  assert.deepEqual(imageCalls(second.state), []);
+  second.clock.nowMs += 1;
+  await second.backend.held();
+  await second.backend.settled();
+  assert.deepEqual(imageCalls(second.state), ["ls --quiet --no-trunc"]);
+  await first.backend.held();
+  await first.backend.settled();
+  assert.deepEqual(imageCalls(first.state), ["ls --quiet --no-trunc"]);
+});
+
+test("a sweep removes a runtime repository's images past its two newest, oldest first and unforced, each named once", async (t) => {
+  const { backend, state, log, imageRecord } = await recordHarness(t);
+  const references = [
+    runtimeHere(state, "1", 40),
+    runtimeHere(state, "2", 30),
+    runtimeHere(state, "3", 20),
+    runtimeHere(state, "4", 10),
+  ];
+  await recordWritten(imageRecord);
+  await backend.held();
+  await backend.settled();
+  assert.deepEqual(imageCalls(state), [
+    "ls --quiet --no-trunc",
+    `rm ${references[0]}`,
+    `rm ${references[1]}`,
+  ]);
+  assert.deepEqual([...state.images], references.slice(2));
+  assert.deepEqual(
+    log.filter((line) => line.startsWith("removed ")),
+    references
+      .slice(0, 2)
+      .map(
+        (reference) =>
+          `removed ${reference}, which no runner here was recorded using`,
+      ),
+  );
+});
+
+test("an image a container uses is kept at the cost of one line, and the sweep goes on", async (t) => {
+  const { backend, state, log, imageRecord } = await recordHarness(t);
+  const [oldest, older] = [
+    runtimeHere(state, "1", 40),
+    runtimeHere(state, "2", 30),
+    runtimeHere(state, "3", 20),
+    runtimeHere(state, "4", 10),
+  ];
+  const user = seeded(state, "asg-2", "running", startMs / 1000 + 60);
+  /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
+    state.containers.get(user)
+  ).image = oldest;
+  await recordWritten(imageRecord);
+  await backend.held();
+  await backend.settled();
+  assert.ok(state.images.has(oldest));
+  assert.ok(!state.images.has(older));
+  assert.deepEqual(
+    log.filter((line) => line.includes(oldest)),
+    [`${oldest} is kept: a container uses it`],
+  );
+});
+
+test("a job's image this runner pulled goes once unused for the retention, unless its name now names another", async (t) => {
+  const { backend, state, clock, imageRecord } = await recordHarness(t, {
+    imageUnusedSecsMax: 86_400,
+  });
+  state.images.add(image);
+  const job = { kinds: ["Job"], usedMs: startMs - 2 * dayMs };
+  await recordWritten(imageRecord, {
+    [image]: { ...job, pulledId: "sha256:other" },
+  });
+  await backend.held();
+  await backend.settled();
+  assert.ok(state.images.has(image));
+  await recordWritten(imageRecord, {
+    [image]: { ...job, pulledId: fakeImageId(state, image) },
+  });
+  clock.nowMs += imageSweepIntervalMs;
+  await backend.held();
+  await backend.settled();
+  assert.ok(!state.images.has(image));
+});
+
+test("a sweep or a record that fails fails no placement and no pass", async (t) => {
+  const listed = await recordHarness(t);
+  await recordWritten(listed.imageRecord);
+  listed.state.intercept = (call) =>
+    call.argv[1] === "ls"
+      ? failedWith("Error response from daemon: i/o timeout")
+      : undefined;
+  assert.deepEqual(await listed.backend.held(), []);
+  await listed.backend.settled();
+  assert.ok(
+    listed.log.includes(
+      "this machine's images could not be listed: Error response from daemon: i/o timeout",
+    ),
+  );
+
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-images-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(join(directory, "file"), "");
+  const unwritable = await harness(t, {
+    imageRecord: join(directory, "file", "podman.json"),
+  });
+  await unwritable.backend.place(assignment(), "Job");
+  await unwritable.backend.settled();
+  assert.deepEqual(await unwritable.backend.held(), listedJobs("asg-1"));
+  await unwritable.backend.settled();
+  const name = containerName(pool, "asg-1");
+  assert.ok(
+    unwritable.log.some((line) =>
+      line.startsWith(`${name}'s hold on its images could not be recorded in `),
+    ),
+  );
+  assert.ok(
+    unwritable.log.some((line) =>
+      line.startsWith("this machine's images were not swept: ENOTDIR"),
+    ),
+  );
+});
+
+test("a reclaim keeps only a runtime repository's newest, oldest first, and stops when its signal aborts", async (t) => {
+  const { backend, state, imageRecord } = await recordHarness(t);
+  const references = [
+    runtimeHere(state, "1", 40),
+    runtimeHere(state, "2", 30),
+    runtimeHere(state, "3", 20),
+  ];
+  await recordWritten(imageRecord);
+  const aborted = new globalThis.AbortController();
+  aborted.abort();
+  assert.deepEqual(await backend.imagesReclaimed(aborted.signal), []);
+  const reclaim = new globalThis.AbortController();
+  state.intercept = (call) => {
+    if (call.argv[1] === "rm") reclaim.abort();
+    return undefined;
+  };
+  assert.deepEqual(await backend.imagesReclaimed(reclaim.signal), [
+    references[0],
+  ]);
+  state.intercept = () => undefined;
+  assert.deepEqual(
+    await backend.imagesReclaimed(new globalThis.AbortController().signal),
+    [references[1]],
+  );
+  assert.deepEqual([...state.images], [references[2]]);
+});
+
+test("an ended container whose logs could not be saved is removed without them once kept past the dwell, and its end named once", async (t) => {
+  const { backend, state, clock, log } = await harness(t);
+  const name = seeded(state, "asg-done", "exited", startMs / 1000 + 60);
+  state.logsFail = true;
+  assert.deepEqual(await backend.held(), []);
+  clock.nowMs += logSaveFailureDwellMs - 1;
+  assert.deepEqual(await backend.held(), []);
+  assert.equal(state.containers.size, 1);
+  clock.nowMs += 1;
+  assert.deepEqual(await backend.held(), []);
+  assert.equal(state.containers.size, 0);
+  assert.deepEqual(log.slice(-2), [
+    `${name} ended; its logs could not be saved since ${new Date(startMs).toISOString()}, and are lost with it: Error response from daemon: No such container: id-asg-done`,
+    `${name} ended; logs lost, container removed`,
+  ]);
+  assert.equal((await backend.ended()).length, 1);
+  assert.deepEqual(await backend.held(), []);
+  assert.deepEqual(await backend.ended(), []);
+});
+
+test("a log directory that cannot be written is a save that failed, and keeps the container", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-logs-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(join(directory, "file"), "");
+  const { backend, state, log } = await harness(t, {
+    logDir: join(directory, "file", "logs"),
+  });
+  seeded(state, "asg-done", "exited", startMs / 1000 + 60);
+  assert.deepEqual(await backend.held(), []);
+  assert.equal(state.containers.size, 1);
+  assert.match(
+    log.at(-1) ?? "",
+    /ended; its logs could not be saved: ENOTDIR/u,
+  );
+});
+
+test("a log longer than a saved log's bound is saved as its end, opening with the line saying so", async (t) => {
+  for (const [log, end] of [
+    ["l\n".repeat(savedLogLinesMax + 5), "l\n".repeat(savedLogLinesMax)],
+    [`${"x".repeat(savedLogBytesMax)}\nend\n`, "end\n"],
+  ]) {
+    const { backend, state, settings } = await harness(t);
+    const name = seeded(state, "asg-done", "exited", startMs / 1000 + 60);
+    const container =
+      /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
+        state.containers.get(name)
+      );
+    container.log = log;
+    await backend.held();
+    assert.equal(
+      await readFile(join(settings.logDir, `${name}.log`), "utf8"),
+      `${savedLogCutLine}${end}`,
+    );
   }
 });

@@ -2,8 +2,10 @@
  * Every stderr in `printed`, and each a pull test lists as refused, is what
  * docker 28.1 or podman 5.8 printed for the failure it is filed under, copied
  * from a run of each against a daemon, and a local registry that challenged
- * for credentials. The rest are built on what those engines print, and crun's
- * on the formats of its own source.
+ * for credentials. Those in `sourced` are built from the source that prints
+ * them, each naming the file and function, where no run of that engine was
+ * seen. The rest are built on what those engines print, and crun's on the
+ * formats of its own source.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -33,6 +35,9 @@ const printed = {
   NoSuchVolume: [
     "Error response from daemon: get chuggy-linux-probe-absent: no such volume",
   ],
+  ImageInUse: [
+    'Error response from daemon: conflict: unable to remove repository reference "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662" (must force) - container 0026cc4cb330 is using its referenced image b116e1550744',
+  ],
   NameConflict: [
     'docker: Error response from daemon: Conflict. The container name "/chuggy-linux-probe-conflict" is already in use by container "fe97585ba1aa2ae3c309f0851f48ff35ac3ca7f3e3d17bcb7c504e2ae5691c31". You have to remove (or rename) that container to be able to reuse that name.\n\nRun \'docker run --help\' for more information',
     'Error: creating container storage: the container name "chuggy-linux-probe-conflict" is already in use by ab5a3a462f4584914e637e786a3d38444bb903d3a94af0c392460ecfa3a8f330. You have to remove that container to be able to reuse that name: that name is already in use, or use --replace to instruct Podman to do so.',
@@ -56,15 +61,36 @@ const printed = {
   ],
 };
 
-for (const [failure, stderrs] of Object.entries(printed))
-  test(`what the engines print for ${failure} is read as ${failure}`, () => {
-    for (const stderr of stderrs)
-      assert.equal(
-        engineFailure({ code: 1, stdout: "", stderr: `${stderr}\n` }),
-        failure,
-        stderr,
-      );
-  });
+const sourced = {
+  ImageInUse: [
+    // docker's containerd image store, moby's daemon/containerd/image_delete.go:
+    // `ImageService.ImageDelete`, a stopped container's image removed by name,
+    // in the words of `imageDeleteConflict.Error`.
+    "Error response from daemon: conflict: unable to delete busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 (must be forced) - container 0026cc4cb330 is using its referenced image b116e1550744",
+    // The same file's `ImageService.checkImageDeleteConflict`, for a running
+    // container and for a stopped one.
+    "Error response from daemon: conflict: unable to delete b116e1550744 (cannot be forced) - image is being used by running container 0026cc4cb330",
+    "Error response from daemon: conflict: unable to delete b116e1550744 (must be forced) - image is being used by stopped container 0026cc4cb330",
+    // podman, containers/container-libs's common/libimage/image.go:
+    // `Image.removeRecursive` wrapping storage/types/errors.go's
+    // `ErrImageUsedByContainer`, after the `Error: ` podman's CLI prints.
+    "Error: image is in use by a container: consider listing external containers and force-removing image",
+  ],
+};
+
+for (const [said, table] of [
+  ["the engines print", printed],
+  ["the engines' source prints", sourced],
+])
+  for (const [failure, stderrs] of Object.entries(table))
+    test(`what ${said} for ${failure} is read as ${failure}`, () => {
+      for (const stderr of stderrs)
+        assert.equal(
+          engineFailure({ code: 1, stdout: "", stderr: `${stderr}\n` }),
+          failure,
+          stderr,
+        );
+    });
 
 test("an engine that did not start or did not answer is unreachable whatever it printed", () => {
   for (const failed of /** @type {const} */ (["Unstarted", "Interrupted"]))

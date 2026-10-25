@@ -128,6 +128,26 @@ export function imageInspectArgv(image) {
   return ["image", "inspect", "--format", "{{.Id}}", image];
 }
 
+/** Every image the engine holds, by id, each once per name it lists it by. */
+export function imageListArgv() {
+  return ["image", "ls", "--quiet", "--no-trunc"];
+}
+
+/** @param {readonly string[]} images each by id */
+export function imageInspectManyArgv(images) {
+  return ["image", "inspect", ...images];
+}
+
+/**
+ * A removal of one name of an image, never forced: an engine refuses it
+ * while a container uses the image.
+ *
+ * @param {string} reference
+ */
+export function imageRemoveArgv(reference) {
+  return ["image", "rm", reference];
+}
+
 /**
  * A pull as the engine's own configuration makes it, under whatever logins,
  * credential helpers and endpoint the runner's user and environment give it.
@@ -573,9 +593,14 @@ export function killArgv(container) {
   return ["kill", container];
 }
 
-/** @param {string} container */
-export function logsArgv(container) {
-  return ["logs", container];
+/**
+ * A container's logs, from its last `linesMax` lines.
+ *
+ * @param {string} container
+ * @param {number} linesMax
+ */
+export function logsArgv(container, linesMax) {
+  return ["logs", "--tail", String(linesMax), container];
 }
 
 /**
