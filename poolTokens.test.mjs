@@ -574,7 +574,7 @@ test("Hydra's 401 invalid_client is an outage while it is confirmed, naming its 
 
 test("a grant the issuer refused is a denial, one a failed lookup also gives is confirmed first, and everything else is an outage, neither naming the secret", async () => {
   const oversized = JSON.stringify({
-    error: "invalid_client",
+    error: "invalid_request",
     error_description: "x".repeat(10_000),
   });
   for (const [answer, expected] of [
@@ -586,15 +586,15 @@ test("a grant the issuer refused is a denial, one a failed lookup also gives is 
       "invalid_scope",
     ].map((code) => [async () => refusal(400, code), "Denied"]),
     [async () => refusal(400, "invalid_client"), "Unavailable"],
-    [async () => refusal(403, "invalid_client"), "Unavailable"],
-    [async () => refusal(404, "invalid_client"), "Unavailable"],
+    [async () => refusal(403, "invalid_request"), "Unavailable"],
+    [async () => refusal(404, "invalid_request"), "Unavailable"],
     [async () => refusal(401, "server_error"), "Unavailable"],
     [async () => refusal(400, "temporarily_unavailable"), "Unavailable"],
     [async () => failing(400), "Unavailable"],
     [async () => failing(401), "Unavailable"],
     [
       async () =>
-        new globalThis.Response(JSON.stringify("invalid_client"), {
+        new globalThis.Response(JSON.stringify("invalid_request"), {
           status: 401,
         }),
       "Unavailable",
