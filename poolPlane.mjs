@@ -2,10 +2,12 @@
  * The pool loop's plane: the poll and the settlement over HTTP. chuggy's
  * `src/adapters/http/poolPlaneClient.ts` is the same client in TypeScript.
  *
- * The status is the answer and nothing here retries it; a settlement's 409 is
- * the one status two answers share, told apart by its body. An answer this
- * side cannot read is an outage rather than a denial, because a denial ends
- * the pool over a skew the plane did not refuse.
+ * The status is the answer and nothing here retries it; a 409 is the one
+ * status two answers share, told apart by its body. A 404 or a 400 denies the
+ * pool only where the plane gave it, which the plane says by naming its
+ * release on every answer: a proxy in front of a plane it cannot reach answers
+ * those of its own. An answer this side cannot read is an outage rather than a
+ * denial, because a denial ends the pool over a skew the plane did not refuse.
  *
  * A runner names its package and version on the poll, and the answer may name
  * the release chuggy pins for that package; the cluster's client names none.
@@ -17,7 +19,9 @@ import { URL } from "node:url";
 import {
   contractVersionRefusalSchema,
   contractVersionRefusalStatus,
+  workerContractHeader,
   workerContractRelease,
+  workerContractVersionOf,
 } from "@chuggy/worker-contract/workerContract";
 import {
   workerPoolPollQuery,
@@ -132,22 +136,39 @@ function poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions) {
 }
 
 /**
- * @param {number} status
- * @returns {WorkerPoolPolled}
+ * Whether the plane itself gave an answer, which names the release it was
+ * built with.
+ *
+ * @param {Response} answered
  */
-function poolPlaneRefusal(status) {
+function poolPlaneAnswered(answered) {
+  const release = answered.headers.get(workerContractHeader);
+  return release !== null && workerContractVersionOf(release) !== undefined;
+}
+
+/**
+ * @param {Response} answered
+ * @returns {Promise<WorkerPoolPolled>}
+ */
+async function poolPlaneRefusal(answered) {
+  const { status } = answered;
   if (status === 401) return { polled: "Stale" };
+  if (await poolPlaneReleaseRefused(answered))
+    return {
+      polled: "Denied",
+      evidence: `the plane does not serve worker contract ${workerContractRelease}`,
+    };
+  if ((status === 404 || status === 400) && !poolPlaneAnswered(answered))
+    return {
+      polled: "Unavailable",
+      evidence: `the plane's address answered ${String(status)}, naming no release`,
+    };
   if (status === 404)
     return { polled: "Denied", evidence: "the plane serves no such pool" };
   if (status === 400)
     return {
       polled: "Denied",
       evidence: "the plane refused this pool's own request",
-    };
-  if (status === contractVersionRefusalStatus)
-    return {
-      polled: "Denied",
-      evidence: `the plane does not serve worker contract ${workerContractRelease}`,
     };
   return {
     polled: "Unavailable",
@@ -228,7 +249,7 @@ async function poolPlanePolled(
   }
   return answered.status === 200
     ? poolPlaneReconciled(answered)
-    : poolPlaneRefusal(answered.status);
+    : poolPlaneRefusal(answered);
 }
 
 /**
@@ -262,14 +283,16 @@ async function poolPlaneReleaseRefused(answered) {
 }
 
 /**
- * @param {number} status
+ * @param {Response} answered
  * @returns {WorkerPoolSettled}
  */
-function poolPlaneSettlement(status) {
+function poolPlaneSettlement(answered) {
+  const { status } = answered;
   if (status === 204) return "Settled";
   if (status === 409) return "Lost";
   if (status === 401) return "Stale";
-  if (status === 404 || status === 400) return "Denied";
+  if ((status === 404 || status === 400) && poolPlaneAnswered(answered))
+    return "Denied";
   return "Unavailable";
 }
 
@@ -298,7 +321,7 @@ async function poolPlaneSettled(settings, fetcher, token, assignment, outcome) {
     });
     return (await poolPlaneReleaseRefused(answered))
       ? "Denied"
-      : poolPlaneSettlement(answered.status);
+      : poolPlaneSettlement(answered);
   } catch {
     return "Unavailable";
   }

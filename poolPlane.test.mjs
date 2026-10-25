@@ -41,9 +41,12 @@ const session = {
   bearer: "session-bearer",
 };
 
-/** One answer as the plane would send it, with no server to send it. */
+/** One answer as the plane would send it, naming its release as every one does, with no server to send it. */
 function answered(status, body) {
-  return new globalThis.Response(status === 204 ? null : body, { status });
+  return new globalThis.Response(status === 204 ? null : body, {
+    status,
+    headers: { [workerContractHeader]: workerContractRelease },
+  });
 }
 
 /** A plane client whose every request is answered `status` and `body`. */
@@ -196,6 +199,40 @@ test("each settlement is the path it is said on and the body it needs", async ()
   }
 });
 
+test("the plane's own 404, empty as it sends one, denies the pool from a poll and from a settlement", async () => {
+  const refusing = answering(404, "");
+  assert.deepEqual(await refusing.poll("pool-token", [], 1), {
+    polled: "Denied",
+    evidence: "the plane serves no such pool",
+  });
+  assert.equal(
+    await refusing.settle("pool-token", "one", { outcome: "Accepted" }),
+    "Denied",
+  );
+});
+
+test("a 404 or a 400 naming no release of the plane's is an outage, from a poll and from a settlement", async () => {
+  for (const [status, body, headers] of [
+    [404, "404 page not found\n", { "content-type": "text/plain" }],
+    [400, "400 Bad Request", { "content-type": "text/plain" }],
+    [404, "", { [workerContractHeader]: "not a release" }],
+  ]) {
+    const proxy = poolPlaneClient(
+      planeSettings,
+      async () => new globalThis.Response(body, { status, headers }),
+    );
+    assert.deepEqual(await proxy.poll("pool-token", [], 1), {
+      polled: "Unavailable",
+      evidence: `the plane's address answered ${String(status)}, naming no release`,
+    });
+    assert.equal(
+      await proxy.settle("pool-token", "one", { outcome: "Accepted" }),
+      "Unavailable",
+      `status ${String(status)}`,
+    );
+  }
+});
+
 test("a settlement the plane will not take says which kind of no it was", async () => {
   for (const [status, expected] of [
     [204, "Settled"],
@@ -338,5 +375,9 @@ test("a plane refusing this client's release ends the pool rather than losing an
       outcome: "Accepted",
     }),
     "Lost",
+  );
+  assert.equal(
+    (await answering(409, "").poll("pool-token", [], 1)).polled,
+    "Unavailable",
   );
 });
