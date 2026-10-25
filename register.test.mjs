@@ -16,7 +16,9 @@ import test from "node:test";
 import { URL } from "node:url";
 
 import {
+  registerAdvertised,
   registerAgents,
+  registerDeclaredSchema,
   registerEndpointRefusal,
   registerPoolDirectory,
   registerPoolFileName,
@@ -24,6 +26,7 @@ import {
   registerPoolNameDefault,
   registerRedeemed,
   registerAskedChecked,
+  registerPlatform,
   registerRequest,
 } from "./register.mjs";
 import {
@@ -100,11 +103,6 @@ test("each refusal chuggy answers is one line, naming nothing it was sent", asyn
       404,
       { error: { code: "NotFound", message: "Resource not found." } },
       "the registration token is unknown, spent or expired; mint another in chuggy's console",
-    ],
-    [
-      403,
-      { error: { code: "CapabilityNotPermitted", message: "no" } },
-      "the registration token does not permit every capability declared, of Platform:Linux:Amd64; mint one that does",
     ],
     [
       400,
@@ -379,6 +377,139 @@ test("a runner declares each agent it holds a credential file for and has an ima
     ),
     ["Agent:Claude"],
   );
+});
+
+/** What a runner on x64 finds of itself, holding a Codex credential beside Claude's and an image for each. */
+const advertising = {
+  platforms: ["Platform:Linux:Amd64"],
+  files: { tokenFile: "/t", agentCredentialFiles: { Codex: "/c" } },
+  images: [{ capabilities: ["Agent:Claude", "Agent:Codex", "Tool:Bazel"] }],
+  host: false,
+  declared: undefined,
+  recorded: ["Platform:Linux:Amd64", "Agent:Claude", "Tool:Bazel"],
+};
+
+/**
+ * Catches a runner whose own file declares capabilities still advertising
+ * those it was registered with, or one whose file declares none dropping them.
+ */
+test("a runner advertises the capabilities its own file declares where it declares any, and otherwise those it was registered with", () => {
+  assert.deepEqual(registerAdvertised(advertising), {
+    capabilities: [
+      "Platform:Linux:Amd64",
+      "Agent:Claude",
+      "Tool:Bazel",
+      "Agent:Codex",
+    ],
+  });
+  for (const [declared, capabilities] of [
+    [
+      ["Tool:Make"],
+      ["Platform:Linux:Amd64", "Tool:Make", "Agent:Claude", "Agent:Codex"],
+    ],
+    [[], ["Platform:Linux:Amd64", "Agent:Claude", "Agent:Codex"]],
+  ])
+    assert.deepEqual(registerAdvertised({ ...advertising, declared }), {
+      capabilities,
+    });
+});
+
+/**
+ * Catches a platform taken from what a runner was registered with or from
+ * what its file declares, rather than found of the machine, and an agent it
+ * was registered with advertised where it has no image or host to run it.
+ */
+test("a runner advertises the platforms it finds, never those it was registered with, and an agent it was registered with only where it can run it", () => {
+  const recorded = [
+    "Platform:Linux:Amd64",
+    "Platform:MacOS:Arm64",
+    "Agent:Claude",
+    "Agent:Gemini",
+    "Agent:Codex",
+    "Tool:Bazel",
+  ];
+  const found = {
+    ...advertising,
+    platforms: ["Platform:Linux:Arm64"],
+    files: { tokenFile: "/t" },
+    images: [{ capabilities: ["Agent:Gemini"] }],
+    recorded,
+  };
+  assert.deepEqual(registerAdvertised(found), {
+    capabilities: ["Platform:Linux:Arm64", "Agent:Gemini", "Tool:Bazel"],
+  });
+  assert.deepEqual(registerAdvertised({ ...found, host: true }), {
+    capabilities: [
+      "Platform:Linux:Arm64",
+      "Agent:Claude",
+      "Agent:Gemini",
+      "Agent:Codex",
+      "Tool:Bazel",
+    ],
+  });
+  assert.deepEqual(registerPlatform("arm64"), {
+    platform: "Platform:Linux:Arm64",
+  });
+  assert.deepEqual(registerPlatform("x64"), {
+    platform: "Platform:Linux:Amd64",
+  });
+  assert.deepEqual(registerPlatform("ia32"), {
+    refused: "this machine is ia32, and a pool runs Linux on x64 or arm64",
+  });
+});
+
+/**
+ * Catches a capability advertised twice, which the plane refuses with an
+ * answer that ends the pool, and a set past the contract's bound.
+ */
+test("a runner advertises each capability once, and a set past the contract's bound is refused", () => {
+  assert.deepEqual(
+    registerAdvertised({
+      ...advertising,
+      recorded: ["Tool:Bazel", "Tool:Bazel", "Agent:Claude"],
+    }),
+    {
+      capabilities: [
+        "Platform:Linux:Amd64",
+        "Tool:Bazel",
+        "Agent:Claude",
+        "Agent:Codex",
+      ],
+    },
+  );
+  const many = Array.from(
+    { length: 61 },
+    (_, index) => `Tool:${String(index)}`,
+  );
+  assert.equal(
+    registerAdvertised({ ...advertising, declared: many }).capabilities?.length,
+    64,
+  );
+  assert.deepEqual(
+    registerAdvertised({ ...advertising, declared: [...many, "Tool:over"] }),
+    {
+      refused:
+        "this runner would advertise 65 capabilities, its platforms and agents among them, and a pool advertises at most 64",
+    },
+  );
+});
+
+/** Catches a runner's file declaring a platform, or one capability twice. */
+test("a runner's file declares capabilities a requirement can name, once each, and never a platform", () => {
+  assert.deepEqual(
+    registerDeclaredSchema.parse(["Tool:Bazel", "Agent:Codex"]),
+    ["Tool:Bazel", "Agent:Codex"],
+  );
+  for (const [declared, path, why] of [
+    [["Tool:Bazel", "Platform:Linux:Amd64"], [1], /is a platform/u],
+    [["Tool:Bazel", "Tool:Bazel"], [1], /is named by an earlier entry/u],
+    [["Tool Bazel"], [0], /Invalid string/u],
+  ]) {
+    const [issue] =
+      registerDeclaredSchema.safeParse(declared).error?.issues ?? [];
+    assert.deepEqual(issue?.path, path, JSON.stringify(declared));
+    assert.match(issue?.message ?? "", why);
+  }
 });
 
 /**

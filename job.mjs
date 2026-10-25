@@ -79,7 +79,7 @@ export const jobProviderCredentialFile = join(
 export const jobClaudeAgent = "Claude";
 
 /** What a capability requiring an agent begins with, before the agent's name. */
-const jobAgentCapabilityPrefix = "Agent:";
+export const jobAgentCapabilityPrefix = "Agent:";
 
 /**
  * The capability an assignment requires an agent by.

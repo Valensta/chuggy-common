@@ -1,9 +1,9 @@
 /**
  * The pool loop's plane: the poll and the settlement over HTTP. chuggy's
  * `src/adapters/http/poolPlaneClient.ts` is the same client in TypeScript, and
- * a change to one is a change to both, but for the runner a poll names and the
- * release an answer names for it, which that cluster client neither names nor
- * reads.
+ * a change to one is a change to both, but for what a runner names on a poll
+ * and the release an answer names for it, which that cluster client neither
+ * names nor reads.
  *
  * The status is the answer and nothing here retries it; a 409 is the one
  * status two answers share, told apart by its body. A 404 or a 400 denies the
@@ -13,7 +13,9 @@
  * denial, because a denial ends the pool over a skew the plane did not refuse.
  *
  * A runner names its package and version on the poll, and the answer may name
- * the release chuggy pins for that package.
+ * the release chuggy pins for that package. A runner may name its capabilities
+ * on the poll too, whose set replaces the one its registration recorded, and a
+ * client given none names none, leaving that set as it is.
  */
 
 import { TextDecoder } from "node:util";
@@ -27,10 +29,13 @@ import {
   workerContractVersionOf,
 } from "@chuggy/worker-contract/workerContract";
 import {
+  workerPoolCapabilitiesMax,
   workerPoolPollQuery,
   workerPoolPollRoute,
   workerPoolReconciliationSchema,
   workerPoolSettlementPath,
+  workerRunnerCapabilitiesHeader,
+  workerRunnerCapabilitiesSchema,
   workerRunnerHeader,
   workerRunnerSchema,
 } from "@chuggy/worker-contract/workerPool";
@@ -50,6 +55,7 @@ import { workerPlaneHeaders } from "./transport.mjs";
  * @property {number} pollTimeoutMs the operator's to size, since a long poll cut shorter than the plane's own wait is an outage every idle window
  * @property {number} settleTimeoutMs
  * @property {WorkerRunner} [runner] the runner's package and version, which each poll names
+ * @property {readonly string[]} [capabilities] the runner's capabilities, which each poll names, each once
  */
 
 /** The most one reconciliation may weigh, orders above a bounded batch of assignments. */
@@ -106,7 +112,22 @@ export function checkedPoolPlaneClientSettings(input) {
     throw new RangeError(
       "pool plane runner must name a package and a plain release version",
     );
-  return { ...input, baseUrl: url.toString() };
+  const capabilities =
+    input.capabilities === undefined
+      ? undefined
+      : [...new Set(input.capabilities)];
+  if (
+    capabilities !== undefined &&
+    !workerRunnerCapabilitiesSchema.safeParse(capabilities).success
+  )
+    throw new RangeError(
+      `pool plane capabilities must be at most ${String(workerPoolCapabilitiesMax)} tokens a pool can declare`,
+    );
+  return {
+    ...input,
+    baseUrl: url.toString(),
+    ...(capabilities === undefined ? {} : { capabilities }),
+  };
 }
 
 /**
@@ -233,7 +254,7 @@ async function poolPlanePolled(
   let answered;
   try {
     const url = poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions);
-    const { runner } = settings;
+    const { runner, capabilities } = settings;
     answered = await fetcher(url, {
       method: "GET",
       signal: globalThis.AbortSignal.timeout(settings.pollTimeoutMs),
@@ -242,6 +263,9 @@ async function poolPlanePolled(
         ...(runner === undefined
           ? {}
           : { [workerRunnerHeader]: `${runner.package}/${runner.version}` }),
+        ...(capabilities === undefined
+          ? {}
+          : { [workerRunnerCapabilitiesHeader]: capabilities.join(",") }),
       }),
     });
   } catch {
