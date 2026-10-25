@@ -9,6 +9,12 @@
  * answers turns a loop of reads into a loop of grants; the expiry is the
  * issuer's statement about wall-clock time and is held against one. No
  * message here carries the secret or a token, though every grant carries both.
+ *
+ * A REFUSAL AN ISSUER ALSO GIVES A LOOKUP IT COULD NOT MAKE IS CONFIRMED. Such
+ * a refusal is final only once every grant across the confirmation interval
+ * is refused the same way, and is an outage until then: an issuer whose
+ * database is away answers as it would for a client deleted, until it is
+ * taken out of rotation.
  */
 
 import { Buffer } from "node:buffer";
@@ -35,6 +41,7 @@ import { boundedResponseBytes } from "./boundedResponse.mjs";
  * @property {number} responseReadsMax
  * @property {number} refreshMarginMs how far ahead of expiry a held token stops being handed out
  * @property {number} mintCooldownMs the operator's bound on grant requests, shorter than the margin so a failed refresh is tried again before the token expires
+ * @property {number} refusalConfirmMs how long a refusal an issuer also gives a lookup it could not make must persist before it is final
  * @property {typeof fetch} [fetch]
  * @property {() => number} [currentTimeEpochMs]
  * @property {() => number} [monotonicMs]
@@ -70,6 +77,14 @@ const clientCredentialsRefusalCodes = /** @type {const} */ ([
   "invalid_scope",
 ]);
 
+/**
+ * The codes an issuer refuses with for a client it could not look up, as it
+ * does for one it does not have. fosite answers every failed read of its
+ * client store `invalid_client`; every other code it decides against the
+ * request or the registration that read returned.
+ */
+const clientCredentialsLookupCodes = new Set(["invalid_client"]);
+
 /** The statuses RFC 6749 §5.2 refuses a grant with: 401 for a client that failed authentication, 400 for the rest. */
 const clientCredentialsRefusalStatuses = new Set([400, 401]);
 
@@ -96,6 +111,7 @@ function clientCredentialsChecked(config) {
     [config.responseReadsMax, "response read bound"],
     [config.refreshMarginMs, "refresh margin"],
     [config.mintCooldownMs, "mint cooldown"],
+    [config.refusalConfirmMs, "refusal confirmation"],
   ])
     if (!Number.isSafeInteger(bound) || bound < 1)
       throw new RangeError(
@@ -147,7 +163,48 @@ export class ClientCredentialsRefused extends Error {
     super(`client credentials grant returned ${String(status)} ${code}`);
     this.name = "ClientCredentialsRefused";
     this.status = status;
+    this.code = code;
   }
+}
+
+/**
+ * What a mint raises, a refusal an issuer also gives a lookup it could not
+ * make held as an outage until every grant across `confirmMs` has been
+ * refused the same way. Any other answer starts the interval again.
+ *
+ * @param {number} confirmMs
+ */
+function clientCredentialsRefusals(confirmMs) {
+  /** @type {{status: number, code: string, atMonotonicMs: number} | undefined} */
+  let first;
+  const seconds = (/** @type {number} */ ms) =>
+    `${String(Math.floor(ms / millisecondsPerSecond))}s`;
+  return {
+    granted: () => {
+      first = undefined;
+    },
+    /**
+     * @param {unknown} failure
+     * @param {number} atMonotonicMs when the mint that failed began
+     */
+    failed: (failure, atMonotonicMs) => {
+      if (
+        !(failure instanceof ClientCredentialsRefused) ||
+        !clientCredentialsLookupCodes.has(failure.code)
+      ) {
+        first = undefined;
+        return failure;
+      }
+      if (first?.status !== failure.status || first.code !== failure.code)
+        first = { status: failure.status, code: failure.code, atMonotonicMs };
+      const heldMs = atMonotonicMs - first.atMonotonicMs;
+      return heldMs >= confirmMs
+        ? failure
+        : new Error(
+            `${failure.message}, a refusal being confirmed: ${seconds(heldMs)} of ${seconds(confirmMs)}`,
+          );
+    },
+  };
 }
 
 /**
@@ -253,7 +310,8 @@ export function clientCredentialsMonotonicMs() {
  * Mints on demand and holds the grant until its margin. Callers arriving while
  * a mint is in flight join it, and one arriving inside the cooldown is handed
  * a token still short of its expiry. A failed mint is not held, so the next
- * caller past the cooldown mints again and carries the failure itself.
+ * caller past the cooldown mints again and carries the failure itself, a
+ * refusal not yet confirmed as an outage.
  *
  * @param {ClientCredentialsConfig} input
  * @returns {AccessTokenSource}
@@ -269,13 +327,15 @@ export function clientCredentialsTokenSource(input) {
   let minting;
   /** @type {number | undefined} */
   let attemptedAtMonotonicMs;
+  const refusals = clientCredentialsRefusals(config.refusalConfirmMs);
   const cooling = () =>
     attemptedAtMonotonicMs !== undefined &&
     monotonicMs() - attemptedAtMonotonicMs < config.mintCooldownMs;
   const mint = () => {
     const inFlight = minting;
     if (inFlight !== undefined) return inFlight;
-    attemptedAtMonotonicMs = monotonicMs();
+    const attemptedAt = monotonicMs();
+    attemptedAtMonotonicMs = attemptedAt;
     return (minting = clientCredentialsMinted(
       config,
       transport,
@@ -284,11 +344,12 @@ export function clientCredentialsTokenSource(input) {
       (granted) => {
         held = granted;
         minting = undefined;
+        refusals.granted();
         return granted;
       },
       (failure) => {
         minting = undefined;
-        throw failure;
+        throw refusals.failed(failure, attemptedAt);
       },
     ));
   };

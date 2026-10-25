@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 
+import {
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
+
 import { pausedClock } from "./clock.fixture.mjs";
 import { heartbeatIntervalMilliseconds, keepWorkerLease } from "./lease.mjs";
 import { WorkerPlaneRefusal, workerRequest } from "./transport.mjs";
@@ -10,17 +15,27 @@ const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 
 /**
  * A lease over the transport a job pod is given, on a plane answering every
- * ask of the nth beat with the nth of `statuses`. `beat()` is the interval's
- * tick, which must begin a beat, awaited until the lease has read its end.
+ * ask of the nth beat with the nth of `statuses`, naming its release as it
+ * does on every answer; a status written `proxy` is a proxy's in front of
+ * it, naming none. `beat()` is the interval's tick, which must begin a beat,
+ * awaited until the lease has read its end.
  */
 function leaseOver(statuses) {
   let tick;
   const beats = [];
   const stop = keepWorkerLease(task, "bearer", {
     request: (...args) => {
-      const status = statuses[beats.length];
+      const answer = statuses[beats.length];
+      const [status, named] =
+        typeof answer === "number" ? [answer, true] : [answer.proxy, false];
       const beat = workerRequest(...args, {
-        fetch: async () => ({ ok: status === 204, status }),
+        fetch: async () =>
+          new globalThis.Response(null, {
+            status,
+            headers: named
+              ? { [workerContractHeader]: workerContractRelease }
+              : {},
+          }),
         ...pausedClock(),
       });
       beats.push(beat.catch(() => undefined));
@@ -118,4 +133,29 @@ test("a heartbeat refused after one that was never answered still fails the work
   await beat();
 
   await assert.rejects(stop(), /answered 409/u);
+});
+
+/**
+ * A proxy answering for a plane it cannot reach. Catches a lease that reads
+ * the proxy's status as the plane's refusal, and so fails an attempt the
+ * plane went on to renew.
+ */
+test("a heartbeat a proxy answered for is forgotten, and one the plane refused after still fails the worker", async () => {
+  for (const status of [400, 401, 404, 409]) {
+    const { stop, beat } = leaseOver([{ proxy: status }, 204]);
+
+    await beat();
+    await beat();
+
+    await stop();
+  }
+  const { stop, beat } = leaseOver([{ proxy: 404 }, 409]);
+
+  await beat();
+  await beat();
+
+  await assert.rejects(
+    stop(),
+    /^Error: worker plane \/v1\/heartbeat answered 409$/u,
+  );
 });

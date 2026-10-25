@@ -34,13 +34,19 @@ import { poolClientTokens } from "./poolTokens.mjs";
  * @property {number} sessionsMax
  */
 
-/** Chuggy's own pool client's bounds, which its issuer and plane are sized for. */
+/**
+ * Chuggy's own pool client's bounds, which its issuer and plane are sized for.
+ * A refusal is confirmed for longer than the issuer stays ready with its
+ * database away, which its readiness probe bounds, and for little more, since
+ * a deleted client's run ends only once it has passed.
+ */
 const tokenSettings = {
   requestTimeoutMs: 10_000,
   responseBytesMax: 64 * 1024,
   responseReadsMax: 64,
   refreshMarginMs: 60_000,
   mintCooldownMs: 1_000,
+  refusalConfirmMs: 90_000,
 };
 const planeSettings = { pollTimeoutMs: 120_000, settleTimeoutMs: 10_000 };
 const jobPlaneSettings = { timeoutMs: 10_000 };

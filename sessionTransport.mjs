@@ -7,9 +7,9 @@
  * A RETRY IS FOR A CONDITION, NEVER FOR A DECISION. The session routes answer
  * `stop` and `retry` as distinct things — a fenced attempt is `401`, a batch
  * that changed under its own number is `409`, an exhausted store is `413` — and
- * asking any of those again gets the same answer, later. So a thrown fetch and
- * a server error are retried and every other status is returned for the caller
- * to read.
+ * asking any of those again gets the same answer, later. So a thrown fetch, a
+ * server error and a failing status the plane did not answer are retried, and
+ * every other status is returned for the caller to read.
  *
  * THE FIFTH ARGUMENT IS THE SAME BAG `workerRequest` TAKES. A caller reaching
  * the plane through whichever of the two its mode was given cannot name the
@@ -26,6 +26,7 @@ import { sessionPlaneAnswers } from "@chuggy/worker-contract/sessionPlane";
 import { workerPlaneStopSchema } from "@chuggy/worker-contract/workerPlane";
 
 import {
+  workerPlaneAnswered,
   workerPlaneAwayMillisecondsMax,
   workerPlaneHeaders,
   workerPlaneRetryPause,
@@ -67,13 +68,15 @@ export async function sessionRequest(
         ...init,
         headers: workerPlaneHeaders(bearer, init.headers),
       });
+      const answered = response.ok || workerPlaneAnswered(response);
       if (
-        response.status < serverErrorStatusMin ||
-        settled.includes(response.status)
+        answered &&
+        (response.status < serverErrorStatusMin ||
+          settled.includes(response.status))
       )
         return response;
       refusal = new Error(
-        `worker plane ${path} answered ${String(response.status)}`,
+        `worker plane ${path} answered ${String(response.status)}${answered ? "" : ", naming no release"}`,
       );
       delay = retryDelay(response, delay);
     } catch (failure) {
@@ -87,9 +90,10 @@ export async function sessionRequest(
 /**
  * One request under the same headers, asked once and abandoned at
  * `deadlineMs`, or when `signal` says its asker has let go of it. It is what
- * a caller no turn waits for reaches the plane through: every status is
- * returned for it to read, and a thrown fetch, a passed deadline or an asker
- * that let go raises at once.
+ * a caller no turn waits for reaches the plane through: every status the
+ * plane answered is returned for it to read, and a thrown fetch, a failing
+ * status the plane did not answer, a passed deadline or an asker that let go
+ * raises at once.
  */
 export async function sessionRequestOnce(
   task,
@@ -100,7 +104,7 @@ export async function sessionRequestOnce(
 ) {
   const { fetch: send = globalThis.fetch, deadlineMs, signal } = transport;
   const deadline = globalThis.AbortSignal.timeout(deadlineMs);
-  return send(new URL(path, task.workerPlane.url), {
+  const response = await send(new URL(path, task.workerPlane.url), {
     ...init,
     headers: workerPlaneHeaders(bearer, init.headers),
     signal:
@@ -108,6 +112,11 @@ export async function sessionRequestOnce(
         ? deadline
         : globalThis.AbortSignal.any([signal, deadline]),
   });
+  if (response.ok || workerPlaneAnswered(response)) return response;
+  await response.body?.cancel();
+  throw new Error(
+    `worker plane ${path} answered ${String(response.status)}, naming no release`,
+  );
 }
 
 /** What the plane answers a heartbeat with once the lease is gone, which is a stop on every route. */

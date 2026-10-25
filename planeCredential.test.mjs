@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
 import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnvironment";
 
 import {
@@ -166,7 +170,10 @@ test("another repository the plane mints nothing for is answered nothing", async
 test("a session reaches the plane through the transport it is actually given", async () => {
   const writer = writerOf();
   const answers = [
-    { status: 404, ok: false, json: async () => ({ reason: "NotMinted" }) },
+    new globalThis.Response(JSON.stringify({ reason: "NotMinted" }), {
+      status: 404,
+      headers: { [workerContractHeader]: workerContractRelease },
+    }),
     { status: 200, ok: true, json: async () => minted },
   ];
   const sent = [];
