@@ -29,6 +29,7 @@ import {
   textStart,
 } from "./sessionLive.fixture.mjs";
 import { sessionStopBounds, sessionStopWatch } from "./sessionStop.mjs";
+import { sessionRequestOnce } from "./sessionTransport.mjs";
 
 const stopPath = sessionPlaneRoutes.turnStopped.path;
 const pollMs = 1_000;
@@ -137,19 +138,12 @@ test("a hold the plane spent is followed at once, and an answer sooner than the 
 });
 
 /**
- * A condition is asked past: a plane that raised or failed, and the answers
- * something between the runner and the plane gives of its own accord. Taken
- * as the plane's decision, one of those would leave every later stop of the
- * session unheard.
+ * A condition is asked past: a plane that raised or failed. Taken as the
+ * plane's decision, one of those would leave every later stop of the session
+ * unheard.
  */
-test("a plane that could not be asked, or was answered for with a condition that passes, is asked again after the mailbox's pause", async () => {
-  for (const failure of [
-    new Error("unreachable"),
-    answered(503),
-    answered(408),
-    answered(425),
-    answered(429),
-  ]) {
+test("a plane that could not be asked, or failed, is asked again after the mailbox's pause", async () => {
+  for (const failure of [new Error("unreachable"), answered(503)]) {
     const { watch, seen } = watchOver([failure, stopped("turn-1")]);
 
     watch.watching("turn-1");
@@ -168,6 +162,7 @@ test("a plane that answers anything else is asked nothing more, of that turn or 
     answered(403),
     answered(404),
     answered(409),
+    answered(429),
     stopped("turn-9"),
   ]) {
     const { watch, seen } = watchOver([refusal, stopped("turn-1")]);
@@ -799,9 +794,9 @@ test("a session that ends inside a turn lets go of the turn's watch", async () =
 });
 
 /**
- * The session over the same condition: the plane is the suites' own from the
- * second question on, and the first is answered for it as something between
- * the two would.
+ * The session over a condition a proxy answers: the plane is the suites' own
+ * from the second question on, and the first is answered for it through the
+ * transport the watch is given by something between the two.
  */
 test("one condition answered to the watch leaves the stop of a later turn heard", async () => {
   const plane = planeOf(
@@ -812,11 +807,14 @@ test("one condition answered to the watch leaves the stop of a later turn heard"
     stoppedOnce(["turn-2"]),
   );
   let conditions = 0;
-  const requestOnce = (asked, held, path, ...rest) => {
+  const requestOnce = (asked, held, path, init, transport) => {
     if (path !== stopPath || conditions > 0)
-      return plane.requestOnce(asked, held, path, ...rest);
+      return plane.requestOnce(asked, held, path, init, transport);
     conditions += 1;
-    return Promise.resolve(new globalThis.Response(null, { status: 429 }));
+    return sessionRequestOnce(asked, held, path, init, {
+      ...transport,
+      fetch: async () => new globalThis.Response(null, { status: 429 }),
+    });
   };
   const heardWithin = 200;
   const runtime = interruptible((turn, interrupted) =>

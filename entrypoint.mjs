@@ -837,9 +837,6 @@ export async function runWorkerTask(context, commands) {
   return { ...run, diagnosticPath: checkDiagnosticPath };
 }
 
-/** What a plane older than the task route answers it with: the framework's own, which no answer map describes. */
-const taskRouteAbsent = 404;
-
 /** The status the task route answers a task with, and the kind a work task is told from a session's by. */
 const [taskAnswered] = answeredWith(
   workerPlaneAnswers.task,
@@ -860,11 +857,6 @@ function envelopeTaskRefused(refused, settles) {
  * the task route's own stop shares the status the release refusal comes on.
  */
 async function envelopeTaskRead(response) {
-  if (response.status === taskRouteAbsent)
-    return envelopeTaskRefused(
-      "the worker plane predates the task route",
-      true,
-    );
   const body = await response.json().catch(() => undefined);
   if (response.status === contractVersionRefusalStatus) {
     const version = contractVersionRefusalSchema.safeParse(body);
@@ -923,7 +915,7 @@ export async function envelopeTask(envelope, request = workerRequest) {
       envelope.bearer,
       workerPlaneRoutes.task.path,
       {},
-      { settled: [taskRouteAbsent, contractVersionRefusalStatus] },
+      { settled: [contractVersionRefusalStatus] },
     ),
   );
   if (read.task !== undefined)

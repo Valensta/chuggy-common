@@ -39,7 +39,11 @@ import {
   resultManifestDocumentSchema,
   resultReportCharsMax,
 } from "@chuggy/worker-contract/workerDocuments";
-import { contractVersionRefusalStatus } from "@chuggy/worker-contract/workerContract";
+import {
+  contractVersionRefusalStatus,
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
 import { workerWorkspaceVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { workerPlaneAnswers } from "@chuggy/worker-contract/workerPlane";
 import {
@@ -660,6 +664,77 @@ test("every status a session route the pod calls may answer is one the pod has a
   );
 });
 
+/** What a proxy answers in front of a plane it cannot reach: a status of its own, naming no release. */
+function proxyAnswered(status) {
+  return new globalThis.Response("no plane answered this\n", {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+/**
+ * What one caller did when a proxy answered `route`'s first ask with
+ * `status`, and the plane answered every ask after as it does on success:
+ * `reaction`'s names for it, the plane's own asks numbered as they reach it.
+ */
+async function proxyReaction(wire, success, transport, caller, route, status) {
+  const asks = new Map();
+  const answered = new Map();
+  const plane = planeFetch(wire, (asked) => {
+    const nth = (answered.get(asked) ?? 0) + 1;
+    answered.set(asked, nth);
+    return success(asked, nth);
+  });
+  const fetch = async (url, init = {}) => {
+    const asked = routeOf(wire, init.method ?? "GET", new URL(url).pathname);
+    asks.set(asked, (asks.get(asked) ?? 0) + 1);
+    return asked === route && asks.get(asked) === 1
+      ? proxyAnswered(status)
+      : plane.fetch(url, init);
+  };
+  const carried = await caller(overPlane(transport(route), fetch)).then(
+    () => true,
+    () => false,
+  );
+  const count = asks.get(route) ?? 0;
+  if (count === 0) return "unreached";
+  if (count > 1) return "retries";
+  return carried ? "reads" : "stops";
+}
+
+/**
+ * Catches a status read as the plane's that something in front of it gave: a
+ * proxy with no plane to reach names no release, and whatever it answers is
+ * asked past on every route the pod calls, the statuses that stop the pod
+ * among them.
+ */
+test("a status naming no release is asked again on every route the pod calls", async () => {
+  for (const [wire, reactions, callers, success, transport] of [
+    [planes.job, jobReactions, jobCallers, jobSuccess, jobTransport],
+    [
+      planes.session,
+      sessionReactions,
+      sessionCallers,
+      sessionSuccess,
+      sessionTransport,
+    ],
+  ])
+    for (const route of Object.keys(reactions))
+      for (const status of [400, 401, 403, 404, 409, 413, 429])
+        assert.equal(
+          await proxyReaction(
+            wire,
+            success,
+            transport,
+            callers[route],
+            route,
+            status,
+          ),
+          "retries",
+          `${route} answered ${String(status)} by a proxy`,
+        );
+});
+
 /**
  * A plane that serves no version this pod speaks, refusing every call: no
  * route is asked twice, and the first call each kind of pod makes ends it.
@@ -756,7 +831,11 @@ const sessionTaskBare = Object.fromEntries(
  * which it refuses on every route, nor for a session's bearer.
  */
 const taskRefusals = [
-  { what: "a plane older than the task route", status: 404, settles: true },
+  {
+    what: "a status the task route does not answer, which no plane older than it names",
+    status: 404,
+    settles: false,
+  },
   {
     what: "a plane refusing this pod's release",
     status: contractVersionRefusalStatus,
@@ -812,7 +891,10 @@ function refusingTask(refusal) {
       if (route !== "task") return plane.fetch(url, init);
       return new globalThis.Response(
         refusal.body === undefined ? null : JSON.stringify(refusal.body),
-        { status: refusal.status },
+        {
+          status: refusal.status,
+          headers: { [workerContractHeader]: workerContractRelease },
+        },
       );
     },
   };
@@ -853,6 +935,34 @@ test("each refusal of an envelope's task ends the attempt at once, where the pla
         refusal.what,
       );
   }
+});
+
+/**
+ * Catches a proxy's 404 read as a plane too old to have the task route, which
+ * names no release either: the attempt is left to its lease rather than ended
+ * as refused, and its pod gives up only once the plane has been away a lease.
+ */
+test("an envelope's task route answered only by a proxy is asked until the plane has been away a lease, and ends no attempt", async () => {
+  const routes = [];
+  const refused = await envelopeTask(
+    envelope,
+    overPlane(workerRequest, async (url, init = {}) => {
+      routes.push(
+        routeOf(planes.job, init.method ?? "GET", new URL(url).pathname),
+      );
+      return proxyAnswered(404);
+    }),
+  ).then(
+    () => undefined,
+    (error) => error.message,
+  );
+
+  assert.equal(
+    refused,
+    "worker plane /v1/task answered 404, naming no release",
+  );
+  assert.ok(routes.length > 1, String(routes.length));
+  assert.deepEqual([...new Set(routes)], ["task"]);
 });
 
 /**
