@@ -209,9 +209,9 @@ import {
  * @typedef {object} ContainerBackendSettings
  * @property {"docker" | "podman"} engine
  * @property {PoolIdentity} pool
- * @property {string} tokenFile the Claude credential file, which each workload mounts but one whose job requires another agent
+ * @property {string} tokenFile the Claude credential file, which each workload mounts but one whose job requires another agent `agentCredentialFiles` names
  * @property {import("./claudeCredential.mjs").ClaudeCredentialSetting} [claudeCredential] the kind of credential `tokenFile` is; none, and a workload's core reads it as a subscription's token, as it does a site pool's
- * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent mounts in place of `tokenFile`; none, and such a job is refused
+ * @property {Readonly<Record<string, string>>} [agentCredentialFiles] the credential file of each agent but Claude, by the name its `Agent:` capability gives it, which a job requiring that agent mounts in place of `tokenFile`; none, and such a job mounts `tokenFile`
  * @property {string | undefined} registryHost the one registry the pool's token is presented to
  * @property {string | undefined} dockerHost the endpoint docker's context names, which a pull of the pool's registry is told; docker's alone
  * @property {number} timeoutSecsMax

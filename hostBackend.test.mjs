@@ -402,10 +402,11 @@ test("a job is told the kind of its host's Claude credential, and only where the
 
 /**
  * Catches a job requiring Codex handed the Claude credential, or told its
- * kind; any other job handed the Codex credential; or the runner's check
- * asked of a file other than the one the job reads.
+ * kind; any other job handed the Codex credential, one requiring an agent the
+ * host holds no file for among them; or the runner's check asked of a file
+ * other than the one the job reads.
  */
-test("a job requiring an agent reads that agent's credential file, told the Claude credential's kind only where it is Claude's", async (t) => {
+test("a job requiring an agent reads that agent's credential file, or the Claude one where the host names none for it, told the Claude credential's kind only where it is Claude's", async (t) => {
   const codexFile = "/Users/owner/.codex/auth.json";
   const overrides = {
     agentCredentialFiles: { Codex: codexFile },
@@ -418,6 +419,7 @@ test("a job requiring an agent reads that agent's credential file, told the Clau
     [["Platform:MacOS:Arm64", "Agent:Codex"], "Codex"],
     [["Platform:MacOS:Arm64", "Agent:Claude"], "Claude"],
     [["Platform:MacOS:Arm64"], "Claude"],
+    [["Platform:MacOS:Arm64", "Agent:Gemini"], "Claude"],
   ]) {
     const { backend, settings, seen, tokenFilesAsked } = await harness(
       t,
@@ -442,46 +444,35 @@ test("a job requiring an agent reads that agent's credential file, told the Clau
 });
 
 /**
- * Catches a job requiring an agent this host holds no file for, or several,
- * run with another agent's credential rather than refused; or a runner's
- * reason a Codex file cannot be read passed by.
+ * Catches a job requiring several agents run with one agent's credential
+ * rather than refused, or a runner's reason a Codex file cannot be read
+ * passed by.
  */
-test("a job requiring an agent the host names no credential for, or several agents, is refused, as is one the runner says cannot read its agent's file, and nothing is run", async (t) => {
+test("a job requiring several agents is refused, as is one the runner says cannot read its agent's file, and nothing is run", async (t) => {
   const codexFile = "/Users/owner/.codex/auth.json";
   const required = (...agents) =>
     assignment({ capabilities: ["Platform:MacOS:Arm64", ...agents] });
-  const without = await harness(t, "sleep");
+  const { backend, root, tokenFilesAsked, refuseTokenFile, settings } =
+    await harness(t, "sleep", { agentCredentialFiles: { Codex: codexFile } });
   assert.deepEqual(
-    await without.backend.place(required("Agent:Codex"), "Job"),
-    {
-      placed: "Refused",
-      evidence:
-        "the assignment requires Agent:Codex, and this runner names no Codex credential; name one in the runner's configuration",
-    },
-  );
-  const named = await harness(t, "sleep", {
-    agentCredentialFiles: { Codex: codexFile },
-  });
-  assert.deepEqual(
-    await named.backend.place(required("Agent:Claude", "Agent:Codex"), "Job"),
+    await backend.place(required("Agent:Claude", "Agent:Codex"), "Job"),
     {
       placed: "Refused",
       evidence:
         "the assignment requires Agent:Claude and Agent:Codex, and a job is handed one agent's credential, so this runner cannot tell which; require one agent",
     },
   );
-  named.refuseTokenFile("the Codex auth file is empty");
-  assert.deepEqual(await named.backend.place(required("Agent:Codex"), "Job"), {
+  refuseTokenFile("the Codex auth file is empty");
+  assert.deepEqual(await backend.place(required("Agent:Codex"), "Job"), {
     placed: "Refused",
     evidence: "the Codex auth file is empty",
   });
-  assert.deepEqual(named.tokenFilesAsked, [[codexFile, "Codex"]]);
-  for (const { root } of [without, named])
-    await assert.rejects(readdir(join(root, "jobs")), { code: "ENOENT" });
+  assert.deepEqual(tokenFilesAsked, [[codexFile, "Codex"]]);
+  await assert.rejects(readdir(join(root, "jobs")), { code: "ENOENT" });
   assert.throws(
     () =>
       checkedHostBackendSettings({
-        ...named.settings,
+        ...settings,
         agentCredentialFiles: { Claude: codexFile },
       }),
     /^RangeError: agentCredentialFiles names Claude, whose credential file is tokenFile/u,

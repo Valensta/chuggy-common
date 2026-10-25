@@ -1315,40 +1315,62 @@ test("a job requiring an agent mounts that agent's credential file and is told t
 });
 
 /**
- * Catches a job requiring an agent this runner holds no file for, or several,
- * run with another agent's credential rather than refused; or a runner's
- * reason a Codex file cannot be handed over passed by.
+ * Catches a job requiring an agent this runner holds no file for refused, or
+ * handed it otherwise than a job requiring none is, which a pool running that
+ * agent on its Claude file relies on.
  */
-test("a job requiring an agent the runner names no credential for, or several agents, is refused, as is one the runner says cannot read its agent's file, and nothing is run", async (t) => {
+test("a job requiring an agent the runner names no credential file for mounts the Claude one, told its kind, as one requiring none does", async (t) => {
+  const setting = { kind: "Vertex", region: "global", project: "p" };
+  const { backend, state, settings, tokenFilesAsked } = await harness(t, {
+    agentCredentialFiles: { Codex: "/home/op/.codex/auth.json" },
+    claudeCredential: setting,
+    images: [{ image, capabilities: ["Agent:Gemini"] }],
+  });
+  state.images.add(image);
+  assert.equal(
+    (
+      await backend.place(
+        assignment({
+          image: undefined,
+          capabilities: ["Platform:Linux:Amd64", "Agent:Gemini"],
+        }),
+        "Job",
+      )
+    ).placed,
+    "Placed",
+  );
+  await backend.settled();
+  const { argv, envFile } = ranWith(state, "asg-1");
+  assert.ok(
+    argv.includes(
+      `type=bind,source=${settings.tokenFile},target=${jobProviderCredentialFile},readonly`,
+    ),
+  );
+  assert.match(envFile, new RegExp(`^${claudeCredentialVariable}=`, "mu"));
+  assert.deepEqual(tokenFilesAsked, [[settings.tokenFile, "Claude"]]);
+});
+
+/**
+ * Catches a job requiring several agents run with one agent's credential
+ * rather than refused, or a runner's reason a Codex file cannot be handed
+ * over passed by.
+ */
+test("a job requiring several agents is refused, as is one the runner says cannot read its agent's file, and nothing is run", async (t) => {
   const codexFile = "/home/op/.codex/auth.json";
-  const images = [
-    { image, capabilities: ["Agent:Claude", "Agent:Codex", "Agent:Gemini"] },
-  ];
   const required = (...agents) =>
     assignment({
       image: undefined,
       capabilities: ["Platform:Linux:Amd64", ...agents],
     });
-  const without = await harness(t, { images });
-  assert.deepEqual(
-    await without.backend.place(required("Agent:Codex"), "Job"),
+  const { backend, state, tokenFilesAsked, refuseTokenFile } = await harness(
+    t,
     {
-      placed: "Refused",
-      evidence:
-        "the assignment requires Agent:Codex, and this runner names no Codex credential; name one in the runner's configuration",
+      images: [{ image, capabilities: ["Agent:Claude", "Agent:Codex"] }],
+      agentCredentialFiles: { Codex: codexFile },
     },
   );
-  const named = await harness(t, {
-    images,
-    agentCredentialFiles: { Codex: codexFile },
-  });
-  assert.deepEqual(await named.backend.place(required("Agent:Gemini"), "Job"), {
-    placed: "Refused",
-    evidence:
-      "the assignment requires Agent:Gemini, and this runner names no Gemini credential; name one in the runner's configuration",
-  });
   assert.deepEqual(
-    await named.backend.place(
+    await backend.place(
       required("Agent:Claude", "Agent:Codex", "Agent:Claude"),
       "Job",
     ),
@@ -1358,13 +1380,13 @@ test("a job requiring an agent the runner names no credential for, or several ag
         "the assignment requires Agent:Claude and Agent:Codex, and a job is handed one agent's credential, so this runner cannot tell which; require one agent",
     },
   );
-  named.refuseTokenFile("the Codex auth file is empty");
-  assert.deepEqual(await named.backend.place(required("Agent:Codex"), "Job"), {
+  refuseTokenFile("the Codex auth file is empty");
+  assert.deepEqual(await backend.place(required("Agent:Codex"), "Job"), {
     placed: "Refused",
     evidence: "the Codex auth file is empty",
   });
-  assert.deepEqual(named.tokenFilesAsked, [[codexFile, "Codex"]]);
-  for (const { state } of [without, named]) assert.deepEqual(state.calls, []);
+  assert.deepEqual(tokenFilesAsked, [[codexFile, "Codex"]]);
+  assert.deepEqual(state.calls, []);
   await assert.rejects(
     harness(t, { agentCredentialFiles: { Claude: codexFile } }),
     /^RangeError: agentCredentialFiles names Claude, whose credential file is tokenFile/u,

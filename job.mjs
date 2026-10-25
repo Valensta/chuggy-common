@@ -114,9 +114,9 @@ export function jobCredentialFilesChecked(files) {
 
 /**
  * The credential a workload is handed: that of the one agent its assignment
- * requires by an `Agent:` capability, or Claude's where it requires none. An
- * assignment requiring several agents, or one this runner holds no file for,
- * is refused, since its job would be handed another agent's credential.
+ * requires by an `Agent:` capability, or `tokenFile` as Claude's where it
+ * requires none or one this runner holds no file for. An assignment requiring
+ * several agents is refused, since its job is handed one agent's credential.
  *
  * @param {JobCredentialFiles} files
  * @param {readonly string[]} capabilities the assignment's
@@ -134,15 +134,11 @@ export function jobCredential(files, capabilities) {
     return {
       refused: `the assignment requires ${required.join(" and ")}, and a job is handed one agent's credential, so this runner cannot tell which; require one agent`,
     };
-  const agent =
-    required[0]?.slice(jobAgentCapabilityPrefix.length) ?? jobClaudeAgent;
-  if (agent === jobClaudeAgent) return { agent, file: files.tokenFile };
+  const agent = required[0]?.slice(jobAgentCapabilityPrefix.length);
   const others = files.agentCredentialFiles ?? {};
-  if (!Object.hasOwn(others, agent))
-    return {
-      refused: `the assignment requires ${jobAgentCapability(agent)}, and this runner names no ${agent} credential; name one in the runner's configuration`,
-    };
-  return { agent, file: others[agent] };
+  return agent !== undefined && Object.hasOwn(others, agent)
+    ? { agent, file: others[agent] }
+    : { agent: jobClaudeAgent, file: files.tokenFile };
 }
 
 /**
