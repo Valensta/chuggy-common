@@ -15,6 +15,7 @@ import test from "node:test";
 import {
   savedLogBytesMax,
   savedLogCutLine,
+  savedLogLinesMax,
   savedLogTrimmed,
   savedLogWritten,
 } from "./savedLog.mjs";
@@ -51,4 +52,22 @@ test("a log a job wrote is cut to its end only where it is over the bound, and n
   assert.equal(await readFile(file, "utf8"), `${savedLogCutLine}end\n`);
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.deepEqual(await readdir(made), ["job.log"]);
+});
+
+test("a log a job wrote of more lines than the bound is cut to its last lines, though it is under the byte bound", async (t) => {
+  const file = join(await directory(t), "job.log");
+  await writeFile(file, "l\n".repeat(savedLogLinesMax));
+  assert.equal(await savedLogTrimmed(file), false);
+  await writeFile(file, `first\n${"l\n".repeat(savedLogLinesMax)}`);
+  assert.equal(await savedLogTrimmed(file), true);
+  assert.equal(
+    await readFile(file, "utf8"),
+    `${savedLogCutLine}${"l\n".repeat(savedLogLinesMax)}`,
+  );
+  await writeFile(file, `first\n${"l\n".repeat(savedLogLinesMax - 1)}last`);
+  assert.equal(await savedLogTrimmed(file), true);
+  assert.equal(
+    await readFile(file, "utf8"),
+    `${savedLogCutLine}${"l\n".repeat(savedLogLinesMax - 1)}last`,
+  );
 });

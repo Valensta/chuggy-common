@@ -225,6 +225,9 @@ function siteNames(recorded, record) {
  * The images each runtime or session repository keeps: its most recently
  * used untagged ones, an image the record never saw used counted as used
  * when the record began, and the newer image first between two used alike.
+ * An image is ranked once in a repository however many of its digests name
+ * it there, as podman names a multi-platform image by its index's and its
+ * platform's.
  *
  * @param {readonly RecordedImage[]} recorded
  * @param {ImageRecord} record
@@ -234,7 +237,9 @@ function siteKept(recorded, record, kept) {
   /** @type {Map<string, RecordedImage[]>} */
   const byRepository = new Map();
   for (const image of recorded)
-    for (const { repository } of siteNames(image, record))
+    for (const repository of new Set(
+      siteNames(image, record).map((named) => named.repository),
+    ))
       byRepository.set(repository, [
         ...(byRepository.get(repository) ?? []),
         image,

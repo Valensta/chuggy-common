@@ -146,22 +146,42 @@ test("a runtime repository no use of which was recorded keeps its two newest ima
   );
 });
 
+/** A record that saw the runtime's "1" used last, and its "2" before it. */
+const oneAndTwoUsed = record({
+  images: {
+    [runtimeReference("1")]: { kinds: ["Runtime"], usedMs: nowMs - dayMs },
+    [runtimeReference("2")]: { kinds: ["Runtime"], usedMs: nowMs - 2 * dayMs },
+  },
+});
+
 test("a runtime repository keeps the images most recently used, whenever they were built", () => {
   const images = ["1", "2", "3", "4"].map((hex, index) =>
     runtimeImage(hex, 40 - index),
   );
-  const used = record({
-    images: {
-      [runtimeReference("1")]: { kinds: ["Runtime"], usedMs: nowMs - dayMs },
-      [runtimeReference("2")]: {
-        kinds: ["Runtime"],
-        usedMs: nowMs - 2 * dayMs,
-      },
-    },
-  });
   assert.deepEqual(
-    removed(imageSweepRemovals(images, used, nowMs, sweep)),
+    removed(imageSweepRemovals(images, oneAndTwoUsed, nowMs, sweep)),
     ["3", "4"].map(runtimeReference),
+  );
+});
+
+test("a multi-platform image podman names by two digests is ranked once in its repository", () => {
+  // containers/container-libs's common/libimage/image.go: `RepoDigests`
+  // names each name with each of the image's digests, its index's and its
+  // platform's.
+  const images = ["1", "2", "3"].map((hex, index) =>
+    storedImage({
+      Id: hex.repeat(64),
+      RepoTags: [],
+      RepoDigests: [
+        `${runtime}@sha256:${hex.repeat(64)}`,
+        `${runtime}@sha256:${"e".repeat(63)}${hex}`,
+      ],
+      Created: new Date(nowMs - (10 + index) * dayMs).toISOString(),
+    }),
+  );
+  assert.deepEqual(
+    removed(imageSweepRemovals(images, oneAndTwoUsed, nowMs, sweep)),
+    [runtimeReference("3"), `${runtime}@sha256:${"e".repeat(63)}3`],
   );
 });
 

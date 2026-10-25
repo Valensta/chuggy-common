@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -1181,7 +1181,7 @@ test("a stop whose logs could not be saved ends the job, and keeps its container
   assert.ok(!verbs(state).includes("rm"));
   assert.match(
     log.at(-1) ?? "",
-    /was stopped; its logs could not be saved: Error response from daemon: No such container: id-asg-2$/u,
+    /was stopped; its logs could not be saved: podman logs exited 1$/u,
   );
 
   state.logsFail = false;
@@ -3127,9 +3127,15 @@ test("a sweep removes a runtime repository's images past its two newest, oldest 
   );
 });
 
-test("an image a container uses is kept at the cost of one line, and the sweep goes on", async (t) => {
-  const { backend, state, log, imageRecord } = await recordHarness(t);
-  const [oldest, older] = [
+/**
+ * Four runtime images here and a record knowing their repository, the oldest
+ * used by a running container, answering the two oldest.
+ *
+ * @param {ReturnType<typeof fakeEngine>["state"]} state
+ * @param {string} imageRecord
+ */
+async function oldestInUse(state, imageRecord) {
+  const references = [
     runtimeHere(state, "1", 40),
     runtimeHere(state, "2", 30),
     runtimeHere(state, "3", 20),
@@ -3138,8 +3144,14 @@ test("an image a container uses is kept at the cost of one line, and the sweep g
   const user = seeded(state, "asg-2", "running", startMs / 1000 + 60);
   /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
     state.containers.get(user)
-  ).image = oldest;
+  ).image = references[0];
   await recordWritten(imageRecord);
+  return references;
+}
+
+test("an image a container uses is kept at the cost of one line, and the sweep goes on", async (t) => {
+  const { backend, state, log, imageRecord } = await recordHarness(t);
+  const [oldest, older] = await oldestInUse(state, imageRecord);
   await backend.held();
   await backend.settled();
   assert.ok(state.images.has(oldest));
@@ -3148,6 +3160,30 @@ test("an image a container uses is kept at the cost of one line, and the sweep g
     log.filter((line) => line.includes(oldest)),
     [`${oldest} is kept: a container uses it`],
   );
+});
+
+test("a candidate another runner holds by its turn is kept, though the sweep decided to remove it", async (t) => {
+  const { backend, state, log, imageRecord } = await recordHarness(t);
+  const [oldest, older] = await oldestInUse(state, imageRecord);
+  state.intercept = (call) => {
+    if (call.argv[1] !== "rm" || call.argv[2] !== oldest) return undefined;
+    const record = JSON.parse(readFileSync(imageRecord, "utf8"));
+    record.holds["chuggy-other-1"] = {
+      images: [older],
+      untilMs: startMs + 3_600_000,
+    };
+    writeFileSync(imageRecord, JSON.stringify(record));
+    return undefined;
+  };
+  await backend.held();
+  await backend.settled();
+  assert.ok(state.images.has(oldest));
+  assert.ok(state.images.has(older));
+  assert.deepEqual(imageCalls(state), [
+    "ls --quiet --no-trunc",
+    `rm ${oldest}`,
+  ]);
+  assert.ok(log.every((line) => !line.startsWith("removed ")));
 });
 
 test("a job's image this runner pulled goes once unused for the retention, unless its name now names another", async (t) => {
@@ -3248,12 +3284,28 @@ test("an ended container whose logs could not be saved is removed without them o
   assert.deepEqual(await backend.held(), []);
   assert.equal(state.containers.size, 0);
   assert.deepEqual(log.slice(-2), [
-    `${name} ended; its logs could not be saved since ${new Date(startMs).toISOString()}, and are lost with it: Error response from daemon: No such container: id-asg-done`,
+    `${name} ended; its logs could not be saved since ${new Date(startMs).toISOString()}, and are lost with it: podman logs exited 1`,
     `${name} ended; logs lost, container removed`,
   ]);
   assert.equal((await backend.ended()).length, 1);
   assert.deepEqual(await backend.held(), []);
   assert.deepEqual(await backend.ended(), []);
+});
+
+test("logs that could not be saved are said to by how the engine's call ended, never by what it printed", async (t) => {
+  const { backend, state, log } = await harness(t);
+  const name = seeded(state, "asg-done", "exited", startMs / 1000 + 60);
+  state.logsFail = true;
+  state.logsStderr = [
+    "Error: push refused for https://x:SECRET@host/r",
+    "error from daemon in stream: Error grabbing logs: invalid character",
+  ].join("\n");
+  assert.deepEqual(await backend.held(), []);
+  assert.equal(
+    log.at(-1),
+    `${name} ended; its logs could not be saved: podman logs exited 1`,
+  );
+  assert.ok(log.every((line) => !line.includes("SECRET")));
 });
 
 test("a log directory that cannot be written is a save that failed, and keeps the container", async (t) => {

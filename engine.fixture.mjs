@@ -217,6 +217,13 @@ function fakeEngineState() {
     calls: [],
     unreachable: false,
     logsFail: false,
+    /**
+     * What a `logs` that fails prints on stderr, where not the words of a
+     * container that is not there.
+     *
+     * @type {string | undefined}
+     */
+    logsStderr: /** @type {string | undefined} */ (undefined),
     /** Whether a kill runs past the engine's cap, which the engine answers as interrupted. */
     killInterrupted: false,
     /** Whether a run runs past the engine's cap after its container started, which the engine answers as interrupted. */
@@ -697,6 +704,8 @@ export function fakeEngine() {
       const container = found(state, reference);
       const none = { tail: Buffer.alloc(0), cut: false, lines: 0 };
       if (state.unreachable) return { ...failed(unreachable), ...none };
+      if (state.logsFail && state.logsStderr !== undefined)
+        return { ...failed(state.logsStderr), ...none };
       if (state.logsFail || container === undefined)
         return { ...missing(reference), ...none };
       return { ...answered(), ...logTail(container, argv, bytesMax) };

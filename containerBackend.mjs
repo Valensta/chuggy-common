@@ -536,8 +536,23 @@ async function poolContainers(state) {
 }
 
 /**
+ * Why a call for a container's logs failed, by how it ended alone: what it
+ * printed on stderr can be the workload's own output, which is never logged.
+ *
+ * @param {string} engine
+ * @param {import("./engine.mjs").EngineAnswer} answer
+ */
+function logsFailure(engine, answer) {
+  if (answer.failed === "Unstarted") return `${engine} could not be started`;
+  if (answer.failed === "Interrupted")
+    return `${engine} logs did not answer in time`;
+  return `${engine} logs exited ${String(answer.code)}`;
+}
+
+/**
  * A container's logs saved as `savedLog.mjs` bounds them, answering the file,
- * or why they could not be: the engine's failure, or this machine's.
+ * or why they could not be: how the engine's call ended, or this machine's
+ * failure.
  *
  * @param {State} state
  * @param {PoolContainer} container
@@ -549,7 +564,8 @@ async function savedLogs(state, container) {
       logsArgv(container.id, savedLogLinesMax + 1),
       savedLogBytesMax,
     );
-    if (answer.code !== 0) return { why: engineFailureLine(answer) };
+    if (answer.code !== 0)
+      return { why: logsFailure(state.settings.engine, answer) };
     await mkdir(state.settings.logDir, { recursive: true, mode: 0o700 });
     const file = join(state.settings.logDir, `${container.name}.log`);
     await savedLogWritten(

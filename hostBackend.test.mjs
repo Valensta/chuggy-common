@@ -27,7 +27,7 @@ import {
   hostRoutedBackend,
   hostRuns,
 } from "./hostBackend.mjs";
-import { savedLogBytesMax, savedLogCutLine } from "./savedLog.mjs";
+import { savedLogCutLine, savedLogLinesMax } from "./savedLog.mjs";
 
 /**
  * A stand-in for the worker core: it writes what it was started with to
@@ -223,18 +223,17 @@ test("a job that ended of itself is named once, after held stops naming it, its 
   );
 });
 
-test("a job's output is kept to its end once the job ends, saying it was cut", async (t) => {
+test("a job's output is kept to its last lines once the job ends, saying it was cut", async (t) => {
   const { backend, settings } = await harness(t, "loud");
   await backend.place(assignment(), "Job");
   await backend.settled();
-  const saved = await readFile(
-    join(settings.logDir, `${hostJobName("asg-1")}.log`),
-    "utf8",
+  assert.equal(
+    await readFile(
+      join(settings.logDir, `${hostJobName("asg-1")}.log`),
+      "utf8",
+    ),
+    `${savedLogCutLine}${"loud\n".repeat(savedLogLinesMax)}`,
   );
-  assert.ok(saved.startsWith(`${savedLogCutLine}loud\n`));
-  assert.ok(saved.endsWith("loud\n"));
-  assert.ok(saved.length <= savedLogCutLine.length + savedLogBytesMax);
-  assert.ok(!saved.includes("fixture output"));
 });
 
 test("a stop kills the job's whole group, and its end is never named", async (t) => {
