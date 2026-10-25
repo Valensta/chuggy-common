@@ -3618,24 +3618,120 @@ for (const [engine, answer] of [
     );
   });
 
-test("a reclaim is begun at most once an interval while under the floor, and a job is killed each pass still under half", async (t) => {
+test("a reclaim is begun at most once an interval between the floor and half of it, and under half on every pass, before each kill", async (t) => {
   const context = await floorHarness(t);
   const { backend, state, clock, disk } = context;
   runningJob(state, "asg-1", 0);
   runningJob(state, "asg-2", 10);
-  disk.set(5 * gib);
-  const reclaims = () =>
-    imageCalls(state).filter((call) => call.startsWith("ls ")).length;
-  const kills = () =>
-    state.calls.filter((call) => call.argv[0] === "kill").length;
+  const made = () =>
+    state.calls.flatMap((call) =>
+      call.argv[0] === "kill"
+        ? ["kill"]
+        : call.argv[0] === "image" && call.argv[1] === "ls"
+          ? ["reclaim"]
+          : [],
+    );
+  disk.set(15 * gib);
   await backend.held();
-  assert.deepEqual([reclaims(), kills()], [1, 1]);
   clock.nowMs += diskReclaimIntervalMs - 1;
   await backend.held();
-  assert.deepEqual([reclaims(), kills()], [1, 2]);
+  assert.deepEqual(made(), ["reclaim"]);
   clock.nowMs += 1;
   await backend.held();
-  assert.deepEqual([reclaims(), kills()], [2, 2]);
+  assert.deepEqual(made(), ["reclaim", "reclaim"]);
+  disk.set(5 * gib);
+  await backend.held();
+  clock.nowMs += 1;
+  await backend.held();
+  assert.deepEqual(made(), [
+    "reclaim",
+    "reclaim",
+    "reclaim",
+    "kill",
+    "reclaim",
+    "kill",
+  ]);
+});
+
+test("under half its floor, a later pass reclaims what the job it killed left, and once back over half kills no other", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, clock, disk } = context;
+  const references = [runtimeHere(state, "1", 40), runtimeHere(state, "2", 30)];
+  const killed = runningJob(state, "asg-killed", 10);
+  /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
+    state.containers.get(killed)
+  ).image = references[0];
+  runningJob(state, "asg-kept", 0);
+  removalsFree(context, 6 * gib);
+  disk.set(8 * gib);
+  assert.deepEqual(await backend.held(), listedJobs("asg-kept"));
+  assert.ok(state.images.has(references[0]));
+  clock.nowMs += 25_000;
+  assert.deepEqual(await backend.held(), listedJobs("asg-kept"));
+  assert.deepEqual(
+    state.calls
+      .filter((call) => call.argv[0] === "kill")
+      .map((call) => call.argv),
+    [["kill", "id-asg-killed"]],
+  );
+  assert.deepEqual([...state.images], [references[1]]);
+  assert.equal(backend.jobsTaken(), false);
+});
+
+test("a reclaim that could not begin before its cap, behind a sweep it aborted, stops no job and counts as none, and the sweep removes nothing more", async (t) => {
+  for (const [free, killing] of /** @type {const} */ ([
+    [5, true],
+    [15, false],
+  ])) {
+    const context = await floorHarness(t);
+    const { backend, state, clock, disk, caps } = context;
+    const references = [
+      runtimeHere(state, "1", 40),
+      runtimeHere(state, "2", 30),
+      runtimeHere(state, "3", 20),
+    ];
+    runningJob(state, "asg-1", 0);
+    await recordWritten(context.imageRecord);
+    disk.set(free * gib);
+    const listing = deferred();
+    state.intercept = (call) =>
+      call.argv[0] === "image" && call.argv[1] === "ls"
+        ? listing.promise
+        : undefined;
+    const pass = backend.held();
+    while (caps.length < 2) await setImmediate();
+    caps[1]?.();
+    assert.deepEqual(await pass, listedJobs("asg-1"), String(free));
+    state.intercept = () => undefined;
+    listing.resolve({
+      code: 0,
+      stdout: references
+        .map((reference) => `${fakeImageId(state, reference)}\n`)
+        .join(""),
+      stderr: "",
+    });
+    await backend.settled();
+    assert.deepEqual(
+      imageCalls(state),
+      ["ls --quiet --no-trunc"],
+      String(free),
+    );
+    assert.deepEqual([...state.images], references, String(free));
+    clock.nowMs += 1;
+    assert.deepEqual(
+      await backend.held(),
+      killing ? [] : listedJobs("asg-1"),
+      String(free),
+    );
+    assert.deepEqual([...state.images], [references[2]], String(free));
+    assert.deepEqual(
+      state.calls
+        .filter((call) => call.argv[0] === "kill")
+        .map((call) => call.argv),
+      killing ? [["kill", "id-asg-1"]] : [],
+      String(free),
+    );
+  }
 });
 
 test("an image a container uses is said kept once each time the disk goes under its floor, however often a reclaim tries it", async (t) => {
@@ -3664,8 +3760,8 @@ test("an image a container uses is said kept once each time the disk goes under 
   assert.ok(state.images.has(references[0]));
 });
 
-test("a measurement unknown, or that fails, holds no floor and is said once", async (t) => {
-  const { backend, disk, log } = await floorHarness(t);
+test("a measurement unknown, or that fails, holds no floor, reclaims nothing and is said once", async (t) => {
+  const { backend, state, disk, log } = await floorHarness(t);
   disk.answer = {
     unknown: "docker's daemon runs in a VM, whose disk this runner cannot see",
   };
@@ -3675,6 +3771,8 @@ test("a measurement unknown, or that fails, holds no floor and is said once", as
     throw new Error("EACCES: permission denied, statfs '/var/lib/docker'");
   };
   await backend.held();
+  await backend.settled();
+  assert.deepEqual(imageCalls(state), []);
   disk.set(5 * gib);
   await backend.held();
   assert.deepEqual(floorLines(log), [
@@ -3682,6 +3780,23 @@ test("a measurement unknown, or that fails, holds no floor and is said once", as
     "this runner's disk has 5 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
   ]);
   assert.equal(backend.jobsTaken(), false);
+});
+
+test("a measurement unknown once a reclaim is done holds no floor either, and is said", async (t) => {
+  const { backend, disk, log } = await floorHarness(t);
+  let measured = 0;
+  disk.answer = async () => {
+    measured += 1;
+    return measured === 1
+      ? { free: 15 * gib, where: "/var/lib/docker" }
+      : { unknown: "docker could not be asked where it stores what it holds" };
+  };
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+  assert.deepEqual(floorLines(log), [
+    "this runner's disk has 15 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
+    "this runner's free disk could not be measured, so it holds no floor: docker could not be asked where it stores what it holds",
+  ]);
 });
 
 test("a reclaim that has not answered by its cap is left, aborted, and the pass goes on to measure and kill", async (t) => {

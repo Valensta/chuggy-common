@@ -23,7 +23,9 @@
  * A RECLAIM is a sweep that keeps only the newest of a runtime or session
  * repository's untagged images and ignores the retention, oldest use first
  * until its signal aborts or its caller has room enough, made in turn with
- * the sweeps. One given a set of the images already said kept says each once.
+ * the sweeps. It aborts the sweep queued or running ahead of it, which stops
+ * before its next removal. One given a set of the images already said kept
+ * says each once.
  */
 
 import { z } from "zod";
@@ -80,6 +82,7 @@ import {
  *
  * @typedef {object} ImageReclaim
  * @property {() => Promise<boolean>} [enough] whether the caller has room enough, asked before each removal
+ * @property {() => void} [begun] told when its turn comes, which a reclaim whose signal aborted first never is
  * @property {Set<string>} [said] the images, by id, whose keeping was already logged, to which each one logged is added
  */
 
@@ -116,7 +119,7 @@ export const imageCleanupNone = /** @type {ImageCleanup} */ ({
  * @property {ImageCleanupSettings} settings
  * @property {ImageCleanupSeams} seams
  * @property {number} nextCheckMs when a sweep may next be due
- * @property {boolean} sweepQueued
+ * @property {AbortController | undefined} sweep the sweep queued or running, which a reclaim aborts
  * @property {Promise<unknown>} queue the sweeps and reclaims, each after the last
  * @property {boolean} laterLogged
  */
@@ -454,11 +457,13 @@ function sweptWithin(record, nowMs) {
 
 /**
  * A sweep where the record says one is due, which next looks again an
- * interval after the last.
+ * interval after the last, and stops before any removal once a reclaim
+ * aborts `signal`.
  *
  * @param {CleanupState} state
+ * @param {AbortSignal} signal
  */
-async function swept(state) {
+async function swept(state, signal) {
   const { settings, seams } = state;
   const nowMs = seams.nowMs();
   state.nextCheckMs = nowMs + imageSweepIntervalMs;
@@ -475,7 +480,7 @@ async function swept(state) {
       keptPerRepository: 2,
       unusedMsMax: settings.unusedSecsMax * 1000,
     },
-    { claim: true },
+    { claim: true, signal },
   );
 }
 
@@ -500,6 +505,49 @@ function queued(state, made, failed) {
 }
 
 /**
+ * A sweep queued after the work before it, which a reclaim may abort.
+ *
+ * @param {CleanupState} state
+ */
+function sweepQueued(state) {
+  const sweep = new globalThis.AbortController();
+  state.sweep = sweep;
+  void queued(
+    state,
+    () =>
+      swept(state, sweep.signal).finally(() => {
+        state.sweep = undefined;
+      }),
+    undefined,
+  );
+}
+
+/**
+ * A reclaim queued after the work before it, aborting the sweep it waits on,
+ * which does nothing where its signal aborted before its turn.
+ *
+ * @param {CleanupState} state
+ * @param {AbortSignal} signal
+ * @param {ImageReclaim} made
+ */
+function reclaimQueued(state, signal, made) {
+  state.sweep?.abort();
+  return queued(
+    state,
+    async () => {
+      if (signal.aborted) return [];
+      made.begun?.();
+      return removalsMade(
+        state,
+        { keptPerRepository: 1, unusedMsMax: "Ignored" },
+        { ...made, claim: false, signal },
+      );
+    },
+    /** @type {string[]} */ ([]),
+  );
+}
+
+/**
  * @param {ImageCleanupSettings} settings
  * @param {ImageCleanupSeams} seams
  * @returns {ImageCleanup}
@@ -510,7 +558,7 @@ export function imageCleanup(settings, seams) {
     settings,
     seams,
     nextCheckMs: 0,
-    sweepQueued: false,
+    sweep: undefined,
     queue: Promise.resolve(),
     laterLogged: false,
   };
@@ -546,25 +594,10 @@ export function imageCleanup(settings, seams) {
       return answer.code === 0 ? answer.stdout.trim() : undefined;
     },
     due: () => {
-      if (state.sweepQueued || seams.nowMs() < state.nextCheckMs) return;
-      state.sweepQueued = true;
-      void queued(
-        state,
-        () => swept(state).finally(() => (state.sweepQueued = false)),
-        undefined,
-      );
+      if (state.sweep === undefined && seams.nowMs() >= state.nextCheckMs)
+        sweepQueued(state);
     },
-    reclaimed: (signal, made = {}) =>
-      queued(
-        state,
-        () =>
-          removalsMade(
-            state,
-            { keptPerRepository: 1, unusedMsMax: "Ignored" },
-            { ...made, claim: false, signal },
-          ),
-        /** @type {string[]} */ ([]),
-      ),
+    reclaimed: (signal, made = {}) => reclaimQueued(state, signal, made),
     settled: async () => {
       await state.queue;
     },

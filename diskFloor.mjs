@@ -2,10 +2,11 @@
  * The floor of free disk a container backend keeps where its engine stores
  * images, containers and volumes, held on each `held` as a kubelet holds a
  * node's disk pressure. Under it, what a reclaim may remove goes first, at
- * most once a `diskReclaimIntervalMs`, and no job is taken while still under;
- * under half of it once that reclaim is done, one running job is stopped a
- * pass. Each measurement, reclaim and ranking is given `diskFloorCallsMsMax`.
- * A measurement that is unknown holds no floor.
+ * most once a `diskReclaimIntervalMs`, and no job is taken while still under.
+ * Under half of it a reclaim is made every pass, and one running job is
+ * stopped a pass only after a reclaim that began, where the disk is still
+ * under half. Each measurement, reclaim and ranking is given
+ * `diskFloorCallsMsMax`. A measurement that is unknown holds no floor.
  */
 
 import { z } from "zod";
@@ -17,7 +18,7 @@ import { z } from "zod";
  * @property {number} bytesMin
  * @property {() => Promise<DiskFree>} measured the runner's own measurement
  * @property {"Over" | "Under" | "Unknown"} said what was last logged of it, `Over` before anything was
- * @property {number | undefined} reclaimedMs when the last reclaim began
+ * @property {number | undefined} reclaimedMs when the last reclaim began its turn
  * @property {Set<string>} kept the images, by id, a reclaim has logged keeping since the disk went under
  * @property {boolean} jobsTaken
  *
@@ -32,7 +33,7 @@ import { z } from "zod";
 /** The longest a pass waits on one measurement, reclaim or ranking of what jobs hold. */
 export const diskFloorCallsMsMax = 30_000;
 
-/** The least time between two reclaims of a backend under its floor. */
+/** The least time between two reclaims of a backend under its floor but over half of it. */
 export const diskReclaimIntervalMs = 60_000;
 
 /**
@@ -140,10 +141,12 @@ function diskSaid(floor, ports, measured, now) {
 }
 
 /**
- * Holds the floor for one pass: measures, and where under it reclaims, if no
- * reclaim began inside the interval, until the disk is over the floor it was
- * found under, half the floor's where it was under that; a fresh measurement
- * then still under half has one job stopped. Whether jobs are taken is what
+ * Holds the floor for one pass: measures, and where under it reclaims until
+ * the disk is over the floor it was found under, half the floor's where it
+ * was under that. Under half, the reclaim is made every pass; over half, only
+ * where none began its turn inside the interval. A reclaim that began, and a
+ * fresh measurement then still under half, has one job stopped; one that
+ * could not begin before its cap stops none. Whether jobs are taken is what
  * the last measurement found.
  *
  * @param {DiskFloor} floor
@@ -158,14 +161,15 @@ export async function diskFloorHeld(floor, ports) {
   }
   diskSaid(floor, ports, found, "Under");
   const hard = Math.floor(floor.bytesMin / 2);
-  const target = found.free < hard ? hard : floor.bytesMin;
+  const underHalf = found.free < hard;
+  const target = underHalf ? hard : floor.bytesMin;
   let now = found;
-  const nowMs = ports.nowMs();
+  let begun = false;
   if (
+    underHalf ||
     floor.reclaimedMs === undefined ||
-    nowMs - floor.reclaimedMs >= diskReclaimIntervalMs
+    ports.nowMs() - floor.reclaimedMs >= diskReclaimIntervalMs
   ) {
-    floor.reclaimedMs = nowMs;
     await diskFloorCapped(ports, (signal) =>
       ports.reclaimed(signal, {
         enough: async () => {
@@ -173,15 +177,20 @@ export async function diskFloorHeld(floor, ports) {
           return !("unknown" in measured) && measured.free >= target;
         },
         said: floor.kept,
+        begun: () => {
+          begun = true;
+          floor.reclaimedMs = ports.nowMs();
+        },
       }),
     );
     now = await diskMeasured(floor, ports);
   }
   if ("unknown" in now) {
-    floor.jobsTaken = false;
+    diskSaid(floor, ports, now);
+    floor.jobsTaken = true;
     return;
   }
-  if (now.free < hard)
+  if (begun && now.free < hard)
     await ports.killed(
       `its container was killed because this runner's disk had ${diskGib(now.free)} GiB free at ${now.where}, under half its floor of ${diskGib(floor.bytesMin)} GiB. Free space on this runner, then resume the ticket`,
     );
