@@ -9,7 +9,8 @@
  * name, or one of its own digest. An inspection lists a name with a digest
  * among an image's `RepoDigests` and any other among its `RepoTags`, as docker
  * 28 does, and a removal of the last name of an image a container was run
- * from is refused in docker 28's words.
+ * from is refused in docker 28's words, as its classic store refuses it once
+ * every other name is gone.
  */
 
 import { Buffer } from "node:buffer";
@@ -29,6 +30,7 @@ import { dirname } from "node:path";
  * @property {string} image
  * @property {string[]} [env] each `NAME=value`, as an inspection lists them
  * @property {number} [exitCode]
+ * @property {string} [startedAt] when it started, which an inspection answers as docker's zero time where none
  * @property {string[]} [volumes] each `--volume` it was run with
  * @property {string[]} [command] what it was run with after its image
  * @property {string} [entrypoint]
@@ -379,7 +381,11 @@ function inspected(state, references) {
             Id: container.id,
             Name: `/${container.name}`,
             Config: { Labels: container.labels, Env: container.env ?? null },
-            State: { Status: container.status, ExitCode: container.exitCode },
+            State: {
+              Status: container.status,
+              ExitCode: container.exitCode,
+              StartedAt: container.startedAt ?? "0001-01-01T00:00:00Z",
+            },
           },
         ],
   );
@@ -458,10 +464,30 @@ function networked(state, network, verb) {
  * @param {string[]} argv
  */
 function labelFilters(argv) {
-  return flagValues(argv, "--filter").map((filter) => {
-    const [key, ...value] = filter.replace(/^label=/u, "").split("=");
-    return [key, value.join("=")];
-  });
+  return flagValues(argv, "--filter")
+    .filter((filter) => filter.startsWith("label="))
+    .map((filter) => {
+      const [key, ...value] = filter.replace(/^label=/u, "").split("=");
+      return [key, value.join("=")];
+    });
+}
+
+/**
+ * Whether a container passes a listing's `ancestor` filters: run from the
+ * image each names, by its id or one of its names.
+ *
+ * @param {FakeEngineState} state
+ * @param {FakeContainer} container
+ * @param {string[]} argv
+ */
+function ancestorsMatched(state, container, argv) {
+  const id = fakeImageId(state, container.image);
+  return flagValues(argv, "--filter")
+    .filter((filter) => filter.startsWith("ancestor="))
+    .every((filter) => {
+      const named = filter.slice("ancestor=".length);
+      return named === id || fakeImageId(state, named) === id;
+    });
 }
 
 /**
@@ -664,8 +690,10 @@ function answer(state, call) {
     const wanted = labelFilters(call.argv);
     return answered(
       [...state.containers.values()]
-        .filter((container) =>
-          wanted.every(([key, value]) => container.labels[key] === value),
+        .filter(
+          (container) =>
+            wanted.every(([key, value]) => container.labels[key] === value) &&
+            ancestorsMatched(state, container, call.argv),
         )
         .map((container) => `${container.id}\n`)
         .join(""),

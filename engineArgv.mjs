@@ -149,6 +149,28 @@ export function imageRemoveArgv(reference) {
 }
 
 /**
+ * Every container run from an image, running or not, by id: what keeps the
+ * image, and what a removal of one of its names would leave it untagged under.
+ *
+ * @param {string} image by id
+ */
+export function imageContainersArgv(image) {
+  return [
+    "ps",
+    "--all",
+    "--quiet",
+    "--no-trunc",
+    "--filter",
+    `ancestor=${image}`,
+  ];
+}
+
+/** What docker says each container and volume on this machine holds, which it walks every one of them to answer. */
+export function dockerDiskUsageArgv() {
+  return ["system", "df", "--verbose", "--format", "json"];
+}
+
+/**
  * A pull as the engine's own configuration makes it, under whatever logins,
  * credential helpers and endpoint the runner's user and environment give it.
  *

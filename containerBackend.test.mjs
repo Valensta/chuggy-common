@@ -49,6 +49,7 @@ import {
   jobRunDirectory,
 } from "./job.mjs";
 import { poolProjectDigest } from "./poolIdentity.mjs";
+import { diskReclaimIntervalMs } from "./diskFloor.mjs";
 import { imageSweepIntervalMs } from "./imageCleanup.mjs";
 import {
   savedLogBytesMax,
@@ -79,8 +80,9 @@ function assignment(overrides = {}) {
 /**
  * @param {import("node:test").TestContext} t
  * @param {Partial<import("./containerBackend.mjs").ContainerBackendSettings>} overrides
+ * @param {Partial<import("./containerBackend.mjs").ContainerBackendSeams>} [seams] in place of the harness's own
  */
-async function harness(t, overrides = {}) {
+async function harness(t, overrides = {}, seams = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-backend-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const tokenFile = join(directory, "claude-token");
@@ -129,6 +131,7 @@ async function harness(t, overrides = {}) {
       tokenFilesAsked.push(file);
       return tokenFileRefused;
     },
+    ...seams,
   });
   return {
     backend,
@@ -820,7 +823,7 @@ test("a running container past its deadline is killed, its logs saved, removed, 
       kind: "Job",
       job: seededAttempt("asg-late"),
       why: "its container passed its deadline and was killed",
-      timedOut: true,
+      killed: "Deadline",
     },
   ]);
 });
@@ -2919,12 +2922,13 @@ test("a volume another project's labels or none mark, or one listed unscoped tha
  *
  * @param {import("node:test").TestContext} t
  * @param {Partial<import("./containerBackend.mjs").ContainerBackendSettings>} [overrides]
+ * @param {Partial<import("./containerBackend.mjs").ContainerBackendSeams>} [seams]
  */
-async function recordHarness(t, overrides = {}) {
+async function recordHarness(t, overrides = {}, seams = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-images-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const imageRecord = join(directory, "images", "podman.json");
-  const context = await harness(t, { imageRecord, ...overrides });
+  const context = await harness(t, { imageRecord, ...overrides }, seams);
   return {
     ...context,
     imageRecord,
@@ -3162,11 +3166,41 @@ test("an image a container uses is kept at the cost of one line, and the sweep g
   );
 });
 
+test("a candidate whose containers could not be listed is kept, and the sweep goes on unless the engine could not be reached", async (t) => {
+  for (const [stderr, gone] of [
+    ["Error response from daemon: i/o timeout", true],
+    [
+      "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+      false,
+    ],
+  ]) {
+    const { backend, state, log, imageRecord } = await recordHarness(t);
+    const [oldest, older] = await oldestInUse(state, imageRecord);
+    state.intercept = (call) =>
+      call.argv.at(-1) === `ancestor=${fakeImageId(state, older)}`
+        ? failedWith(stderr)
+        : undefined;
+    const newer = runtimeHere(state, "5", 25);
+    await backend.held();
+    await backend.settled();
+    assert.ok(state.images.has(oldest));
+    assert.ok(state.images.has(older));
+    assert.equal(state.images.has(newer), !gone, stderr);
+    assert.ok(
+      log.includes(
+        `${older} was not removed: its containers could not be listed: ${stderr}`,
+      ),
+      log.join("\n"),
+    );
+  }
+});
+
 test("a candidate another runner holds by its turn is kept, though the sweep decided to remove it", async (t) => {
   const { backend, state, log, imageRecord } = await recordHarness(t);
   const [oldest, older] = await oldestInUse(state, imageRecord);
   state.intercept = (call) => {
-    if (call.argv[1] !== "rm" || call.argv[2] !== oldest) return undefined;
+    if (call.argv.at(-1) !== `ancestor=${fakeImageId(state, oldest)}`)
+      return undefined;
     const record = JSON.parse(readFileSync(imageRecord, "utf8"));
     record.holds["chuggy-other-1"] = {
       images: [older],
@@ -3179,10 +3213,7 @@ test("a candidate another runner holds by its turn is kept, though the sweep dec
   await backend.settled();
   assert.ok(state.images.has(oldest));
   assert.ok(state.images.has(older));
-  assert.deepEqual(imageCalls(state), [
-    "ls --quiet --no-trunc",
-    `rm ${oldest}`,
-  ]);
+  assert.deepEqual(imageCalls(state), ["ls --quiet --no-trunc"]);
   assert.ok(log.every((line) => !line.startsWith("removed ")));
 });
 
@@ -3270,6 +3301,427 @@ test("a reclaim keeps only a runtime repository's newest, oldest first, and stop
     [references[1]],
   );
   assert.deepEqual([...state.images], [references[2]]);
+});
+
+test("a job's image some container was run from, stopped or not, keeps every name, though its classic store would untag all but its last", async (t) => {
+  const { backend, state, log, imageRecord } = await recordHarness(t, {
+    imageUnusedSecsMax: 86_400,
+  });
+  const tagged = "registry.chuggy.example/worker:1";
+  state.images.add(tagged);
+  state.images.add(image);
+  state.imageIds.set(tagged, fakeImageId(state, image));
+  state.containers.set("leftover", {
+    id: "id-leftover",
+    name: "leftover",
+    labels: {},
+    status: "exited",
+    image: tagged,
+  });
+  await recordWritten(imageRecord, {
+    [tagged]: {
+      kinds: ["Job"],
+      usedMs: startMs - 2 * dayMs,
+      pulledId: fakeImageId(state, image),
+    },
+  });
+  await backend.held();
+  await backend.settled();
+  assert.deepEqual(imageCalls(state), ["ls --quiet --no-trunc"]);
+  assert.deepEqual([...state.images], [tagged, image]);
+  assert.deepEqual(
+    log.filter((line) => line.includes(" is kept")),
+    [`${tagged} is kept: a container uses it`],
+  );
+});
+
+const gib = 2 ** 30;
+
+/**
+ * A backend keeping a floor of 20 GiB, and its images' record, over a disk at
+ * /var/lib/docker whose free bytes the suite sets; each cap it sets is the
+ * suite's to pass, and none passes of itself.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {Partial<import("./containerBackend.mjs").ContainerBackendSettings>} [overrides]
+ */
+async function floorHarness(t, overrides = {}) {
+  const disk = {
+    /** @type {import("./diskFloor.mjs").DiskFree | (() => Promise<import("./diskFloor.mjs").DiskFree>)} */
+    answer: /** @type {import("./diskFloor.mjs").DiskFree} */ ({
+      free: 30 * gib,
+      where: "/var/lib/docker",
+    }),
+    /** @param {number} free */
+    set: (free) => {
+      disk.answer = { free, where: "/var/lib/docker" };
+    },
+    /** @param {number} bytes */
+    freed: (bytes) => {
+      if ("free" in disk.answer) disk.set(disk.answer.free + bytes);
+    },
+  };
+  /** @type {(() => void)[]} */
+  const caps = [];
+  const context = await recordHarness(
+    t,
+    { diskFreeBytesMin: 20 * gib, ...overrides },
+    {
+      diskFree: async () =>
+        typeof disk.answer === "function" ? disk.answer() : disk.answer,
+      sleep: (_ms, signal) =>
+        new Promise((resolve, reject) => {
+          caps.push(() => resolve());
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    },
+  );
+  await mkdir(dirname(context.imageRecord), { recursive: true });
+  await writeFile(
+    context.imageRecord,
+    JSON.stringify({
+      version: 1,
+      createdMs: startMs - 30 * dayMs,
+      sweptMs: startMs,
+      repositories: { [runtimeRepository]: { kinds: ["Runtime"] } },
+      images: {},
+      holds: {},
+    }),
+  );
+  return { ...context, disk, caps };
+}
+
+/**
+ * Each removal the engine makes frees `bytes` of the floor's disk.
+ *
+ * @param {Awaited<ReturnType<typeof floorHarness>>} context
+ * @param {number} bytes
+ */
+function removalsFree(context, bytes) {
+  context.state.intercept = (call) => {
+    if (call.argv[0] === "image" && call.argv[1] === "rm")
+      context.disk.freed(bytes);
+    return undefined;
+  };
+}
+
+/**
+ * A running job seeded as a predecessor started it, `minutes` after the
+ * harness's start, with a workspace volume of its own.
+ *
+ * @param {ReturnType<typeof fakeEngine>["state"]} state
+ * @param {string} id
+ * @param {number} minutes
+ */
+function runningJob(state, id, minutes) {
+  const name = seeded(state, id, "running", startMs / 1000 + 3600);
+  const container =
+    /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
+      state.containers.get(name)
+    );
+  container.startedAt = new Date(startMs + minutes * 60_000).toISOString();
+  container.labels["io.chuggy.workspace"] = `workspace-${id}`;
+  state.volumes.set(`workspace-${id}`, { labels: {} });
+  return name;
+}
+
+/** @param {readonly string[]} log */
+const floorLines = (log) =>
+  log.filter((line) => line.startsWith("this runner's"));
+
+test("a backend given no measurement, or a floor of 0, keeps none and takes jobs", async (t) => {
+  const unmeasured = await harness(t, { diskFreeBytesMin: 20 * gib });
+  await unmeasured.backend.held();
+  assert.equal(unmeasured.backend.jobsTaken(), true);
+  let measured = 0;
+  const off = await harness(
+    t,
+    { diskFreeBytesMin: 0 },
+    {
+      diskFree: async () => {
+        measured += 1;
+        return { free: 0, where: "/" };
+      },
+    },
+  );
+  await off.backend.held();
+  assert.equal(off.backend.jobsTaken(), true);
+  assert.equal(measured, 0);
+  for (const diskFreeBytesMin of [-1, 1.5])
+    assert.throws(
+      () =>
+        checkedContainerBackendSettings({
+          ...unmeasured.settings,
+          diskFreeBytesMin,
+        }),
+      /^RangeError: diskFreeBytesMin must be a whole number of bytes, 0 or more$/u,
+    );
+});
+
+test("a disk under its floor has a reclaim remove what it may, oldest first, until it is over, and says each way once", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, log, disk } = context;
+  const references = [
+    runtimeHere(state, "1", 40),
+    runtimeHere(state, "2", 30),
+    runtimeHere(state, "3", 20),
+  ];
+  disk.set(15 * gib);
+  removalsFree(context, 6 * gib);
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+  assert.deepEqual(imageCalls(state), [
+    "ls --quiet --no-trunc",
+    `rm ${references[0]}`,
+  ]);
+  assert.deepEqual(floorLines(log), [
+    "this runner's disk has 15 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
+    "this runner's disk has 21 GiB free at /var/lib/docker, over its floor of 20 GiB: it takes jobs again",
+  ]);
+});
+
+test("a disk a reclaim leaves under its floor takes no job, with no line more, until a pass finds it over", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, log, disk, clock } = context;
+  const references = [
+    runtimeHere(state, "1", 40),
+    runtimeHere(state, "2", 30),
+    runtimeHere(state, "3", 20),
+  ];
+  disk.set(12 * gib);
+  removalsFree(context, gib);
+  await backend.held();
+  assert.equal(backend.jobsTaken(), false);
+  assert.deepEqual([...state.images], [references[2]]);
+  clock.nowMs += 1000;
+  await backend.held();
+  assert.equal(backend.jobsTaken(), false);
+  disk.set(25 * gib);
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+  assert.deepEqual(floorLines(log), [
+    "this runner's disk has 12 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
+    "this runner's disk has 25 GiB free at /var/lib/docker, over its floor of 20 GiB: it takes jobs again",
+  ]);
+});
+
+test("under half its floor, a reclaim that brings the disk back over half stops no job", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, disk } = context;
+  const references = [runtimeHere(state, "1", 40), runtimeHere(state, "2", 30)];
+  runningJob(state, "asg-1", 0);
+  disk.set(5 * gib);
+  removalsFree(context, 6 * gib);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+  assert.equal(backend.jobsTaken(), false);
+  assert.deepEqual([...state.images], [references[1]]);
+  assert.ok(state.calls.every((call) => call.argv[0] !== "kill"));
+  assert.deepEqual(await backend.ended(), []);
+});
+
+test("under half its floor after the reclaim, the job holding most is killed, its logs saved and its volumes removed, and its end named disk low; never a session", async (t) => {
+  const context = await floorHarness(t, { engine: "docker" });
+  const { backend, state, log, disk, settings } = context;
+  const most = runningJob(state, "asg-most", 0);
+  runningJob(state, "asg-newer", 10);
+  seeded(
+    state,
+    "asg-session",
+    "running",
+    startMs / 1000 + 3600,
+    containerName(pool, "asg-session"),
+    "Session",
+  );
+  disk.set(5 * gib);
+  state.intercept = (call) =>
+    call.argv[0] === "system"
+      ? {
+          code: 0,
+          stdout: `${JSON.stringify({
+            Images: [],
+            Containers: [
+              { ID: "id-asg-most", Size: "68B" },
+              { ID: "id-asg-newer", Size: "2.3GB" },
+              { ID: "id-asg-session", Size: "98.28GB" },
+            ],
+            Volumes: [
+              { Name: "workspace-asg-most", Size: "60.12GB" },
+              { Name: "workspace-asg-newer", Size: "1.5GB" },
+              { Name: "owner-cache", Size: "N/A" },
+            ],
+            BuildCache: [],
+          })}\n`,
+          stderr: "",
+        }
+      : undefined;
+  assert.deepEqual(await backend.held(), [
+    ...listedJobs("asg-newer"),
+    { assignment: "asg-session", kind: "Session", outlivesRunner: true },
+  ]);
+  assert.deepEqual(
+    state.calls
+      .filter((call) => call.argv[0] === "kill")
+      .map((call) => call.argv),
+    [["kill", "id-asg-most"]],
+  );
+  assert.ok(!state.containers.has(most));
+  assert.ok(!state.volumes.has("workspace-asg-most"));
+  assert.ok(state.volumes.has("workspace-asg-newer"));
+  assert.equal(
+    await readFile(join(settings.logDir, `${most}.log`), "utf8"),
+    `the log of ${most}\n`,
+  );
+  assert.ok(
+    log.includes(
+      `${most} was killed for low disk; logs saved to ${join(settings.logDir, `${most}.log`)}, container removed`,
+    ),
+  );
+  assert.deepEqual(await backend.ended(), [
+    {
+      kind: "Job",
+      job: seededAttempt("asg-most"),
+      why: "its container was killed because this runner's disk had 5 GiB free at /var/lib/docker, under half its floor of 20 GiB. Free space on this runner, then resume the ticket",
+      killed: "DiskLow",
+    },
+  ]);
+  assert.equal(backend.jobsTaken(), false);
+});
+
+for (const [engine, answer] of [
+  ["podman", undefined],
+  ["docker", { code: 1, stdout: "", stderr: "Error: i/o timeout\n" }],
+  ["docker", { code: 0, stdout: "not json\n", stderr: "" }],
+])
+  test(`under half its floor on ${engine}${answer === undefined ? "" : ` answering ${answer.stdout || answer.stderr}`.trimEnd()}, the newest job is killed`, async (t) => {
+    const context = await floorHarness(t, {
+      engine: /** @type {"docker" | "podman"} */ (engine),
+    });
+    const { backend, state, disk } = context;
+    runningJob(state, "asg-older", 0);
+    runningJob(state, "asg-newest", 10);
+    runningJob(state, "asg-old", 5);
+    disk.set(5 * gib);
+    state.intercept = (call) =>
+      call.argv[0] === "system" ? answer : undefined;
+    assert.deepEqual(await backend.held(), listedJobs("asg-older", "asg-old"));
+    assert.deepEqual(
+      state.calls
+        .filter((call) => call.argv[0] === "kill")
+        .map((call) => call.argv),
+      [["kill", "id-asg-newest"]],
+    );
+    assert.equal(
+      state.calls.some((call) => call.argv[0] === "system"),
+      engine === "docker",
+    );
+  });
+
+test("a reclaim is begun at most once an interval while under the floor, and a job is killed each pass still under half", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, clock, disk } = context;
+  runningJob(state, "asg-1", 0);
+  runningJob(state, "asg-2", 10);
+  disk.set(5 * gib);
+  const reclaims = () =>
+    imageCalls(state).filter((call) => call.startsWith("ls ")).length;
+  const kills = () =>
+    state.calls.filter((call) => call.argv[0] === "kill").length;
+  await backend.held();
+  assert.deepEqual([reclaims(), kills()], [1, 1]);
+  clock.nowMs += diskReclaimIntervalMs - 1;
+  await backend.held();
+  assert.deepEqual([reclaims(), kills()], [1, 2]);
+  clock.nowMs += 1;
+  await backend.held();
+  assert.deepEqual([reclaims(), kills()], [2, 2]);
+});
+
+test("an image a container uses is said kept once each time the disk goes under its floor, however often a reclaim tries it", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, clock, disk, log } = context;
+  const references = [runtimeHere(state, "1", 40), runtimeHere(state, "2", 30)];
+  const user = seeded(state, "asg-2", "running", startMs / 1000 + 3600);
+  /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
+    state.containers.get(user)
+  ).image = references[0];
+  const kept = () =>
+    log.filter(
+      (line) => line === `${references[0]} is kept: a container uses it`,
+    ).length;
+  disk.set(15 * gib);
+  await backend.held();
+  clock.nowMs += diskReclaimIntervalMs;
+  await backend.held();
+  assert.equal(kept(), 1);
+  disk.set(25 * gib);
+  await backend.held();
+  disk.set(15 * gib);
+  clock.nowMs += diskReclaimIntervalMs;
+  await backend.held();
+  assert.equal(kept(), 2);
+  assert.ok(state.images.has(references[0]));
+});
+
+test("a measurement unknown, or that fails, holds no floor and is said once", async (t) => {
+  const { backend, disk, log } = await floorHarness(t);
+  disk.answer = {
+    unknown: "docker's daemon runs in a VM, whose disk this runner cannot see",
+  };
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+  disk.answer = async () => {
+    throw new Error("EACCES: permission denied, statfs '/var/lib/docker'");
+  };
+  await backend.held();
+  disk.set(5 * gib);
+  await backend.held();
+  assert.deepEqual(floorLines(log), [
+    "this runner's free disk could not be measured, so it holds no floor: docker's daemon runs in a VM, whose disk this runner cannot see",
+    "this runner's disk has 5 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
+  ]);
+  assert.equal(backend.jobsTaken(), false);
+});
+
+test("a reclaim that has not answered by its cap is left, aborted, and the pass goes on to measure and kill", async (t) => {
+  const context = await floorHarness(t);
+  const { backend, state, disk, caps } = context;
+  const references = [runtimeHere(state, "1", 40), runtimeHere(state, "2", 30)];
+  runningJob(state, "asg-1", 0);
+  disk.set(5 * gib);
+  const listing = deferred();
+  state.intercept = (call) =>
+    call.argv[0] === "image" && call.argv[1] === "ls"
+      ? listing.promise
+      : undefined;
+  const pass = backend.held();
+  while (
+    !state.calls.some(
+      (call) => call.argv[0] === "image" && call.argv[1] === "ls",
+    )
+  )
+    await setImmediate();
+  caps.at(-1)?.();
+  assert.deepEqual(await pass, []);
+  assert.deepEqual(
+    state.calls
+      .filter((call) => call.argv[0] === "kill")
+      .map((call) => call.argv),
+    [["kill", "id-asg-1"]],
+  );
+  listing.resolve({
+    code: 0,
+    stdout: [
+      ...new Set(references.map((reference) => fakeImageId(state, reference))),
+    ]
+      .map((id) => `${id}\n`)
+      .join(""),
+    stderr: "",
+  });
+  await backend.settled();
+  assert.deepEqual(imageCalls(state), ["ls --quiet --no-trunc"]);
+  assert.deepEqual([...state.images], references);
 });
 
 test("an ended container whose logs could not be saved is removed without them once kept past the dwell, and its end named once", async (t) => {

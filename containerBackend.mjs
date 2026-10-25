@@ -73,6 +73,11 @@
  * before it looks, and records the use once `run` has answered. With no
  * record, no image is held, recorded or removed.
  *
+ * `held` HOLDS A FLOOR OF FREE DISK where the runner measures one, as
+ * `diskFloor.mjs` says. The job it stops is the one docker says holds most in
+ * its container and workspace, where several run, and otherwise the newest;
+ * never a session.
+ *
  * A JOB MOUNTS EACH VOLUME ITS OWNER LISTS, a named volume or a directory of
  * this machine, whatever image it runs and however it starts. A named volume
  * that is not there is made, labelled as this runner's, before the job that
@@ -116,6 +121,7 @@ import {
   assignmentLabel,
   bindMountNameable,
   deadlineLabel,
+  dockerDiskUsageArgv,
   fillLabel,
   forcedRemoveArgv,
   imageInspectArgv,
@@ -162,6 +168,12 @@ import {
   poolProjectDigest,
   poolProjectLabelValue,
 } from "./poolIdentity.mjs";
+import {
+  diskFloor,
+  diskFloorCapped,
+  diskFloorHeld,
+  dockerDiskUsage,
+} from "./diskFloor.mjs";
 import {
   imageCleanup,
   imageCleanupNone,
@@ -211,6 +223,7 @@ import {
  * @property {readonly OwnerVolumeListed[]} [volumes] what its owner mounts into each job and no session; none, and nothing is
  * @property {string} [imageRecord] the file `imageCleanup.mjs` keeps this machine's images' record in, one for every runner using this engine as this user; none, and no image is held, recorded or removed
  * @property {number} [imageUnusedSecsMax] how long a job's image this runner pulled may go unused before it is removed, 0 keeping them; `imageUnusedSecsMaxDefault` where none
+ * @property {number} [diskFreeBytesMin] the floor `held` keeps free where `diskFree` measures; none or 0, and none is kept
  *
  * @typedef {z.infer<typeof ownerVolumesSchema>[number]} OwnerVolumeListed a volume as its owner lists it, which `ownerVolumesServed` makes one a job mounts
  *
@@ -225,6 +238,7 @@ import {
  * @property {() => number} nowMs
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
+ * @property {() => Promise<import("./diskFloor.mjs").DiskFree>} [diskFree] the bytes free where the engine stores what it holds, the runner's to measure, since an engine in a VM answers for the VM's disk; none, and no floor is kept
  *
  * @typedef {object} InFlightPlacement
  * @property {string} assignment
@@ -255,6 +269,7 @@ import {
  * @property {string} status
  * @property {number | undefined} exitCode
  * @property {number | undefined} deadlineEpochSecs
+ * @property {number | undefined} startedMs where the engine says it started
  * @property {string | undefined} runtimeVolume the volume holding its copy of chuggy's runtime, where it was started through one
  * @property {string | undefined} workspaceVolume the volume its workspace is, where it was started through chuggy's runtime
  *
@@ -262,6 +277,7 @@ import {
  *   inFlight: () => InFlightPlacement[],
  *   containers: () => Promise<PoolContainer[]>,
  *   imagesReclaimed: (signal: AbortSignal) => Promise<string[]>,
+ *   jobsTaken: () => boolean,
  *   settled: () => Promise<void>,
  * }} ContainerBackend `imagesReclaimed` removes what `imageCleanup.mjs`'s reclaim does, answering the names it removed
  *
@@ -274,7 +290,7 @@ import {
  * @property {string} why in this backend's words, which a job's end carries
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
  * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
- * @property {true} [timedOut] where `held` killed it at its deadline, which a job's end carries
+ * @property {"Deadline" | "DiskLow"} [killed] where `held` killed it, at its deadline or for low disk, which a job's end carries
  *
  * @typedef {object} State
  * @property {ContainerBackendSettings} settings
@@ -285,6 +301,7 @@ import {
  * @property {boolean} strays whether volumes of chuggy's runtime that nothing answers for may be left: from the start, since a predecessor may have left some, and after any removal of one failed
  * @property {import("./imageCleanup.mjs").ImageCleanup} images
  * @property {Map<string, number>} logFailures when each listed container's logs first could not be saved, by its id
+ * @property {import("./diskFloor.mjs").DiskFloor | undefined} disk
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -401,7 +418,11 @@ const inspectedSchema = z.array(
       Labels: z.record(z.string(), z.string()).nullish(),
       Env: z.array(z.string()).nullish(),
     }),
-    State: z.object({ Status: z.string(), ExitCode: z.number().optional() }),
+    State: z.object({
+      Status: z.string(),
+      ExitCode: z.number().optional(),
+      StartedAt: z.string().optional(),
+    }),
   }),
 );
 
@@ -449,6 +470,11 @@ export function checkedContainerBackendSettings(settings) {
     );
   if (settings.imageRecord !== undefined && settings.imageRecord.length === 0)
     throw new RangeError("imageRecord must name a file");
+  const floor = settings.diskFreeBytesMin;
+  if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 0))
+    throw new RangeError(
+      "diskFreeBytesMin must be a whole number of bytes, 0 or more",
+    );
   return settings;
 }
 
@@ -459,6 +485,7 @@ export function checkedContainerBackendSettings(settings) {
 function poolContainer(inspected) {
   const labels = inspected.Config.Labels ?? {};
   const deadline = Number(labels[deadlineLabel]);
+  const started = Date.parse(inspected.State.StartedAt ?? "");
   return {
     id: inspected.Id,
     name: inspected.Name.replace(/^\//u, ""),
@@ -467,6 +494,7 @@ function poolContainer(inspected) {
     status: inspected.State.Status,
     exitCode: inspected.State.ExitCode,
     deadlineEpochSecs: Number.isSafeInteger(deadline) ? deadline : undefined,
+    startedMs: Number.isNaN(started) ? undefined : started,
     runtimeVolume: labels[runtimeLabel],
     workspaceVolume: labels[workspaceLabel],
   };
@@ -808,7 +836,7 @@ function containerEnded(container) {
 const deadlineEnd = {
   why: "its container passed its deadline and was killed",
   succeeded: false,
-  timedOut: true,
+  killed: /** @type {const} */ ("Deadline"),
 };
 
 /**
@@ -831,7 +859,7 @@ function workloadEnd(kind, attempt, end) {
     job: attempt,
     why: end.why,
     ...(end.refusal === undefined ? {} : { refusal: end.refusal }),
-    ...(end.timedOut === true ? { timedOut: true } : {}),
+    ...(end.killed === undefined ? {} : { killed: end.killed }),
   };
 }
 
@@ -907,6 +935,71 @@ async function listedHeld(state, inspected, container, nowSecs) {
 }
 
 /**
+ * @typedef {{inspected: InspectedContainer, container: PoolContainer & {assignment: string}}} RunningJob
+ */
+
+/**
+ * The running job that holds most: where several run on docker, the most its
+ * container and workspace volume hold, as docker says; and otherwise, or
+ * where docker cannot say, the newest.
+ *
+ * @param {State} state
+ * @param {readonly RunningJob[]} running at least one
+ * @returns {Promise<RunningJob>}
+ */
+async function largestJob(state, running) {
+  const newest = running.toSorted(
+    (a, b) =>
+      (b.container.startedMs ?? -Infinity) -
+      (a.container.startedMs ?? -Infinity),
+  );
+  if (running.length === 1 || state.settings.engine !== "docker")
+    return /** @type {RunningJob} */ (newest[0]);
+  const answer = await diskFloorCapped(state.seams, (signal) =>
+    state.seams.engine.exec(dockerDiskUsageArgv(), { signal }),
+  );
+  const usage = answer?.code === 0 ? dockerDiskUsage(answer.stdout) : undefined;
+  if (usage === undefined) return /** @type {RunningJob} */ (newest[0]);
+  /** @param {RunningJob} job */
+  const holds = ({ container }) =>
+    (usage.containers.get(container.id) ?? 0) +
+    (container.workspaceVolume === undefined
+      ? 0
+      : (usage.volumes.get(container.workspaceVolume) ?? 0));
+  return /** @type {RunningJob} */ (
+    newest.toSorted((a, b) => holds(b) - holds(a))[0]
+  );
+}
+
+/**
+ * Kills the running job that holds most and retires it, naming its end
+ * `why`, and answers its assignment; or nothing where no job runs or the kill
+ * failed, which leaves it held.
+ *
+ * @param {State} state
+ * @param {readonly RunningJob[]} running
+ * @param {string} why
+ */
+async function diskLowKilled(state, running, why) {
+  if (running.length === 0) return undefined;
+  const { inspected, container } = await largestJob(state, running);
+  const killed = await state.seams.engine.exec(killArgv(container.id));
+  if (killed.code !== 0) {
+    state.seams.log(
+      `${container.name} was not killed for low disk: ${engineFailureLine(killed)}`,
+    );
+    return undefined;
+  }
+  await retired(state, container, "was killed for low disk");
+  containerEndNamed(state, inspected, container, {
+    why,
+    succeeded: false,
+    killed: "DiskLow",
+  });
+  return container.assignment;
+}
+
+/**
  * What this pool holds, each with the kind it was placed as: every placement
  * still pulling or starting, and every container still running inside its
  * deadline. The placements are read before the listing, so one that finishes
@@ -957,15 +1050,29 @@ async function heldAssignments(state) {
         ...containers.flatMap(({ container }) => container.assignment ?? []),
       ]),
     );
+  /** @type {RunningJob[]} */
+  const running = [];
   for (const { inspected, container } of containers) {
     const { assignment } = container;
     if (assignment === undefined || placing.has(assignment)) continue;
     listed.add(assignment);
     if (
       await listedHeld(state, inspected, { ...container, assignment }, nowSecs)
-    )
+    ) {
       held.set(assignment, container.kind);
+      if (container.kind === "Job")
+        running.push({ inspected, container: { ...container, assignment } });
+    }
   }
+  if (state.disk !== undefined)
+    await diskFloorHeld(state.disk, {
+      ...state.seams,
+      reclaimed: (signal, made) => state.images.reclaimed(signal, made),
+      killed: async (why) => {
+        const killed = await diskLowKilled(state, running, why);
+        if (killed !== undefined) held.delete(killed);
+      },
+    });
   for (const ended of failed) {
     const assignment = endedAssignment(ended);
     if (!listed.has(assignment) && !state.ends.accounted.has(assignment))
@@ -2133,6 +2240,7 @@ export function containerBackend(settings, seams) {
             seams,
           ),
     logFailures: new Map(),
+    disk: diskFloor(checked.diskFreeBytesMin, seams.diskFree),
   };
   return {
     place: (assignment, kind) => placed(state, assignment, kind),
@@ -2150,6 +2258,7 @@ export function containerBackend(settings, seams) {
       })),
     containers: async () => (await poolContainers(state)).map(poolContainer),
     imagesReclaimed: (signal) => state.images.reclaimed(signal),
+    jobsTaken: () => state.disk?.jobsTaken ?? true,
     settled: async () => {
       await Promise.all(
         [...state.placements.values()].map((placement) => placement.done),

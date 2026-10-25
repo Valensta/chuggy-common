@@ -404,7 +404,7 @@ test("a job past its deadline is killed and named timed out", async (t) => {
       kind: "Job",
       job: { assignment: "asg-1", callbackUrl, bearer },
       why: "the job ran past its deadline and was killed",
-      timedOut: true,
+      killed: "Deadline",
     },
   ]);
 });

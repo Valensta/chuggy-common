@@ -494,7 +494,7 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
               kind: "Job",
               job: job.attempt,
               why,
-              ...(job.expired ? { timedOut: true } : {}),
+              ...(job.expired ? { killed: "Deadline" } : {}),
             });
           }
           settle();

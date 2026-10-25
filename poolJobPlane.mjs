@@ -9,11 +9,20 @@
  * Each call is made once and nothing here retries it, because an attempt the
  * plane did not hear about is still ended by its lease. One that already
  * reported is no longer live, so the plane refuses this and the report stands.
+ *
+ * A job its backend stopped for low disk is ended so only where the answer to
+ * its error text named a release that takes that end, and as a failed run
+ * where it named an older one, none, or did not come.
  */
 
 import { Buffer } from "node:buffer";
 import { URL } from "node:url";
 
+import {
+  workerContractHeader,
+  workerContractRunDiskLow,
+  workerContractVersionOf,
+} from "@chuggy/worker-contract/workerContract";
 import {
   runEndedEvidences,
   workerPlaneBytesMediaType,
@@ -40,6 +49,7 @@ import { rosterLabel, routePath } from "./wire.mjs";
  */
 
 const runFailed = rosterLabel(runEndedEvidences, "RunFailed");
+const runDiskLow = rosterLabel(runEndedEvidences, "RunDiskLow");
 
 /**
  * The error text an ended workload leaves: the backend's reason, as a report
@@ -76,8 +86,35 @@ export function checkedPoolJobPlaneClientSettings(input) {
 
 /**
  * One call to an attempt's plane, resolved against its callback as the
- * harness resolves its own, answered by its status alone. A session's end is
- * the same call to its own plane (`./poolSessionPlane.mjs`).
+ * harness resolves its own, answered by its status and the release the plane
+ * named, its body unread.
+ *
+ * @param {PoolJobPlaneClientSettings} settings
+ * @param {typeof fetch} fetcher
+ * @param {WorkerPoolAttempt} attempt
+ * @param {string} path
+ * @param {{method: string, contentType: string, body: string | Buffer}} sent
+ * @returns {Promise<{status: number, release: string | undefined}>}
+ */
+async function poolAttemptAnswered(settings, fetcher, attempt, path, sent) {
+  const answered = await fetcher(new URL(path, attempt.callbackUrl), {
+    method: sent.method,
+    signal: globalThis.AbortSignal.timeout(settings.timeoutMs),
+    headers: workerPlaneHeaders(attempt.bearer, {
+      "content-type": sent.contentType,
+    }),
+    body: sent.body,
+  });
+  await answered.body?.cancel();
+  return {
+    status: answered.status,
+    release: answered.headers.get(workerContractHeader) ?? undefined,
+  };
+}
+
+/**
+ * One call to an attempt's plane, answered by its status alone. A session's
+ * end is the same call to its own plane (`./poolSessionPlane.mjs`).
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
@@ -92,16 +129,23 @@ export async function poolAttemptStatus(
   path,
   sent,
 ) {
-  const answered = await fetcher(new URL(path, attempt.callbackUrl), {
-    method: sent.method,
-    signal: globalThis.AbortSignal.timeout(settings.timeoutMs),
-    headers: workerPlaneHeaders(attempt.bearer, {
-      "content-type": sent.contentType,
-    }),
-    body: sent.body,
-  });
-  await answered.body?.cancel();
-  return answered.status;
+  return (await poolAttemptAnswered(settings, fetcher, attempt, path, sent))
+    .status;
+}
+
+/**
+ * Whether a plane that named `release` takes a run ended `RunDiskLow`.
+ *
+ * @param {string | undefined} release
+ */
+function diskLowTaken(release) {
+  const version =
+    release === undefined ? undefined : workerContractVersionOf(release);
+  return (
+    version !== undefined &&
+    version.major === workerContractRunDiskLow.major &&
+    version.minor >= workerContractRunDiskLow.minor
+  );
 }
 
 /**
@@ -115,17 +159,18 @@ export function poolEndAnswer(status) {
 }
 
 /**
- * Leaves an attempt its error text, the answer unread: what follows is asked
- * for either way.
+ * Leaves an attempt its error text, answering the release its plane named:
+ * what follows is asked for whatever the status.
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
  * @param {WorkerPoolJobEnd} ended
  * @param {string} text
+ * @returns {Promise<string | undefined>}
  */
 async function poolJobErrorLeft(settings, fetcher, ended, text) {
   try {
-    await poolAttemptStatus(
+    const answered = await poolAttemptAnswered(
       settings,
       fetcher,
       ended.job,
@@ -136,15 +181,29 @@ async function poolJobErrorLeft(settings, fetcher, ended, text) {
         body: Buffer.from(text),
       },
     );
+    return answered.release;
   } catch {
-    // What follows is asked for regardless.
+    return undefined;
   }
 }
 
 /**
+ * The label an ended job's run ends under: timed out where its backend killed
+ * it at its deadline, disk low where it killed it for low disk and its plane
+ * takes that, and failed otherwise.
+ *
+ * @param {WorkerPoolJobEnd} ended
+ * @param {string | undefined} release
+ */
+function poolJobEvidence(ended, release) {
+  if (ended.killed === "Deadline") return runTimedOut;
+  if (ended.killed === "DiskLow" && diskLowTaken(release)) return runDiskLow;
+  return runFailed;
+}
+
+/**
  * The error text first, since only a live attempt takes it: the end is what
- * matters, and is asked for either way. A job its backend killed at its
- * deadline ends timed out, and any other failed.
+ * matters, and is asked for either way.
  *
  * @param {PoolJobPlaneClientSettings} settings
  * @param {typeof fetch} fetcher
@@ -152,7 +211,12 @@ async function poolJobErrorLeft(settings, fetcher, ended, text) {
  * @returns {Promise<WorkerPoolEndAnswer>}
  */
 async function poolJobPlaneEnded(settings, fetcher, ended) {
-  await poolJobErrorLeft(settings, fetcher, ended, poolJobEndedText(ended));
+  const release = await poolJobErrorLeft(
+    settings,
+    fetcher,
+    ended,
+    poolJobEndedText(ended),
+  );
   try {
     return poolEndAnswer(
       await poolAttemptStatus(
@@ -163,9 +227,7 @@ async function poolJobPlaneEnded(settings, fetcher, ended) {
         {
           method: workerPlaneRoutes.runEnded.method,
           contentType: "application/json",
-          body: JSON.stringify({
-            evidence: ended.timedOut === true ? runTimedOut : runFailed,
-          }),
+          body: JSON.stringify({ evidence: poolJobEvidence(ended, release) }),
         },
       ),
     );
@@ -183,7 +245,13 @@ export function poolJobPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolJobPlaneClientSettings(input);
   return {
     end: (ended) => poolJobPlaneEnded(settings, fetcher, ended),
-    left: (ended) =>
-      poolJobErrorLeft(settings, fetcher, ended, poolJobRefusedText(ended)),
+    left: async (ended) => {
+      await poolJobErrorLeft(
+        settings,
+        fetcher,
+        ended,
+        poolJobRefusedText(ended),
+      );
+    },
   };
 }

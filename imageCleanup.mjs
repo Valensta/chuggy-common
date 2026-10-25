@@ -9,10 +9,12 @@
  * the record as it then is and the image as the engine then describes it, so
  * a hold taken since the sweep began keeps its image: a placement inspects
  * only after its hold is written, and an image gone by then is one it pulls.
- * An image a container uses is one the engine refuses to remove, which costs
- * one line. A removal the engine refuses for any other cause is logged and
- * the sweep goes on; one of an engine it could not reach, or a record it could
- * not write, ends the sweep there.
+ * An image some container was run from, running or not, is kept before any of
+ * its names is removed, since an engine removes every name of it but the last
+ * before it refuses that one; that costs one line. A removal the engine
+ * refuses for any other cause is logged and the sweep goes on; one of an
+ * engine it could not reach, or a record it could not write, ends the sweep
+ * there.
  *
  * NOTHING HERE FAILS A PLACEMENT OR A PASS. A hold or a use that could not be
  * recorded is logged and the placement goes on, and a sweep runs behind the
@@ -20,12 +22,14 @@
  *
  * A RECLAIM is a sweep that keeps only the newest of a runtime or session
  * repository's untagged images and ignores the retention, oldest use first
- * until its signal aborts, made in turn with the sweeps.
+ * until its signal aborts or its caller has room enough, made in turn with
+ * the sweeps. One given a set of the images already said kept says each once.
  */
 
 import { z } from "zod";
 
 import {
+  imageContainersArgv,
   imageInspectArgv,
   imageInspectManyArgv,
   imageListArgv,
@@ -71,8 +75,12 @@ import {
  * @property {(name: string, uses: readonly ImageUse[]) => Promise<void>} used what a placement used, its hold dropped
  * @property {(image: string) => Promise<string | undefined>} pulledId the id of an image just pulled, where the record keeps one
  * @property {() => void} due starts a sweep behind the caller where one is due
- * @property {(signal: AbortSignal) => Promise<string[]>} reclaimed the references a reclaim removed
+ * @property {(signal: AbortSignal, made?: ImageReclaim) => Promise<string[]>} reclaimed the references a reclaim removed
  * @property {() => Promise<void>} settled
+ *
+ * @typedef {object} ImageReclaim
+ * @property {() => Promise<boolean>} [enough] whether the caller has room enough, asked before each removal
+ * @property {Set<string>} [said] the images, by id, whose keeping was already logged, to which each one logged is added
  */
 
 /** How often a machine's images are swept. */
@@ -233,14 +241,68 @@ function removalUse(removal) {
 }
 
 /**
+ * Logs why an image is kept, unless `said` holds it, which it then does.
+ *
+ * @param {CleanupState} state
+ * @param {string} id
+ * @param {string} line
+ * @param {Set<string> | undefined} said
+ */
+function keptLogged(state, id, line, said) {
+  if (said?.has(id) === true) return;
+  said?.add(id);
+  state.seams.log(line);
+}
+
+/**
+ * Whether a container was run from an image, which keeps every name of it;
+ * or, logged, whether the sweep is to end where the engine could not say.
+ *
+ * @param {CleanupState} state
+ * @param {ImageRemoval} removal
+ * @param {AbortSignal} signal
+ * @param {Set<string> | undefined} said
+ * @returns {Promise<{used: boolean} | {ended: boolean}>}
+ */
+async function imageUsed(state, removal, signal, said) {
+  const { id } = removal.image;
+  const names = removal.references.join(", ");
+  let answer;
+  try {
+    answer = await state.seams.engine.exec(imageContainersArgv(id), {
+      signal,
+    });
+  } catch {
+    state.seams.log(
+      `${names} was not removed: the engine did not answer in time`,
+    );
+    return { ended: true };
+  }
+  if (answer.code !== 0) {
+    keptLogged(
+      state,
+      id,
+      `${names} was not removed: its containers could not be listed: ${engineFailureLine(answer)}`,
+      said,
+    );
+    return { ended: engineFailure(answer) === "Unreachable" };
+  }
+  const used = answer.stdout.trim().length > 0;
+  if (used)
+    keptLogged(state, id, `${names} is kept: a container uses it`, said);
+  return { used };
+}
+
+/**
  * Removes each name a removal names, unforced, answering which went, whether
  * all did, and whether the sweep is to end here.
  *
  * @param {CleanupState} state
  * @param {ImageRemoval} removal
  * @param {AbortSignal} signal
+ * @param {Set<string> | undefined} said
  */
-async function referencesRemoved(state, removal, signal) {
+async function referencesRemoved(state, removal, signal, said) {
   const { engine, log } = state.seams;
   /** @type {string[]} */
   const removed = [];
@@ -257,10 +319,13 @@ async function referencesRemoved(state, removal, signal) {
       removed.push(reference);
       continue;
     }
-    log(
+    keptLogged(
+      state,
+      removal.image.id,
       failure === "ImageInUse"
         ? `${reference} is kept: a container uses it`
         : `${reference} was not removed: ${engineFailureLine(answer)}`,
+      said,
     );
     return { removed, all: false, ended: failure === "Unreachable" };
   }
@@ -277,9 +342,10 @@ async function referencesRemoved(state, removal, signal) {
  * @param {ImageRemoval} candidate
  * @param {readonly StoredImage[]} images
  * @param {ImageSweepPolicy} policy
+ * @param {Set<string> | undefined} said
  * @returns {Promise<string[] | undefined>}
  */
-async function candidateRemoved(state, candidate, images, policy) {
+async function candidateRemoved(state, candidate, images, policy, said) {
   const signal = globalThis.AbortSignal.timeout(imageRecordHoldCallsMsMax);
   const { id } = candidate.image;
   const outcome = await recordChange(
@@ -302,7 +368,10 @@ async function candidateRemoved(state, candidate, images, policy) {
         policy,
       ).find((removal) => removal.image.id === id);
       if (again === undefined) return { answer: [] };
-      const result = await referencesRemoved(state, again, signal);
+      const used = await imageUsed(state, again, signal, said);
+      if ("ended" in used) return { answer: used.ended ? undefined : [] };
+      if (used.used) return { answer: [] };
+      const result = await referencesRemoved(state, again, signal, said);
       return {
         record: result.all
           ? imageEntriesForgotten(read.record, again.forgotten)
@@ -322,7 +391,7 @@ async function candidateRemoved(state, candidate, images, policy) {
  *
  * @param {CleanupState} state
  * @param {ImageSweepPolicy} policy
- * @param {{claim: boolean, signal?: AbortSignal}} made
+ * @param {{claim: boolean, signal?: AbortSignal} & ImageReclaim} made
  * @returns {Promise<string[]>}
  */
 async function removalsMade(state, policy, made) {
@@ -355,7 +424,14 @@ async function removalsMade(state, policy, made) {
   );
   for (const candidate of removals) {
     if (made.signal?.aborted === true) break;
-    const gone = await candidateRemoved(state, candidate, present, policy);
+    if (made.enough !== undefined && (await made.enough())) break;
+    const gone = await candidateRemoved(
+      state,
+      candidate,
+      present,
+      policy,
+      made.said,
+    );
     if (gone === undefined) break;
     removed.push(...gone);
     present = present.filter((image) => image.id !== candidate.image.id);
@@ -478,14 +554,14 @@ export function imageCleanup(settings, seams) {
         undefined,
       );
     },
-    reclaimed: (signal) =>
+    reclaimed: (signal, made = {}) =>
       queued(
         state,
         () =>
           removalsMade(
             state,
             { keptPerRepository: 1, unusedMsMax: "Ignored" },
-            { claim: false, signal },
+            { ...made, claim: false, signal },
           ),
         /** @type {string[]} */ ([]),
       ),
