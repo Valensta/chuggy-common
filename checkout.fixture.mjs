@@ -90,8 +90,9 @@ function recordsHanded(label, log) {
 }
 
 /**
- * A `git` that records what it was handed and then runs git itself, and
- * `hooks`, a hooks directory whose pre-commit and pre-push record the same.
+ * A `git` that records what it was handed, under the verb its `-c` entries
+ * stand before, and then runs git itself, and `hooks`, a hooks directory whose
+ * pre-commit and pre-push record the same.
  * `start` leaves the pod as a job's `check.sh` does where its image set
  * `NODE_PATH`, with that `git` first on its path, until `t` ends; `records` is
  * each record so far, a label and the values `handedAsTheImage` names.
@@ -107,7 +108,8 @@ export async function recordingGit(t) {
     join(bin, "git"),
     [
       "#!/bin/sh",
-      'verb=$1; [ "$verb" = --no-replace-objects ] && verb=$2',
+      'verb() { while :; do case $1 in -c) shift 2 ;; --no-replace-objects) shift ;; *) printf %s "$1"; return ;; esac; done; }',
+      'verb=$(verb "$@")',
       recordsHanded('"git $verb"', log),
       `exec '${join(execPath.trim(), "git")}' "$@"`,
       "",

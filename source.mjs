@@ -1,12 +1,17 @@
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 
 import { resultManifestSchemaVersion } from "@chuggy/worker-contract/workerDocuments";
 
-import { workerGitEnvironment, workerStageEnvironment } from "./checks.mjs";
+import {
+  workerEnvironmentWithout,
+  workerStageEnvironment,
+  workerTemporaryFile,
+} from "./checks.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
-import { projectReadsPushed } from "./projectReads.mjs";
 import { runCommitFailed, runPushFailed, runStep } from "./runEvidence.mjs";
 
 /** Longer than any header `git cat-file --batch` writes: a name, a type and a size. */
@@ -21,6 +26,39 @@ const sourceObjectPlaces = new Map([
   ["tree", "a path"],
   ["blob", "a file"],
 ]);
+
+/** What the directory a push is made from is named by, under the temporary directory. */
+const sourcePushPrefix = "chuggy-push-";
+
+/** The object format a commit's name is in, read from how long the name is. */
+const sourceObjectFormats = new Map([
+  [40, "sha1"],
+  [64, "sha256"],
+]);
+
+/**
+ * The variables that place a repository, which the push's environment is
+ * cleared of so that the repository it uses is the one the core made: each
+ * that git names local to a repository (`git rev-parse --local-env-vars`)
+ * but the two carrying configuration entries, which git itself carries into
+ * another repository it runs in; and the namespace refs are read under.
+ */
+export const sourcePushPlacingVariables = [
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CONFIG",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_GRAFT_FILE",
+  "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_PREFIX",
+  "GIT_SHALLOW_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_NAMESPACE",
+];
 
 export function ticketBranch(task) {
   const attempt = createHash("sha256").update(task.attempt).digest("hex");
@@ -195,25 +233,41 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * minted after every commit it sends, so none can carry it and it is not
  * looked for.
  *
- * GIT IS THE IMAGE'S. Every call before the push, and every hook a project's
- * setup installed that one of them runs, is handed what the image's own
- * programs are, and the push is handed the credential's environment, which
- * is that and its askpass. The commit and the push are handed `git`, the
- * attempt's git configuration, as well, since the hooks they run are the
- * project's; the push's ends with `projectReadsPushed`, so the URL it pushes
- * to is answered by that askpass rather than by the reads.
+ * GIT IS THE IMAGE'S. Every call, and every hook a project's setup installed
+ * that one of them runs, is handed what the image's own programs are; the
+ * push is handed the credential's environment, which is that and its askpass.
+ * The commit is handed `git`, the attempt's git configuration, as well, since
+ * the hooks it runs are the project's.
+ *
+ * THE PUSH IS MADE FROM A REPOSITORY OF THE CORE'S OWN, so no git
+ * configuration, hook or ref the attempt left in the workspace or its home
+ * reaches it. That repository is made bare, from no template, under the temporary
+ * directory, and removed however the push ends. It holds no ref and no
+ * configuration but what making it writes, and borrows the workspace's
+ * objects through `objects/info/alternates`: the commit, and each commit the
+ * remote advertises that the workspace has, the base among them, which the
+ * push then need not send. The push's environment is cleared of every
+ * variable that places a repository, the system's configuration is off, the
+ * global one is an empty file and its home an empty directory, so a git too
+ * old to read that file's variable finds no global configuration either and
+ * nothing reads the attempt's home; of what configures git only the entries
+ * the image's environment names stand; and its command line, which outranks
+ * those, names an empty hooks directory and no credential helper, so it runs
+ * no hook and its credential is the askpass's alone, handed to no helper. It
+ * needs none of `git`, since it reaches one URL.
  *
  * THE PUSH ASKS FOR ITS CREDENTIAL AGAIN. `refresh` is present where the plane
  * minted the one the clone used: that one is a read, a minted token expires,
  * an attempt may outlive one, and the push is the last thing it does — so the
  * credential is taken immediately before it rather than carried from the
  * clone. Where the launcher mounted the credential there is nothing to
- * refresh, and the clone's own environment is what pushes. The push is tried
- * again as `gitRemote.mjs` says, under that one credential, with `pause`
- * between tries.
+ * refresh, and the clone's own environment is what the push is handed. The
+ * push is tried again as `gitRemote.mjs` says, under that one credential and
+ * from that one repository, with `pause` between tries.
  *
  * EACH HALF IS A STEP. A failure up to and including the secret check fails
- * the commit step, and one taking the credential or pushing the push step.
+ * the commit step, and one making the repository the push is made from,
+ * taking the credential or pushing fails the push step.
  */
 export async function commitAndPushSource({
   task,
@@ -238,26 +292,129 @@ export async function commitAndPushSource({
   const ref = ticketBranch(task);
   await runStep(
     runPushFailed,
-    async () => {
-      const pushing = refresh === undefined ? environment : await refresh();
-      await gitRemoteTried(
-        () =>
-          command("git", ["push", repository, `${commit}:${ref}`], {
-            cwd: directory,
-            env: {
-              ...pushing,
-              ...workerGitEnvironment(
-                pushing,
-                projectReadsPushed(git, repository),
-              ),
-            },
-          }),
-        { pause },
-      );
-    },
+    () =>
+      sourcePushed({
+        repository,
+        refspec: `${commit}:${ref}`,
+        commit,
+        directory,
+        command,
+        environment,
+        refresh,
+        pause,
+      }),
     gitFailureLine,
   );
   return { repository: repositoryId, ref, commit, base };
+}
+
+/** Where, in the directory a push is made from, its repository, its empty hooks directory, its empty global configuration and its empty home are. */
+function sourcePushPlaces(made) {
+  return {
+    repository: join(made, "repository"),
+    hooks: join(made, "hooks"),
+    configuration: join(made, "configuration"),
+    home: join(made, "home"),
+  };
+}
+
+/**
+ * What the push, and the making of the repository it is made from, are
+ * handed: `environment` less every variable that places a repository, the
+ * system's configuration off, the core's empty file as the global one and its
+ * empty directory as the home, the core's repository named, and the object
+ * format a repository is made in named as `commit` is.
+ */
+function sourcePushEnvironment(environment, places, commit) {
+  const format = sourceObjectFormats.get(commit.length);
+  if (format === undefined)
+    throw new Error(`git named the commit ${commit} in no object format`);
+  return {
+    ...workerEnvironmentWithout(environment, sourcePushPlacingVariables),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: places.configuration,
+    HOME: places.home,
+    XDG_CONFIG_HOME: places.home,
+    GIT_DIR: places.repository,
+    GIT_DEFAULT_HASH: format,
+  };
+}
+
+/**
+ * `refspec` pushed to `repository` from a repository made for it in a
+ * directory of its own, borrowing the objects of the workspace at `directory`,
+ * with the credential taken once that repository is made.
+ */
+async function sourcePushed({
+  repository,
+  refspec,
+  commit,
+  directory,
+  command,
+  environment,
+  refresh,
+  pause,
+}) {
+  const { stdout: objects } = await command(
+    "git",
+    ["rev-parse", "--git-path", "objects"],
+    { cwd: directory, env: workerStageEnvironment(process.env) },
+  );
+  const made = resolve(await mkdtemp(workerTemporaryFile(sourcePushPrefix)));
+  try {
+    const places = sourcePushPlaces(made);
+    await mkdir(places.hooks);
+    await mkdir(places.home);
+    await writeFile(places.configuration, "");
+    await command("git", ["init", "--quiet", "--bare", "--template="], {
+      cwd: made,
+      env: sourcePushEnvironment(environment, places, commit),
+    });
+    await writeFile(
+      join(places.repository, "objects", "info", "alternates"),
+      `${resolve(directory, objects.trim())}\n`,
+    );
+    const pushing = sourcePushEnvironment(
+      refresh === undefined ? environment : await refresh(),
+      places,
+      commit,
+    );
+    await gitRemoteTried(
+      () =>
+        command(
+          "git",
+          [
+            "-c",
+            `core.hooksPath=${places.hooks}`,
+            "-c",
+            "credential.helper=",
+            "push",
+            repository,
+            refspec,
+          ],
+          { cwd: made, env: pushing },
+        ),
+      { pause },
+    );
+  } finally {
+    await sourcePushDiscarded(made);
+  }
+}
+
+/**
+ * The directory a push was made from, removed; one that cannot be is reported
+ * on stderr rather than raised, so how the push ended is what it reports.
+ */
+async function sourcePushDiscarded(made) {
+  try {
+    await rm(made, { recursive: true, force: true });
+  } catch (failure) {
+    process.stderr.write(
+      `the push's repository ${made} could not be removed: ${
+        failure instanceof Error ? failure.message : String(failure)
+      }\n`,
+    );
+  }
 }
 
 /** The commit everything the attempt changed is in, refused where it carries a held secret. */

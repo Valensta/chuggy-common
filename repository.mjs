@@ -25,21 +25,41 @@ export function workerRepositories(value) {
 }
 
 /**
+ * The host git's prompt names for `remote`, its port included where the URL
+ * writes one: what stands between the scheme and the path, past any user, as
+ * the URL writes it. Nothing for a remote git names no such host for, which is
+ * any that is not a URL.
+ *
+ * @param {string} remote
+ */
+export function workerCredentialHost(remote) {
+  const scheme = remote.indexOf("://");
+  if (scheme === -1) return "";
+  const [authority] = remote.slice(scheme + 3).split(/[/?#]/u);
+  return authority.slice(authority.lastIndexOf("@") + 1);
+}
+
+/**
  * The askpass environment one credential is presented to git through, whether
  * the value behind the file was mounted by the launcher or minted by the plane:
- * what the image's own programs are handed, and the askpass beside it.
+ * what the image's own programs are handed, and the askpass beside it, which
+ * answers only a prompt naming the host of `remote`, the URL git reaches with
+ * the credential.
  *
  * @param {string} credentialFile
  * @param {string} credentialUsername
+ * @param {string} remote
  */
 export function workerCredentialEnvironment(
   credentialFile,
   credentialUsername,
+  remote,
 ) {
   return {
     ...workerStageEnvironment(process.env),
     CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
     CHUG_WORKER_GIT_CREDENTIAL_USERNAME: credentialUsername,
+    CHUG_WORKER_GIT_CREDENTIAL_HOST: workerCredentialHost(remote),
     GIT_ASKPASS: coreRuntime.askpass,
     GIT_TERMINAL_PROMPT: "0",
   };
@@ -126,6 +146,7 @@ export function workerRepository(repositories, credentialFiles, repositoryId) {
     environment: workerCredentialEnvironment(
       credentialFile,
       credentialUsername,
+      repository,
     ),
   };
 }

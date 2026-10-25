@@ -2338,6 +2338,10 @@ test("a minted credential is what git is given, and the mount is never read", as
     resolved.environment.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
     minted.username,
   );
+  assert.equal(
+    resolved.environment.CHUG_WORKER_GIT_CREDENTIAL_HOST,
+    "github.com",
+  );
   assert.notEqual(
     resolved.environment.CHUG_WORKER_GIT_CREDENTIAL_FILE,
     credentialFiles.forge,
@@ -2429,6 +2433,7 @@ test("the clone asks for a read of its own repository by name, and the push take
   assert.equal(mints, 2);
   assert.deepEqual(named, [asked.repositoryId, undefined]);
   assert.equal(refreshed.CHUG_WORKER_GIT_CREDENTIAL_USERNAME, minted.username);
+  assert.equal(refreshed.CHUG_WORKER_GIT_CREDENTIAL_HOST, "github.com");
   assert.deepEqual(kept, [
     { kind: mintedKind, value: minted.password },
     { kind: mintedKind, value: later },
@@ -2528,7 +2533,8 @@ const agentWorker = {
 
 /**
  * One finished work attempt reaching the plane, with git stood in for by a
- * recorder: what the push would have run, and what the report carried.
+ * recorder but for the `init` that makes the repository the push is made
+ * from: what the push would have run, and what the report carried.
  */
 async function workPublished(worker, run) {
   const runs = [];
@@ -2544,6 +2550,11 @@ async function workPublished(worker, run) {
       held: () => [],
       command: async (executable, args, options) => {
         runs.push({ executable, args, options });
+        if (args[0] === "init")
+          return git(executable, args, {
+            ...options,
+            env: { PATH: process.env.PATH ?? "", ...options.env },
+          });
         return { stdout: `${workCommit}\n` };
       },
     },
@@ -2564,11 +2575,21 @@ function reportedBody(calls) {
   return calls.find(({ path }) => path === "/v1/report").init.body;
 }
 
-/** The one git invocation of a verb the attempt made, and a legible miss where it made none. */
+/** The one git invocation of a verb the attempt made, past any `-c` entries before it, and a legible miss where it made none. */
 function gitRun(runs, verb) {
-  const ran = runs.find(({ args }) => args[0] === verb);
+  const ran = runs.find(
+    ({ args }) =>
+      args.find((arg, index) => arg !== "-c" && args[index - 1] !== "-c") ===
+      verb,
+  );
   assert.ok(ran, `the attempt ran no git ${verb}`);
   return ran;
+}
+
+/** Asserts the push was handed every variable `credential` holds, as it holds them. */
+function assertPushedUnder(push, credential) {
+  for (const [name, value] of Object.entries(credential))
+    assert.equal(push.options.env[name], value, name);
 }
 
 /** What a commanded stage hands the publisher, its exit status being its verdict. */
@@ -2590,7 +2611,7 @@ test("a passing work attempt pushes under the credential its workspace refreshes
     diagnosticPath: ".chuggy/agent-result.json",
   });
 
-  assert.deepEqual(gitRun(runs, "push").options.env, pushCredential);
+  assertPushedUnder(gitRun(runs, "push"), pushCredential);
 });
 
 /**
@@ -2611,12 +2632,12 @@ test("a passing commanded work attempt commits and pushes what it declares", asy
     "ticket 7 attempt attempt-1",
   ]);
   const push = gitRun(runs, "push");
-  assert.deepEqual(push.args, [
+  assert.deepEqual(push.args.slice(-3), [
     "push",
     repositories["repository-1"].url,
     `${workCommit}:${ticketBranch(workAttempt)}`,
   ]);
-  assert.deepEqual(push.options.env, pushCredential);
+  assertPushedUnder(push, pushCredential);
   assert.deepEqual(reported.source, {
     repository: "repository-1",
     ref: ticketBranch(workAttempt),
@@ -3006,9 +3027,10 @@ function hookedPlane(remote, base, hooks) {
  * any git a work attempt runs itself, from its clone to its push, or a hook
  * one of them runs, handed the core's own environment: without that value,
  * with what the project's setup passed on in its place, or with the task
- * document, which carries the attempt's bearer.
+ * document, which carries the attempt's bearer; and a push that runs a hook
+ * the setup installed.
  */
-test("a work attempt's git, from its clone to its push, and the hooks its setup installs are handed the image's environment, nothing its setup passed on and no task document", async (t) => {
+test("a work attempt's git, from its clone to its push, and the hooks its setup installs are handed the image's environment, nothing its setup passed on and no task document, and its push runs none", async (t) => {
   await inCheckout(async ({ remote, directory, base }) => {
     await git("git", ["push", remote, `${base}:refs/heads/main`], {
       cwd: directory,
@@ -3044,10 +3066,14 @@ test("a work attempt's git, from its clone to its push, and the hooks its setup 
       "git commit",
       "pre-commit",
       "git rev-list",
+      "git init",
       "git push",
-      "pre-push",
     ])
       assert.ok(labels.includes(expected), `${expected} was never recorded`);
+    assert.ok(
+      !labels.includes("pre-push"),
+      "the push ran the hook setup installed",
+    );
     assert.notEqual(await remoteRefs(remote), "");
     assert.ok(plane.asked.some(({ route }) => route === "report"));
   });
@@ -3376,7 +3402,7 @@ async function suiteDirectory(t, prefix) {
   return directory;
 }
 
-/** Hooks under `hooks` that read `lib` from the commit and the push they run in, each writing what it read under `dumps`. */
+/** A pre-commit and a pre-push under `hooks` that each read `lib`, writing what it read under `dumps`. */
 async function libReadingHooks(hooks, dumps, lib) {
   await mkdir(hooks);
   for (const hook of ["pre-commit", "pre-push"]) {
@@ -3461,11 +3487,12 @@ function assertReadsOnly(forge, plane) {
 /**
  * A work attempt launched as a pool launches its pod reads its project's
  * repositories from a setup line and from its checks, its own and a submodule
- * written at the forge's ssh address among them, and others from the hooks its
- * commit and its push run; and pushes its own with what the plane mints for
- * its task kind. Catches a git the attempt runs that cannot reach a repository
- * its project binds, what `assertReadsOnly` catches, and the bearer reaching a
- * setup line's or a check's environment.
+ * written at the forge's ssh address among them, and others from the hook its
+ * commit runs; and pushes its own with what the plane mints for its task kind,
+ * running no hook. Catches a git the attempt runs that cannot reach a
+ * repository its project binds, what `assertReadsOnly` catches, the bearer
+ * reaching a setup line's or a check's environment, and a push that runs the
+ * hook the setup installed for it.
  */
 test("a launched work attempt reads every repository its project binds and pushes only its own", async (t) => {
   const { forge, base } = await projectForge(t);
@@ -3501,12 +3528,11 @@ test("a launched work attempt reads every repository its project binds and pushe
     await readFile(join(dumps, "lib-by-setup", "lib.txt"), "utf8"),
     "the library\n",
   );
-  for (const hook of ["pre-commit", "pre-push"])
-    assert.match(
-      await readFile(join(dumps, hook), "utf8"),
-      /^[0-9a-f]{40}\trefs\/heads\/main$/mu,
-      hook,
-    );
+  assert.match(
+    await readFile(join(dumps, "pre-commit"), "utf8"),
+    /^[0-9a-f]{40}\trefs\/heads\/main$/mu,
+  );
+  await assert.rejects(readFile(join(dumps, "pre-push")), { code: "ENOENT" });
   assert.match(
     await remoteRefs(forge.bare(projectRepositories.own)),
     new RegExp(`\t${ticketBranch(fetchedAnswer)}$`, "mu"),

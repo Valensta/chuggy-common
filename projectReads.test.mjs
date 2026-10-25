@@ -6,14 +6,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
-  access,
-  chmod,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +20,6 @@ import {
   projectReadsForge,
   projectReadsGitTooOld,
   projectReadsGitWarning,
-  projectReadsPushed,
   projectReadsRepository,
   projectReadsServed,
 } from "./projectReads.mjs";
@@ -237,50 +229,6 @@ test("the job's own repository is asked for by its clone URL and answered the pl
 
   assert.deepEqual(reads.asked, [own, own]);
   assert.deepEqual(reads.kept, [read.password]);
-});
-
-/** An askpass under `directory` that answers git's prompts as a push's does, and the password it answers. */
-async function pushAskpass(directory) {
-  const askpass = join(directory, "askpass.sh");
-  const password = "ghs_askpassWrite0123456789";
-  await writeFile(
-    askpass,
-    `#!/bin/sh\ncase "$1" in Username*) echo x-access-token;; *) echo ${password};; esac\n`,
-  );
-  await chmod(askpass, 0o755);
-  return { environment: { GIT_ASKPASS: askpass }, password };
-}
-
-/**
- * Catches the push answered the cache client's read of the job's own
- * repository, which a forge refuses a push with, rather than the askpass it is
- * handed; the clear reaching any other URL, which would hand a push's hook the
- * write where it asks for a read; and a clear configured where no reads are,
- * which would empty the helpers an image names for a forge chuggy serves
- * nothing on.
- */
-test("the push's configuration leaves the URL it pushes to to its askpass, and every other to the reads", async (t) => {
-  const reads = await served(t, () => read);
-  const pushing = projectReadsPushed(reads.git, own);
-  const askpass = await pushAskpass(reads.directory);
-  const fill = async (url) =>
-    projectReadsFields(
-      (
-        await gitWith(
-          pushing,
-          ["credential", "fill"],
-          `url=${url}\n\n`,
-          askpass.environment,
-        )
-      ).stdout,
-    ).get("password");
-
-  assert.equal(await fill(own), askpass.password);
-  assert.equal(await fill(lib), read.password);
-  assert.equal(await fill("https://forge.test/org/own"), read.password);
-  assert.deepEqual(reads.asked, [lib, own]);
-  assert.deepEqual(pushing.slice(0, reads.git.length), reads.git);
-  assert.deepEqual(projectReadsPushed([], own), []);
 });
 
 /** Catches a repository the plane mints nothing for answered anything. */

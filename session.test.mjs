@@ -1398,11 +1398,8 @@ test("a bound session asks the plane for its own repository and hands the mint t
   assert.deepEqual(asked.body, { repository: "chuggy" });
   assert.equal(written.length, 1);
   assert.equal(written[0].content, mintedCredential.password);
-  assert.equal(handed.CHUG_WORKER_GIT_CREDENTIAL_FILE, written[0].file);
-  assert.equal(
-    handed.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
-    mintedCredential.username,
-  );
+  assert.equal(handed.file, written[0].file);
+  assert.equal(handed.username, mintedCredential.username);
 });
 
 test("a minted password is scrubbed out of everything this pod writes", async () => {

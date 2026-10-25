@@ -1263,7 +1263,7 @@ export async function sessionMain(services = {}) {
       {
         log: warn,
         scrub,
-        ...(minted === undefined ? {} : { minted: minted.environment }),
+        ...(minted === undefined ? {} : { minted }),
       },
     );
     return await sessionRun(context, facts, {

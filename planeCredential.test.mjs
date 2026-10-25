@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fileURLToPath, URL } from "node:url";
 
 import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnvironment";
 
@@ -64,21 +63,11 @@ test("an attempt asks for nothing and is answered a credential git reads from a 
       options: { mode: 0o600 },
     },
   ]);
-  assert.equal(credential.file, mintedFile);
-  assert.equal(credential.password, password);
-  assert.equal(
-    credential.environment.CHUG_WORKER_GIT_CREDENTIAL_FILE,
-    mintedFile,
-  );
-  assert.equal(
-    credential.environment.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
-    minted.username,
-  );
-  assert.equal(
-    credential.environment.GIT_ASKPASS,
-    fileURLToPath(new URL("./git-askpass.sh", import.meta.url)),
-  );
-  assert.equal(credential.environment.GIT_TERMINAL_PROMPT, "0");
+  assert.deepEqual(credential, {
+    file: mintedFile,
+    username: minted.username,
+    password,
+  });
 });
 
 test("a not-found is an answer the transport hands back rather than retries", async () => {

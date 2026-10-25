@@ -109,6 +109,7 @@ import {
 } from "./planeCredential.mjs";
 import { projectReadsServed } from "./projectReads.mjs";
 import {
+  workerCredentialEnvironment,
   workerRepositories,
   workerRepository,
   workerRepositoryUrl,
@@ -583,13 +584,13 @@ async function workerMinted({
  * here is this attempt's failure: a clone that minted and a push that cannot
  * is a deployment mid-change or an installation that grants only a read, and
  * reaching the remote with something else is exactly what a minted credential
- * is for.
+ * is for. It is presented for `remote`, the URL the push reaches.
  */
-async function workerRefreshed(asked) {
+async function workerRefreshed(asked, remote) {
   const minted = await workerMinted(asked);
   if (minted === undefined)
     throw new Error("the worker plane mints no credential to push with");
-  return minted.environment;
+  return workerCredentialEnvironment(minted.file, minted.username, remote);
 }
 
 /** The credential this attempt's launcher mounted, and the authority that must name it. */
@@ -611,13 +612,18 @@ function workerMounted(task, repositories, credentialFiles, repositoryId) {
 export async function workerCredential(asked) {
   const { task, repositories, credentialFiles, repositoryId } = asked;
   const minted = await workerMinted({ ...asked, repository: repositoryId });
-  return minted === undefined
-    ? workerMounted(task, repositories, credentialFiles, repositoryId)
-    : {
-        repository: workerRepositoryUrl(repositories, repositoryId),
-        environment: minted.environment,
-        refresh: () => workerRefreshed(asked),
-      };
+  if (minted === undefined)
+    return workerMounted(task, repositories, credentialFiles, repositoryId);
+  const repository = workerRepositoryUrl(repositories, repositoryId);
+  return {
+    repository,
+    environment: workerCredentialEnvironment(
+      minted.file,
+      minted.username,
+      repository,
+    ),
+    refresh: () => workerRefreshed(asked, repository),
+  };
 }
 
 /**
@@ -1162,8 +1168,8 @@ export async function workerAttempt(launch, seams = {}) {
  * a settled task never carries figures nothing wrote. `context.command` is the
  * seam a passing work attempt's push runs through, this module's own where it
  * is absent; `context.held` answers the secrets that push is checked for; and
- * `context.git` is the attempt's git configuration, which its commit and its
- * push are handed with the hooks they run.
+ * `context.git` is the attempt's git configuration, which its commit is handed
+ * with the hooks it runs.
  */
 export async function publishWorkerResult(
   context,

@@ -57,6 +57,7 @@ import {
   sessionAllowedTools,
   sessionBuiltInTools,
 } from "./chuggyTools.mjs";
+import { git } from "./checkout.fixture.mjs";
 import { claudeAgent } from "./claude.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
@@ -941,7 +942,13 @@ test("the manifest the pod reports is one the contract's manifest schema reads",
         stopLease: async () => undefined,
         request,
         held: () => [],
-        command: async () => ({ stdout: `${"a".repeat(40)}\n` }),
+        command: async (executable, args, options) =>
+          args[0] === "init"
+            ? git(executable, args, {
+                ...options,
+                env: { PATH: process.env.PATH ?? "", ...options.env },
+              })
+            : { stdout: `${"a".repeat(40)}\n` },
       },
       {
         repositoryId: "repository-1",

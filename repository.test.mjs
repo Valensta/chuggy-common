@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import process from "node:process";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
 import { promisify } from "node:util";
@@ -15,8 +16,10 @@ import {
 } from "@chuggy/worker-contract/workerEnvironment";
 
 import { workerImageVariable } from "./checks.mjs";
+import { forgeGitIsolated, forgeServed } from "./gitForge.fixture.mjs";
 import {
   workerCredentialEnvironment,
+  workerCredentialHost,
   workerRepositories,
   workerRepository,
   workerRepositoryUrl,
@@ -93,8 +96,31 @@ test("a worker repository selects its own credential", () => {
     selected.environment.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
     repositories.github.credentialUsername,
   );
+  assert.equal(
+    selected.environment.CHUG_WORKER_GIT_CREDENTIAL_HOST,
+    "github.com",
+  );
   assert.equal(selected.environment.GIT_ASKPASS, askpass);
   assert.equal(selected.environment.GIT_TERMINAL_PROMPT, "0");
+});
+
+/**
+ * Catches a host read other than as git's prompt names it: a port dropped, a
+ * user kept, a path, query or fragment read as part of it, or a remote that
+ * is no URL given a host the askpass would answer.
+ */
+test("the host a credential is presented for is the one git's prompt names", () => {
+  for (const [remote, host] of [
+    ["https://github.com/kasofsk/chuggy.git", "github.com"],
+    ["https://Git.Example:8443/org/x.git", "Git.Example:8443"],
+    ["http://x-access-token@127.0.0.1:3000/org/x.git", "127.0.0.1:3000"],
+    ["https://github.com?x=/y", "github.com"],
+    ["https://github.com#/y", "github.com"],
+    ["https://github.com", "github.com"],
+    ["/var/lib/git/rig.git", ""],
+    ["git@github.com:kasofsk/chuggy.git", ""],
+  ])
+    assert.equal(workerCredentialHost(remote), host, remote);
 });
 
 /**
@@ -118,7 +144,11 @@ test("the askpass environment is what the image's programs are handed, and the a
       else process.env[name] = value;
   });
 
-  const environment = workerCredentialEnvironment("/credentials/github", "x");
+  const environment = workerCredentialEnvironment(
+    "/credentials/github",
+    "x",
+    "https://github.com/kasofsk/chuggy.git",
+  );
 
   assert.equal(environment.LD_LIBRARY_PATH, "/the/image/lib");
   assert.equal(environment.SITE_VARIABLE, "set by the site");
@@ -211,17 +241,17 @@ test("worker repositories are one keyed object", () => {
 });
 
 /**
- * The prompts git asks an askpass, each naming a remote whose path holds the
- * word git's username prompt begins with, as a remote named with git's
- * `credential.useHttpPath` does.
+ * The prompts git asks an askpass for its own host, each naming a remote whose
+ * path holds the word git's username prompt begins with, as a remote named
+ * with git's `credential.useHttpPath` does.
  */
 const askpassPrompts = {
   username: [
-    "Username: ",
+    "Username for 'https://github.com': ",
     "Username for 'https://github.com/org/UsernameTools.git': ",
   ],
   password: [
-    "Password: ",
+    "Password for 'https://selected-user@github.com': ",
     "Password for 'https://selected-user@github.com/org/UsernameTools.git': ",
   ],
 };
@@ -239,6 +269,7 @@ test("git askpass reads the selected repository credential", async (t) => {
     ...process.env,
     CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
     CHUG_WORKER_GIT_CREDENTIAL_USERNAME: "selected-user",
+    CHUG_WORKER_GIT_CREDENTIAL_HOST: "github.com",
   };
 
   for (const [asked, answer] of [
@@ -254,21 +285,27 @@ test("git askpass reads the selected repository credential", async (t) => {
     }
 });
 
-/** The answer the askpass gives under `shell` on a PATH of nothing, the credential file holding `content`. */
-async function askpassAnswer(shell, directory, content) {
+/**
+ * The answer the askpass gives `prompt` under `shell` on a PATH of nothing,
+ * for `github.com`, the credential file holding `content`.
+ */
+async function askpassAnswer(
+  shell,
+  directory,
+  content,
+  prompt = "Password for 'https://x-access-token@github.com/org/x.git': ",
+) {
   const credentialFile = join(directory, "credential");
   await rm(credentialFile, { force: true });
   if (content !== undefined) await writeFile(credentialFile, content);
-  return executeFile(
-    shell.argv[0],
-    [...shell.argv.slice(1), askpass, "Password for repository"],
-    {
-      env: {
-        PATH: join(directory, "nothing"),
-        CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
-      },
+  return executeFile(shell.argv[0], [...shell.argv.slice(1), askpass, prompt], {
+    env: {
+      PATH: join(directory, "nothing"),
+      CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
+      CHUG_WORKER_GIT_CREDENTIAL_USERNAME: "x-access-token",
+      CHUG_WORKER_GIT_CREDENTIAL_HOST: "github.com",
     },
-  );
+  });
 }
 
 /**
@@ -297,3 +334,120 @@ for (const shell of posixShells)
       });
     },
   );
+
+/**
+ * Prompts naming a host other than `github.com`, or naming it as only part of
+ * another: another host, its own on another port, its own as the user of
+ * another, another with its own in the path, query or fragment; prompts
+ * naming no host at all; and a prompt for something other than a username or
+ * a password.
+ */
+const askpassForeignPrompts = [
+  "Password for 'https://evil.example': ",
+  "Username for 'https://evil.example/org/x.git': ",
+  "Password for 'https://github.com:8443': ",
+  "Username for 'https://github.com:8443/org/x.git': ",
+  "Password for 'https://github.com@evil.example': ",
+  "Password for 'https://evil.example/@github.com': ",
+  "Password for 'https://evil.example?@github.com': ",
+  "Password for 'https://evil.example#@github.com': ",
+  "Password for 'https://github.com.evil.example': ",
+  "Password for 'github.com': ",
+  "Passphrase for 'https://github.com': ",
+  "Password: ",
+  "Username: ",
+];
+
+/**
+ * Catches an askpass that answers a prompt for any host but its own, which
+ * would hand the job's credential to whichever host a remote names.
+ */
+for (const shell of posixShells)
+  test(
+    `git askpass answers nothing for any host but its own, under ${shell.name}`,
+    { skip: shell.absent },
+    async (t) => {
+      const directory = await mkdtemp(join(tmpdir(), "chuggy-askpass-"));
+      t.after(() => rm(directory, { recursive: true, force: true }));
+      for (const prompt of askpassForeignPrompts)
+        await assert.rejects(
+          askpassAnswer(shell, directory, "token\n", prompt),
+          (failure) => failure.code !== 0 && failure.stdout === "",
+          prompt,
+        );
+      const { stdout } = await askpassAnswer(
+        shell,
+        directory,
+        "token\n",
+        "Username for 'https://github.com': ",
+      );
+      assert.equal(stdout, "x-access-token\n");
+    },
+  );
+
+/**
+ * The askpass under `directory`, executable as an image installs it, and the
+ * credential file it reads, holding `askpassForgePassword`.
+ */
+async function askpassInstalled(directory) {
+  const installed = join(directory, "git-askpass.sh");
+  await copyFile(askpass, installed);
+  await chmod(installed, 0o555);
+  const credentialFile = join(directory, "credential");
+  await writeFile(credentialFile, `${askpassForgePassword}\n`);
+  return { installed, credentialFile };
+}
+
+/** What `git ls-remote` of `url` exits with under the askpass `installed`, answering for `host`. */
+async function askpassListed({ installed, credentialFile }, url, host) {
+  return executeFile("git", ["ls-remote", url], {
+    env: {
+      PATH: process.env.PATH ?? "",
+      ...forgeGitIsolated,
+      GIT_ASKPASS: installed,
+      CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
+      CHUG_WORKER_GIT_CREDENTIAL_USERNAME: "x-access-token",
+      CHUG_WORKER_GIT_CREDENTIAL_HOST: host,
+    },
+  }).then(
+    () => 0,
+    (failure) => failure.code,
+  );
+}
+
+/** The password the suite's forge accepts. */
+const askpassForgePassword = "ghs_askpass0123456789abcdefghijklmnop";
+
+/**
+ * Driven by git itself, because the prompt git writes is git's to decide.
+ * Catches an askpass that cannot read the host out of git's own prompt, and
+ * one that answers the forge's host on a port it was not given.
+ */
+test("git askpass answers git's own prompt for its host, and nothing for its host on another port", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-askpass-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const forge = await forgeServed(t, ["rig.git"]);
+  forge.accept("rig.git", askpassForgePassword);
+  const url = forge.url("rig.git");
+  const { port } = new URL(forge.origin);
+  const installed = await askpassInstalled(directory);
+
+  assert.equal(
+    await askpassListed(
+      installed,
+      url,
+      `127.0.0.1:${String(Number(port) + 1)}`,
+    ),
+    128,
+  );
+  assert.equal(await askpassListed(installed, url, "127.0.0.1"), 128);
+  assert.deepEqual(forge.presented, []);
+  assert.equal(
+    await askpassListed(installed, url, workerCredentialHost(url)),
+    0,
+  );
+  assert.deepEqual(
+    [...new Set(forge.presented.map(({ password }) => password))],
+    [askpassForgePassword],
+  );
+});
