@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
 import {
+  workerRunnerCapabilitiesHeader,
+  workerRunnerCapabilitiesOf,
   workerRunnerHeader,
   workerRunnerOf,
 } from "@chuggy/worker-contract/workerPool";
@@ -213,7 +215,12 @@ test("a run whose runner has installed the release it updates to ends with the v
   ]);
 });
 
-test("a runner's client names the runner it is given on each poll, and one given none names none", async (t) => {
+/**
+ * Catches a runner's identity or capabilities left off its polls, or a
+ * capabilities header sent by a runner that gives none, which would replace
+ * the set its registration recorded.
+ */
+test("a runner's client names the runner and the capabilities it is given on each poll, and one given neither names neither", async (t) => {
   /** @type {Array<Record<string, string>>} */
   const sent = [];
   mock.method(globalThis, "fetch", async (_input, init) => {
@@ -227,18 +234,19 @@ test("a runner's client names the runner it is given on each poll, and one given
   const backend = /** @type {any} */ ({});
   const limits = { concurrencyMax: 1, sessionsMax: 0 };
   const runner = { package: "chuggy-linux", version: "0.14.0" };
-  await poolRunnerClient(credentials, backend, limits, { runner }).plane.poll(
-    "pool-token",
-    [],
-    1,
-    0,
-  );
-  await poolRunnerClient(credentials, backend, limits).plane.poll(
-    "pool-token",
-    [],
-    1,
-    0,
-  );
+  const capabilities = ["Platform:Linux:Amd64", "Agent:Claude"];
+  for (const seams of [{ runner, capabilities }, {}])
+    await poolRunnerClient(credentials, backend, limits, seams).plane.poll(
+      "pool-token",
+      [],
+      1,
+      0,
+    );
   assert.deepEqual(workerRunnerOf(sent[0][workerRunnerHeader]), runner);
-  assert.equal(workerRunnerHeader in sent[1], false);
+  assert.deepEqual(
+    workerRunnerCapabilitiesOf(sent[0][workerRunnerCapabilitiesHeader]),
+    { named: "Set", capabilities },
+  );
+  for (const header of [workerRunnerHeader, workerRunnerCapabilitiesHeader])
+    assert.equal(header in sent[1], false, header);
 });

@@ -7,6 +7,9 @@ import {
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 import {
+  workerPoolCapabilitiesMax,
+  workerRunnerCapabilitiesHeader,
+  workerRunnerCapabilitiesOf,
   workerRunnerHeader,
   workerRunnerOf,
 } from "@chuggy/worker-contract/workerPool";
@@ -340,6 +343,88 @@ test("a runner the contract cannot name is refused at once, and a release it can
     }),
   ).poll("pool-token", [], 1);
   assert.equal(polled.polled, "Unavailable");
+});
+
+/**
+ * The header each poll of a client given `capabilities` sends, as the plane
+ * reads it.
+ *
+ * @param {readonly string[] | undefined} capabilities
+ */
+async function capabilitiesNamed(capabilities) {
+  const headers = [];
+  const plane = poolPlaneClient(
+    capabilities === undefined
+      ? planeSettings
+      : { ...planeSettings, capabilities },
+    async (_input, init) => {
+      headers.push(init.headers);
+      return answered(
+        200,
+        JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+      );
+    },
+  );
+  await plane.poll("pool-token", [], 1);
+  await plane.poll("pool-token", [], 1);
+  return headers.map((sent) => ({
+    present: workerRunnerCapabilitiesHeader in sent,
+    named: workerRunnerCapabilitiesOf(sent[workerRunnerCapabilitiesHeader]),
+  }));
+}
+
+/**
+ * Catches a duplicate reaching the wire, which the plane refuses with a 400
+ * that ends the pool, and a set left off any poll.
+ */
+test("a runner's every poll names its capabilities as a set the plane reads, each once, and the empty set as one", async () => {
+  for (const [given, set] of [
+    [
+      ["Platform:Linux:Amd64", "Agent:Claude", "Tool:Bazel", "Agent:Claude"],
+      ["Platform:Linux:Amd64", "Agent:Claude", "Tool:Bazel"],
+    ],
+    [[], []],
+  ])
+    assert.deepEqual(
+      await capabilitiesNamed(given),
+      Array(2).fill({
+        present: true,
+        named: { named: "Set", capabilities: set },
+      }),
+      JSON.stringify(given),
+    );
+});
+
+/** Catches a client given no capabilities naming a set, which would replace the one its registration recorded. */
+test("a client given no capabilities names none on any poll", async () => {
+  assert.deepEqual(
+    await capabilitiesNamed(undefined),
+    Array(2).fill({ present: false, named: { named: "None" } }),
+  );
+});
+
+/**
+ * Catches capabilities the plane would refuse reaching a poll, whose 400 ends
+ * the pool, and a set bounded before its duplicates are dropped.
+ */
+test("capabilities the contract cannot read are refused at once, a set past its bound only once its duplicates are dropped", async () => {
+  const bounded = Array.from(
+    { length: workerPoolCapabilitiesMax },
+    (_, index) => `Tool:${String(index)}`,
+  );
+  for (const capabilities of [
+    ["Tool Bazel"],
+    ["Tool:Bazel,Agent:Claude"],
+    [""],
+    [...bounded, "Tool:over"],
+  ])
+    assert.throws(
+      () => poolPlaneClient({ ...planeSettings, capabilities }),
+      /pool plane capabilities must be at most \d+ tokens a pool can declare/u,
+      JSON.stringify(capabilities),
+    );
+  const [named] = await capabilitiesNamed([...bounded, bounded[0]]);
+  assert.deepEqual(named.named, { named: "Set", capabilities: bounded });
 });
 
 test("a poll and every settlement name the release this client was built with", async () => {

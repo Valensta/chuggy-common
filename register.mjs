@@ -8,7 +8,8 @@
  * this machine as one of that member's runners there. What the operator
  * could have asked wrongly is refused before the token is spent, and the
  * answer is checked whole before anything is written. The runner's secret is
- * never printed and never in an argv.
+ * never printed and never in an argv. What a runner advertises on each poll,
+ * in place of what its registration declared, is found by the same rules.
  */
 
 import { Buffer } from "node:buffer";
@@ -29,7 +30,11 @@ import {
 import { z } from "zod";
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
-import { jobAgentCapability, jobClaudeAgent } from "./job.mjs";
+import {
+  jobAgentCapability,
+  jobAgentCapabilityPrefix,
+  jobClaudeAgent,
+} from "./job.mjs";
 import {
   poolIdentityDigest,
   poolIdentityNames,
@@ -86,6 +91,9 @@ const registerPlatforms = /** @type {Record<string, string>} */ ({
   x64: "Platform:Linux:Amd64",
   arm64: "Platform:Linux:Arm64",
 });
+
+/** What a platform's capability begins with, which a runner finds and no operator declares. */
+const registerPlatformPrefix = "Platform:";
 
 /** The longest DNS label. */
 const registerPoolNameCharsMax = 63;
@@ -223,7 +231,7 @@ function registerDeclared(declared) {
       return {
         refused: `--capability ${capability} is not a capability: letters, digits, _, : and -, beginning with a letter or digit`,
       };
-    if (capability.startsWith("Platform:"))
+    if (capability.startsWith(registerPlatformPrefix))
       return {
         refused: `--capability ${capability} names a platform, which register finds of this machine`,
       };
@@ -294,6 +302,21 @@ function registerTokenAllowed(token) {
 }
 
 /**
+ * The platform the containers of a machine `process.arch` names run, or why
+ * no pool runs there.
+ *
+ * @param {string} arch
+ * @returns {{platform: string} | {refused: string}}
+ */
+export function registerPlatform(arch) {
+  return Object.hasOwn(registerPlatforms, arch)
+    ? { platform: registerPlatforms[arch] }
+    : {
+        refused: `this machine is ${arch}, and a pool runs Linux on x64 or arm64`,
+      };
+}
+
+/**
  * The redemption the operator asked for, or why it cannot be made: the ask
  * checked, then the platform the machine's containers run, those it runs on
  * its host, and what the operator declared. Nothing here spends the token.
@@ -305,15 +328,10 @@ function registerTokenAllowed(token) {
 export function registerRequest(asked, machine) {
   const answer = registerAskedChecked(asked, machine.hostname);
   if ("refused" in answer) return answer;
-  const platform = Object.hasOwn(registerPlatforms, machine.arch)
-    ? registerPlatforms[machine.arch]
-    : undefined;
-  if (platform === undefined)
-    return {
-      refused: `this machine is ${machine.arch}, and a pool runs Linux on x64 or arm64`,
-    };
+  const found = registerPlatform(machine.arch);
+  if ("refused" in found) return found;
   const capabilities = [
-    ...new Set([platform, ...(machine.hosted ?? [])]),
+    ...new Set([found.platform, ...(machine.hosted ?? [])]),
     ...new Set([...answer.checked.capabilities, ...(machine.agents ?? [])]),
   ];
   if (capabilities.length > workerPoolCapabilitiesMax)
@@ -339,10 +357,88 @@ export function registerRequest(asked, machine) {
 export function registerAgents(files, images, host) {
   return [jobClaudeAgent, ...Object.keys(files.agentCredentialFiles ?? {})]
     .map(jobAgentCapability)
-    .filter(
-      (agent) =>
-        host || images.some((image) => image.capabilities.includes(agent)),
+    .filter((agent) => registerAgentRunnable(agent, images, host));
+}
+
+/**
+ * Whether a runner has somewhere to run an agent: an image its owner listed
+ * declaring the agent's capability, or this machine itself.
+ *
+ * @param {string} agent its capability
+ * @param {readonly {capabilities: readonly string[]}[]} images
+ * @param {boolean} host
+ */
+function registerAgentRunnable(agent, images, host) {
+  return host || images.some((image) => image.capabilities.includes(agent));
+}
+
+/**
+ * What an operator declares a runner meets in the runner's own file, beside
+ * the platforms and agents it finds: each a token a requirement can name,
+ * once, and none a platform.
+ */
+export const registerDeclaredSchema = workerPoolCapabilitiesSchema.superRefine(
+  (declared, context) => {
+    for (const [index, capability] of declared.entries())
+      if (capability.startsWith(registerPlatformPrefix))
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "is a platform, which the runner finds of this machine",
+        });
+      else if (declared.indexOf(capability) !== index)
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "is named by an earlier entry",
+        });
+  },
+);
+
+/**
+ * @typedef {object} RegisterRunner what a runner finds of itself when it starts
+ * @property {readonly string[]} platforms those it runs work on, its containers' first
+ * @property {import("./job.mjs").JobCredentialFiles} files
+ * @property {readonly {capabilities: readonly string[]}[]} images what its owner listed
+ * @property {boolean} host whether a job that pins no image runs on the machine itself, as the pool file says
+ * @property {readonly string[] | undefined} declared what its own file declares, as `registerDeclaredSchema` reads it, where the file names the key
+ * @property {readonly string[]} recorded what the pool file says the pool was registered with
+ */
+
+/**
+ * The capabilities a runner names on each poll, whose set replaces the one
+ * its registration recorded: its platforms first, then its operator's and the
+ * agents `registerAgents` finds, each once. Its operator's are what its own
+ * file declares where it names the key, and otherwise what the pool was
+ * registered with, less the platforms, which a runner finds of itself, and
+ * less any agent it has no image or host to run, whose job it would be
+ * offered and refuse.
+ *
+ * @param {RegisterRunner} runner
+ * @returns {{capabilities: string[]} | {refused: string}}
+ */
+export function registerAdvertised(runner) {
+  const { images, host } = runner;
+  const operators =
+    runner.declared ??
+    runner.recorded.filter(
+      (capability) =>
+        !capability.startsWith(registerPlatformPrefix) &&
+        (!capability.startsWith(jobAgentCapabilityPrefix) ||
+          registerAgentRunnable(capability, images, host)),
     );
+  const capabilities = [
+    ...new Set([
+      ...runner.platforms,
+      ...operators,
+      ...registerAgents(runner.files, images, host),
+    ]),
+  ];
+  return capabilities.length > workerPoolCapabilitiesMax
+    ? {
+        refused: `this runner would advertise ${String(capabilities.length)} capabilities, its platforms and agents among them, and a pool advertises at most ${String(workerPoolCapabilitiesMax)}`,
+      }
+    : { capabilities };
 }
 
 /**
@@ -382,8 +478,6 @@ function registerErrorReason(body) {
 function registerRefusal(status, body, request) {
   if (status === 404)
     return "the registration token is unknown, spent or expired; mint another in chuggy's console";
-  if (status === 403)
-    return `the registration token does not permit every capability declared, of ${request.capabilities.join(", ")}; mint one that does`;
   if (status === 409 && request.kind === "Personal")
     return "this member has as many runners in the tenant as chuggy allows, and the token is not spent; remove one in chuggy's console and run register again";
   if (status === 400) {
