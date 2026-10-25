@@ -4,12 +4,13 @@
  * this pod's own process for, and the configuration that sends git to ask.
  *
  * GIT ASKS THROUGH ITS OWN CACHE CLIENT. Every git the attempt runs once its
- * workspace is cloned is configured to ask `git credential-cache` at a socket
- * in the minted directory, naming the path of the repository it reaches, for
- * any remote on the forge the job's own repository is bound at. This process
- * serves that socket and asks the plane under the bearer it alone holds, so
- * nothing git runs holds the bearer. A job whose repository is named by no
- * HTTP URL has no forge, and configures nothing.
+ * workspace is cloned, but its push, is configured to ask `git
+ * credential-cache` at a socket in the minted directory, naming the path of
+ * the repository it reaches, for any remote on the forge the job's own
+ * repository is bound at. This process serves that socket and asks the plane
+ * under the bearer it alone holds, so nothing git runs holds the bearer. A job
+ * whose repository is named by no HTTP URL has no forge, and configures
+ * nothing.
  *
  * A GIT TOO OLD TO READ THAT CONFIGURATION IS WARNED OF, once, on this
  * process's stderr: every read is then absent, and nothing else would say so.
@@ -21,11 +22,9 @@
  * nothing, git goes on to whatever else it holds, and outside the push the
  * attempt hands it nothing more. The push asks for the job's own repository
  * by no name, which a work attempt is minted the write for, and presents it
- * through its askpass: `projectReadsPushed` leaves no helper for the one URL
- * it pushes to. A hook the push runs holds what the push holds, so a git it
- * runs reaches the job's own repository with the write, and can present it to
- * another repository the plane mints nothing for, as any hook's git could
- * before reads were served.
+ * through its askpass alone, from a repository of the core's own that is
+ * handed none of these entries, asks no helper and runs no hook
+ * (`source.mjs`).
  *
  * A REPOSITORY IS ASKED FOR BY ITS CLONE URL, which is what a binding is named
  * by: the forge's origin, the path git names, and `.git` where that path ends
@@ -34,8 +33,8 @@
  * WHAT GIT HANDS BACK IS NEVER KEPT. The configuration first clears every
  * helper the image or the workspace names for the forge, so the cache client
  * is the only one git asks, and the only one git hands a credential that
- * worked; the URL a push reaches has none, so the push's credential is handed
- * to nothing. A store or an erase is read and dropped, so no token rests in
+ * worked; the push asks no helper at all, so its credential is handed to
+ * nothing. A store or an erase is read and dropped, so no token rests in
  * any file, and every answer is the plane's. The plane answers a token only
  * while it is still usable, so one that expired is minted again the next time
  * git asks.
@@ -144,18 +143,6 @@ export function projectReadsConfiguration(forge, socket) {
     [`url.${forge.origin}/.insteadOf`, `git@${forge.hostname}:`],
     [`url.${forge.origin}/.insteadOf`, `ssh://git@${forge.hostname}/`],
   ];
-}
-
-/**
- * `git` as the push to `repository` is handed it: where it configures any
- * reads, followed by an empty helper for that one URL, which git reads as
- * clearing every helper named for it before, so the push asks its askpass
- * rather than the cache client. Every other URL keeps its reads.
- */
-export function projectReadsPushed(git, repository) {
-  return git.length === 0
-    ? git
-    : [...git, [`credential.${repository}.helper`, ""]];
 }
 
 /** Each `key=value` line of one request, the first of a key being the one read. */

@@ -49,7 +49,11 @@ import { rm } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { jobRepositoryDirectory } from "./job.mjs";
-import { workerRepository, workerRepositoryUrl } from "./repository.mjs";
+import {
+  workerCredentialEnvironment,
+  workerRepository,
+  workerRepositoryUrl,
+} from "./repository.mjs";
 
 const executeFile = promisify(execFile);
 
@@ -117,13 +121,19 @@ async function discard(directory, log) {
 function sessionRemote(task, repositories, credentialFiles, reference, minted) {
   let resolved;
   try {
-    resolved =
-      minted === undefined
-        ? workerRepository(repositories, credentialFiles, reference)
-        : {
-            repository: workerRepositoryUrl(repositories, reference),
-            environment: minted,
-          };
+    if (minted === undefined)
+      resolved = workerRepository(repositories, credentialFiles, reference);
+    else {
+      const repository = workerRepositoryUrl(repositories, reference);
+      resolved = {
+        repository,
+        environment: workerCredentialEnvironment(
+          minted.file,
+          minted.username,
+          repository,
+        ),
+      };
+    }
   } catch (failure) {
     return {
       refused: `session checkout cannot resolve ${reference}: ${
@@ -148,7 +158,7 @@ function sessionRemote(task, repositories, credentialFiles, reference, minted) {
  *
  * `run` and `log` are seams so a suite can drive a real clone and still say
  * where its output went; the defaults are `git` itself and the pod's stderr.
- * `minted` is the askpass environment the plane's credential was written into,
+ * `minted` is the file the plane's credential was written to and its username,
  * where the plane minted one; without it the site's mounted map is what answers.
  */
 export async function sessionCheckout(

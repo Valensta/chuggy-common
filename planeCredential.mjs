@@ -46,7 +46,6 @@ import {
   workerPlaneRoutes,
 } from "@chuggy/worker-contract/workerPlane";
 
-import { workerCredentialEnvironment } from "./repository.mjs";
 import { workerRequest } from "./transport.mjs";
 import { answeredWith } from "./wire.mjs";
 
@@ -128,18 +127,16 @@ export async function planeCredentialAnswered({
 
 /**
  * The credential the plane minted for this pod, written where the askpass
- * reads it, or nothing where it mints none for this repository and the pod
- * falls back to what its launcher mounted. `write` is the seam a suite reads
- * the password back from.
+ * reads it, with the username the askpass answers beside it; or nothing where
+ * it mints none for this repository and the pod falls back to what its
+ * launcher mounted. The caller presents it with `workerCredentialEnvironment`
+ * for the URL it reaches, which is the host the askpass answers. `write` is the
+ * seam a suite reads the password back from.
  */
 export async function planeCredential({ write = writeFile, ...asked }) {
   const minted = await planeCredentialAnswered(asked);
   if (minted === undefined) return undefined;
   const file = join(mintedCredentialDirectory, planeCredentialFileName);
   await write(file, minted.password, { mode: planeCredentialFileMode });
-  return {
-    file,
-    password: minted.password,
-    environment: workerCredentialEnvironment(file, minted.username),
-  };
+  return { file, username: minted.username, password: minted.password };
 }

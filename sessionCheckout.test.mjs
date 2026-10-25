@@ -128,18 +128,22 @@ test("a credential the attempt's authority does not grant is refused, not raised
   assert.deepEqual(taken, [], "an ungranted credential still reached git");
 });
 
-test("a minted credential is what the clone reaches the remote with", async () => {
+/**
+ * Catches a minted credential presented for a host other than the one the
+ * site's map resolves the reference to, which the askpass would then answer
+ * nothing, or with the mounted credential's file or username.
+ */
+test("a minted credential is what the clone reaches the remote with, for the remote's host", async () => {
   const minted = {
-    CHUG_WORKER_GIT_CREDENTIAL_FILE: "/tmp/chuggy-git-credential",
-    CHUG_WORKER_GIT_CREDENTIAL_USERNAME: "x-access-token",
-    GIT_ASKPASS: "/usr/local/lib/chuggy/git-askpass.sh",
-    GIT_TERMINAL_PROMPT: "0",
+    file: "/tmp/chuggy-git-credential",
+    username: "x-access-token",
   };
+  const remote = "https://git.example:8443/org/rig.git";
   const taken = [];
 
   const checkout = await sessionCheckout(
     taskOf({ authority: { ...grant, credentials: [] } }),
-    repositories("/nowhere"),
+    repositories(remote),
     credentialFiles,
     "/workspace",
     {
@@ -157,12 +161,19 @@ test("a minted credential is what the clone reaches the remote with", async () =
     commit: "abc123",
   });
   assert.equal(taken.length, 2);
-  for (const { options } of taken) assert.deepEqual(options.env, minted);
-  assert.deepEqual(taken[0].args, [
-    "clone",
-    "/nowhere",
-    "/workspace/repository",
-  ]);
+  for (const { options } of taken) {
+    assert.equal(options.env.CHUG_WORKER_GIT_CREDENTIAL_FILE, minted.file);
+    assert.equal(
+      options.env.CHUG_WORKER_GIT_CREDENTIAL_USERNAME,
+      minted.username,
+    );
+    assert.equal(
+      options.env.CHUG_WORKER_GIT_CREDENTIAL_HOST,
+      "git.example:8443",
+    );
+    assert.equal(options.env.GIT_TERMINAL_PROMPT, "0");
+  }
+  assert.deepEqual(taken[0].args, ["clone", remote, "/workspace/repository"]);
 });
 
 test("a minted session clones a reference the site's map does not name", async () => {
@@ -180,7 +191,7 @@ test("a minted session clones a reference the site's map does not name", async (
         return { stdout: "abc123\n" };
       },
       log: () => undefined,
-      minted: { GIT_ASKPASS: "/usr/local/lib/chuggy/git-askpass.sh" },
+      minted: { file: "/tmp/chuggy-git-credential", username: "x" },
     },
   );
 
