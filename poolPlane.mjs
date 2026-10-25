@@ -1,6 +1,9 @@
 /**
  * The pool loop's plane: the poll and the settlement over HTTP. chuggy's
- * `src/adapters/http/poolPlaneClient.ts` is the same client in TypeScript.
+ * `src/adapters/http/poolPlaneClient.ts` is the same client in TypeScript, and
+ * a change to one is a change to both, but for the runner a poll names and the
+ * release an answer names for it, which that cluster client neither names nor
+ * reads.
  *
  * The status is the answer and nothing here retries it; a 409 is the one
  * status two answers share, told apart by its body. A 404 or a 400 denies the
@@ -10,7 +13,7 @@
  * denial, because a denial ends the pool over a skew the plane did not refuse.
  *
  * A runner names its package and version on the poll, and the answer may name
- * the release chuggy pins for that package; the cluster's client names none.
+ * the release chuggy pins for that package.
  */
 
 import { TextDecoder } from "node:util";

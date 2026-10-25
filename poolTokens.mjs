@@ -2,7 +2,8 @@
  * The pool loop's token source: the OAuth2 client-credentials grant, held
  * until a refresh margin before its expiry and minted at most once per
  * cooldown. chuggy's `src/adapters/http/clientCredentials.ts` and
- * `src/adapters/http/poolTokens.ts` are the same source in TypeScript.
+ * `src/adapters/http/poolTokens.ts` are the same source in TypeScript, and a
+ * change to one is a change to both.
  *
  * The cooldown is measured from the start of the last attempt on a monotonic
  * clock, so neither a refusal that never stops nor an issuer that never
