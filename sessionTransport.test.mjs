@@ -17,6 +17,11 @@ import { workerPlaneAwayMillisecondsMax } from "./transport.mjs";
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 
+/**
+ * A plane answering each request with the next of `answers`, and the last
+ * from then on. Each names the plane's release, as the plane does on every
+ * answer, unless it is a proxy's answer in its place.
+ */
 function transportOf(answers) {
   const calls = [];
   const clock = pausedClock();
@@ -29,10 +34,15 @@ function transportOf(answers) {
         calls.push({ url: String(url), init });
         const answer = answers[Math.min(calls.length, answers.length) - 1];
         if (answer instanceof Error) throw answer;
-        return {
+        return new globalThis.Response(null, {
           status: answer.status,
-          headers: { get: (name) => answer.headers?.[name] },
-        };
+          headers: {
+            ...(answer.proxy === true
+              ? {}
+              : { [workerContractHeader]: workerContractRelease }),
+            ...answer.headers,
+          },
+        });
       },
       wait: clock.wait,
       now: clock.now,
@@ -133,9 +143,10 @@ test("a plane away for less than a lease is waited out", async () => {
       { method: "POST" },
       {
         fetch: async () => {
-          if (clock.now() >= awayMilliseconds) return { status: 204 };
+          if (clock.now() >= awayMilliseconds)
+            return new globalThis.Response(null, { status: 204 });
           if (away instanceof Error) throw away;
-          return { ...away, headers: { get: () => undefined } };
+          return new globalThis.Response(null, away);
         },
         ...clock,
       },
@@ -143,6 +154,38 @@ test("a plane away for less than a lease is waited out", async () => {
 
     assert.equal(response.status, 204);
   }
+});
+
+/**
+ * A proxy in front of a plane it cannot reach answers a status of its own,
+ * naming no release: a heartbeat it answered for, or a claim, is asked again
+ * as a server error is, and what is raised at last is its status.
+ */
+test("a failing status naming no release is asked again until the plane answers", async () => {
+  for (const status of [400, 401, 404, 409, 413]) {
+    const { calls, waits, transport } = transportOf([
+      { status, proxy: true },
+      { status: 204 },
+    ]);
+
+    const response = await sessionRequest(
+      task,
+      "b",
+      "/v1/session/heartbeat",
+      { method: "POST" },
+      transport,
+    );
+
+    assert.equal(response.status, 204, String(status));
+    assert.equal(calls.length, 2, String(status));
+    assert.deepEqual(waits, [2_000], String(status));
+  }
+  const { now, transport } = transportOf([{ status: 404, proxy: true }]);
+  await assert.rejects(
+    sessionRequest(task, "b", "/v1/session/heartbeat", {}, transport),
+    /^Error: worker plane \/v1\/session\/heartbeat answered 404, naming no release$/u,
+  );
+  assert.ok(now() >= workerPlaneAwayMillisecondsMax, String(now()));
 });
 
 test("stop is the status the plane fences with, and nothing else", () => {
@@ -176,6 +219,25 @@ test("a request asked once is asked once, whatever the plane answers, under the 
       authorization: "Bearer chgs_secret",
       [workerContractHeader]: workerContractRelease,
     });
+  }
+});
+
+test("a request asked once raises a failing status naming no release, and does not ask again", async () => {
+  for (const status of [400, 401, 404, 409, 503]) {
+    const { calls, waits, transport } = transportOf([{ status, proxy: true }]);
+
+    await assert.rejects(
+      sessionRequestOnce(
+        task,
+        "b",
+        livePath,
+        {},
+        { ...transport, deadlineMs: 1_000 },
+      ),
+      new RegExp(`answered ${String(status)}, naming no release$`, "u"),
+    );
+    assert.equal(calls.length, 1, String(status));
+    assert.deepEqual(waits, [], String(status));
   }
 });
 

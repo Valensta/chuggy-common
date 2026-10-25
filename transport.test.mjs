@@ -15,6 +15,22 @@ import {
 
 const task = { workerPlane: { url: "http://worker-plane.test:3001" } };
 
+/** An answer as the plane gives one, naming its release as it does on every answer. */
+function planeAnswered(status) {
+  return new globalThis.Response(null, {
+    status,
+    headers: { [workerContractHeader]: workerContractRelease },
+  });
+}
+
+/** What a proxy answers in front of a plane it cannot reach: a status of its own, naming no release, whatever `headers` it adds. */
+function proxyAnswered(status, headers = {}) {
+  return new globalThis.Response("no plane answered this\n", {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8", ...headers },
+  });
+}
+
 test("a refused connection is retried in the same worker", async () => {
   const requests = [];
   const waits = [];
@@ -75,7 +91,7 @@ test("every request names the contract release the image was built with, whateve
  */
 test("a status the caller settles for is handed back, and every other is a fault", async () => {
   let requests = 0;
-  const refused = { ok: false, status: 404 };
+  const refused = planeAnswered(404);
   const received = await workerRequest(
     task,
     "secret",
@@ -101,7 +117,7 @@ test("a status the caller settles for is handed back, and every other is a fault
       "/v1/credential",
       {},
       {
-        fetch: async () => ({ ok: false, status: 500 }),
+        fetch: async () => planeAnswered(500),
         ...pausedClock(),
         settled: [404],
       },
@@ -126,7 +142,7 @@ test("a refusal raises at the first answer, and a server error is asked again un
       {
         fetch: async () => {
           requests += 1;
-          return { ok: false, status };
+          return planeAnswered(status);
         },
         ...clock,
       },
@@ -142,6 +158,57 @@ test("a refusal raises at the first answer, and a server error is asked again un
       );
     else assert.equal(requests, 1, String(status));
   }
+});
+
+/**
+ * A proxy's status is no decision of the plane's, whatever it is, nor one a
+ * caller settles for: it is asked past as a server error is, and what is
+ * finally raised is no refusal.
+ */
+test("a failing status naming no release is asked again until the plane has been away a lease, and never raises a refusal", async () => {
+  for (const [status, headers] of [
+    [400],
+    [401],
+    [403],
+    [404],
+    [409],
+    [404, { [workerContractHeader]: "not a release" }],
+  ]) {
+    const clock = pausedClock();
+    const raised = await workerRequest(
+      task,
+      "secret",
+      "/v1/report",
+      { method: "POST" },
+      {
+        fetch: async () => proxyAnswered(status, headers),
+        ...clock,
+        settled: [404],
+      },
+    ).catch((failure) => failure);
+
+    assert.equal(
+      raised.message,
+      `worker plane /v1/report answered ${String(status)}, naming no release`,
+    );
+    assert.equal(raised instanceof WorkerPlaneRefusal, false, String(status));
+    assert.ok(clock.now() >= workerPlaneAwayMillisecondsMax, String(status));
+  }
+});
+
+test("a report a proxy answered for is made again, and lands once the plane answers", async () => {
+  const answers = [proxyAnswered(404), planeAnswered(202)];
+  const clock = pausedClock();
+  const received = await workerRequest(
+    task,
+    "secret",
+    "/v1/report",
+    { method: "POST" },
+    { fetch: async () => answers.shift(), ...clock },
+  );
+
+  assert.equal(received.status, 202);
+  assert.deepEqual(clock.pauses, [2_000]);
 });
 
 /**
