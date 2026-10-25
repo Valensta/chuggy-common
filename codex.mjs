@@ -172,9 +172,10 @@ export async function prepareCodexCredential(
     flag: "wx",
     mode: 0o600,
   });
-  const tokens = Object.values(document.tokens ?? {}).filter(
-    (value) => typeof value === "string",
-  );
+  const tokens = [
+    ...Object.values(document.tokens ?? {}),
+    document.OPENAI_API_KEY,
+  ].filter((value) => typeof value === "string");
   return {
     environment: { CODEX_HOME: home },
     secrets: [auth, ...tokens],
