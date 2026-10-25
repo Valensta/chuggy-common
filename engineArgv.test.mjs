@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   dockerContextArgv,
   dockerDiskUsageArgv,
+  engineInfoArgv,
   dockerInfoArgv,
   forcedRemoveArgv,
   imageInspectArgv,
@@ -536,7 +537,7 @@ test("every other call is handed to either engine as this argv", () => {
   );
 });
 
-test("an image's containers, and what docker's hold on disk, are asked with this argv", () => {
+test("an image's containers, what docker's hold on disk, and all an engine says of itself are asked with this argv", () => {
   assert.deepEqual(imageContainersArgv("sha256:1"), [
     "ps",
     "--all",
@@ -552,4 +553,5 @@ test("an image's containers, and what docker's hold on disk, are asked with this
     "--format",
     "json",
   ]);
+  assert.deepEqual(engineInfoArgv(), ["info", "--format", "{{json .}}"]);
 });

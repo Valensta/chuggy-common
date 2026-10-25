@@ -245,6 +245,11 @@ export function podmanSocketArgv() {
   ];
 }
 
+/** All either engine says of itself, as one JSON document, where it keeps what it holds among it. */
+export function engineInfoArgv() {
+  return ["info", "--format", "{{json .}}"];
+}
+
 /** Docker's security options, which name a daemon running rootless. */
 export function dockerInfoArgv() {
   return ["info", "--format", "{{json .SecurityOptions}}"];
