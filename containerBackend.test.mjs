@@ -95,7 +95,7 @@ async function harness(t, overrides = {}, seams = {}) {
   let minted = 0;
   /** @type {string | undefined} why the runner says the token file cannot be handed over */
   let tokenFileRefused;
-  /** @type {string[]} the token files the runner was asked about */
+  /** @type {[string, string][]} the credential files the runner was asked about, each with its agent */
   const tokenFilesAsked = [];
   const settings = {
     engine: /** @type {"docker" | "podman"} */ ("podman"),
@@ -127,8 +127,8 @@ async function harness(t, overrides = {}, seams = {}) {
       clock.nowMs += ms;
     },
     log: (line) => log.push(line),
-    tokenFileRefusal: async (file) => {
-      tokenFilesAsked.push(file);
+    tokenFileRefusal: async (file, agent) => {
+      tokenFilesAsked.push([file, agent]);
       return tokenFileRefused;
     },
     ...seams,
@@ -1258,10 +1258,139 @@ test("an assignment is refused, and nothing run, while the runner says the Claud
     evidence: "the Claude token file is empty",
   });
   assert.deepEqual(state.calls, []);
-  assert.deepEqual(tokenFilesAsked, [settings.tokenFile]);
+  assert.deepEqual(tokenFilesAsked, [[settings.tokenFile, "Claude"]]);
   refuseTokenFile(undefined);
   assert.equal((await backend.place(assignment(), "Job")).placed, "Placed");
   await backend.settled();
+});
+
+/**
+ * Catches a job requiring Codex handed the Claude credential, or told its
+ * kind; any other workload handed the Codex credential; or the runner's check
+ * asked of a file other than the one mounted.
+ */
+test("a job requiring an agent mounts that agent's credential file and is told the Claude credential's kind only where it is Claude's", async (t) => {
+  const codexFile = "/home/op/.codex/auth.json";
+  const setting = { kind: "Vertex", region: "global", project: "p" };
+  const { backend, state, settings, tokenFilesAsked } = await harness(t, {
+    agentCredentialFiles: { Codex: codexFile },
+    claudeCredential: setting,
+    images: [{ image, capabilities: ["Agent:Claude", "Agent:Codex"] }],
+  });
+  state.images.add(image);
+  const required = (assignmentId, agent) =>
+    assignment({
+      assignment: assignmentId,
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", agent],
+    });
+  await backend.place(required("asg-codex", "Agent:Codex"), "Job");
+  await backend.place(required("asg-claude", "Agent:Claude"), "Job");
+  await backend.place(assignment({ assignment: "asg-none" }), "Job");
+  await backend.place(
+    assignment({ assignment: "ses-1", capabilities: [] }),
+    "Session",
+  );
+  await backend.settled();
+  const handed = (assignmentId) => {
+    const { argv, envFile } = ranWith(state, assignmentId);
+    return [
+      argv.find((argument) =>
+        argument.endsWith(`,target=${jobProviderCredentialFile},readonly`),
+      ),
+      envFile.includes(`${claudeCredentialVariable}=`),
+    ];
+  };
+  const mounted = (file) =>
+    `type=bind,source=${file},target=${jobProviderCredentialFile},readonly`;
+  assert.deepEqual(handed("asg-codex"), [mounted(codexFile), false]);
+  for (const claude of ["asg-claude", "asg-none", "ses-1"])
+    assert.deepEqual(handed(claude), [mounted(settings.tokenFile), true]);
+  assert.deepEqual(tokenFilesAsked, [
+    [codexFile, "Codex"],
+    [settings.tokenFile, "Claude"],
+    [settings.tokenFile, "Claude"],
+    [settings.tokenFile, "Claude"],
+  ]);
+});
+
+/**
+ * Catches a job requiring an agent this runner holds no file for refused, or
+ * handed it otherwise than a job requiring none is, which a pool running that
+ * agent on its Claude file relies on.
+ */
+test("a job requiring an agent the runner names no credential file for mounts the Claude one, told its kind, as one requiring none does", async (t) => {
+  const setting = { kind: "Vertex", region: "global", project: "p" };
+  const { backend, state, settings, tokenFilesAsked } = await harness(t, {
+    agentCredentialFiles: { Codex: "/home/op/.codex/auth.json" },
+    claudeCredential: setting,
+    images: [{ image, capabilities: ["Agent:Gemini"] }],
+  });
+  state.images.add(image);
+  assert.equal(
+    (
+      await backend.place(
+        assignment({
+          image: undefined,
+          capabilities: ["Platform:Linux:Amd64", "Agent:Gemini"],
+        }),
+        "Job",
+      )
+    ).placed,
+    "Placed",
+  );
+  await backend.settled();
+  const { argv, envFile } = ranWith(state, "asg-1");
+  assert.ok(
+    argv.includes(
+      `type=bind,source=${settings.tokenFile},target=${jobProviderCredentialFile},readonly`,
+    ),
+  );
+  assert.match(envFile, new RegExp(`^${claudeCredentialVariable}=`, "mu"));
+  assert.deepEqual(tokenFilesAsked, [[settings.tokenFile, "Claude"]]);
+});
+
+/**
+ * Catches a job requiring several agents run with one agent's credential
+ * rather than refused, or a runner's reason a Codex file cannot be handed
+ * over passed by.
+ */
+test("a job requiring several agents is refused, as is one the runner says cannot read its agent's file, and nothing is run", async (t) => {
+  const codexFile = "/home/op/.codex/auth.json";
+  const required = (...agents) =>
+    assignment({
+      image: undefined,
+      capabilities: ["Platform:Linux:Amd64", ...agents],
+    });
+  const { backend, state, tokenFilesAsked, refuseTokenFile } = await harness(
+    t,
+    {
+      images: [{ image, capabilities: ["Agent:Claude", "Agent:Codex"] }],
+      agentCredentialFiles: { Codex: codexFile },
+    },
+  );
+  assert.deepEqual(
+    await backend.place(
+      required("Agent:Claude", "Agent:Codex", "Agent:Claude"),
+      "Job",
+    ),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment requires Agent:Claude and Agent:Codex, and a job is handed one agent's credential, so this runner cannot tell which; require one agent",
+    },
+  );
+  refuseTokenFile("the Codex auth file is empty");
+  assert.deepEqual(await backend.place(required("Agent:Codex"), "Job"), {
+    placed: "Refused",
+    evidence: "the Codex auth file is empty",
+  });
+  assert.deepEqual(tokenFilesAsked, [[codexFile, "Codex"]]);
+  assert.deepEqual(state.calls, []);
+  await assert.rejects(
+    harness(t, { agentCredentialFiles: { Claude: codexFile } }),
+    /^RangeError: agentCredentialFiles names Claude, whose credential file is tokenFile/u,
+  );
 });
 
 test("a job's deadline is the assignment's capped at the runner's, and a session's is its assignment's alone", async (t) => {

@@ -97,6 +97,8 @@ async function harness(t, mode, overrides = {}) {
   const exits = [];
   /** @type {string | undefined} */
   let tokenFileRefused;
+  /** @type {[string, string][]} the credential files the runner was asked about, each with its agent */
+  const tokenFilesAsked = [];
   const settings = {
     platforms: ["Platform:MacOS:Arm64"],
     directory: join(root, "jobs"),
@@ -117,7 +119,10 @@ async function harness(t, mode, overrides = {}) {
       CLAUDE_CODE_OAUTH_TOKEN: "runner-token-secret",
     },
     atExit: (onExit) => exits.push(onExit),
-    tokenFileRefusal: async () => tokenFileRefused,
+    tokenFileRefusal: async (file, agent) => {
+      tokenFilesAsked.push([file, agent]);
+      return tokenFileRefused;
+    },
     log: (line) => log.push(line),
   });
   t.after(async () => {
@@ -131,6 +136,7 @@ async function harness(t, mode, overrides = {}) {
     log,
     exits,
     root,
+    tokenFilesAsked,
     seen: async () => {
       for (;;) {
         try {
@@ -391,6 +397,85 @@ test("a job is told the kind of its host's Claude credential, and only where the
         claudeCredential: /** @type {any} */ ({ kind: "Bedrock" }),
       }),
     /^RangeError: the Claude credential's setting cannot be carried: region is required/u,
+  );
+});
+
+/**
+ * Catches a job requiring Codex handed the Claude credential, or told its
+ * kind; any other job handed the Codex credential, one requiring an agent the
+ * host holds no file for among them; or the runner's check asked of a file
+ * other than the one the job reads.
+ */
+test("a job requiring an agent reads that agent's credential file, or the Claude one where the host names none for it, told the Claude credential's kind only where it is Claude's", async (t) => {
+  const codexFile = "/Users/owner/.codex/auth.json";
+  const overrides = {
+    agentCredentialFiles: { Codex: codexFile },
+    claudeCredential: /** @type {const} */ ({
+      kind: "Bedrock",
+      region: "us-west-2",
+    }),
+  };
+  for (const [capabilities, agent] of [
+    [["Platform:MacOS:Arm64", "Agent:Codex"], "Codex"],
+    [["Platform:MacOS:Arm64", "Agent:Claude"], "Claude"],
+    [["Platform:MacOS:Arm64"], "Claude"],
+    [["Platform:MacOS:Arm64", "Agent:Gemini"], "Claude"],
+  ]) {
+    const { backend, settings, seen, tokenFilesAsked } = await harness(
+      t,
+      "sleep",
+      overrides,
+    );
+    await backend.place(assignment({ capabilities }), "Job");
+    const { env } = await seen();
+    const file = agent === "Codex" ? codexFile : settings.tokenFile;
+    assert.equal(
+      JSON.parse(env.CHUG_WORKER_TASK).providerCredentialFile,
+      file,
+      agent,
+    );
+    assert.equal(
+      Object.hasOwn(env, claudeCredentialVariable),
+      agent === "Claude",
+      agent,
+    );
+    assert.deepEqual(tokenFilesAsked, [[file, agent]]);
+  }
+});
+
+/**
+ * Catches a job requiring several agents run with one agent's credential
+ * rather than refused, or a runner's reason a Codex file cannot be read
+ * passed by.
+ */
+test("a job requiring several agents is refused, as is one the runner says cannot read its agent's file, and nothing is run", async (t) => {
+  const codexFile = "/Users/owner/.codex/auth.json";
+  const required = (...agents) =>
+    assignment({ capabilities: ["Platform:MacOS:Arm64", ...agents] });
+  const { backend, root, tokenFilesAsked, refuseTokenFile, settings } =
+    await harness(t, "sleep", { agentCredentialFiles: { Codex: codexFile } });
+  assert.deepEqual(
+    await backend.place(required("Agent:Claude", "Agent:Codex"), "Job"),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment requires Agent:Claude and Agent:Codex, and a job is handed one agent's credential, so this runner cannot tell which; require one agent",
+    },
+  );
+  refuseTokenFile("the Codex auth file is empty");
+  assert.deepEqual(await backend.place(required("Agent:Codex"), "Job"), {
+    placed: "Refused",
+    evidence: "the Codex auth file is empty",
+  });
+  assert.deepEqual(tokenFilesAsked, [[codexFile, "Codex"]]);
+  await assert.rejects(readdir(join(root, "jobs")), { code: "ENOENT" });
+  assert.throws(
+    () =>
+      checkedHostBackendSettings({
+        ...settings,
+        agentCredentialFiles: { Claude: codexFile },
+      }),
+    /^RangeError: agentCredentialFiles names Claude, whose credential file is tokenFile/u,
   );
 });
 

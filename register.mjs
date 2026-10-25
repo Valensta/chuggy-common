@@ -29,6 +29,7 @@ import {
 import { z } from "zod";
 
 import { boundedResponseBytes } from "./boundedResponse.mjs";
+import { jobAgentCapability, jobClaudeAgent } from "./job.mjs";
 import {
   poolIdentityDigest,
   poolIdentityNames,
@@ -46,7 +47,7 @@ import {
  *   | {kind: "Personal", api: URL, token: string, capabilities: readonly string[], host: boolean}} RegisterAskedRequest
  *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, what the operator declares beside the platforms, and whether a job that pins no image runs on the machine itself
  * @typedef {RegisterAskedRequest} RegisterRequest
- *   `capabilities` is whole: this machine's platforms first, then what the operator declared
+ *   `capabilities` is whole: this machine's platforms first, then what the operator declared, then the agents the runner can run that the operator did not
  *
  * @typedef {object} RegisterAsked what the operator asked
  * @property {string | undefined} api
@@ -60,6 +61,7 @@ import {
  * @property {string} hostname
  * @property {string} arch as `process.arch` names its containers' machine
  * @property {readonly string[]} [hosted] the platforms it runs work on its host, beside its containers'
+ * @property {readonly string[]} [agents] the capabilities of the agents its runner can run, as `registerAgents` finds them, declared beside what the operator declared
  */
 
 /** Where a pool's token is redeemed, under chuggy's API. */
@@ -312,13 +314,35 @@ export function registerRequest(asked, machine) {
     };
   const capabilities = [
     ...new Set([platform, ...(machine.hosted ?? [])]),
-    ...answer.checked.capabilities,
+    ...new Set([...answer.checked.capabilities, ...(machine.agents ?? [])]),
   ];
   if (capabilities.length > workerPoolCapabilitiesMax)
     return {
       refused: `a pool declares at most ${String(workerPoolCapabilitiesMax)} capabilities, its platforms among them`,
     };
   return { request: { ...answer.checked, capabilities } };
+}
+
+/**
+ * The capabilities of the agents a runner can run, which it declares beside
+ * what its operator does: each agent it holds a credential file for that has
+ * somewhere to run, an image its owner listed declaring that agent, or this
+ * machine itself where the runner is registered with `--host`. A runner
+ * declaring an agent it has nowhere to run would be offered a job requiring
+ * it and refuse it, where that job would otherwise wait for a runner that can.
+ *
+ * @param {import("./job.mjs").JobCredentialFiles} files
+ * @param {readonly {capabilities: readonly string[]}[]} images what its owner listed
+ * @param {boolean} host
+ * @returns {string[]}
+ */
+export function registerAgents(files, images, host) {
+  return [jobClaudeAgent, ...Object.keys(files.agentCredentialFiles ?? {})]
+    .map(jobAgentCapability)
+    .filter(
+      (agent) =>
+        host || images.some((image) => image.capabilities.includes(agent)),
+    );
 }
 
 /**

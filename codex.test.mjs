@@ -265,6 +265,20 @@ test("a mounted Codex OAuth document becomes a private writable CODEX_HOME", asy
   assert.equal(await readFile(join(home, "auth.json"), "utf8"), `${auth}\n`);
 });
 
+/** Catches an API key's auth.json whose key alone a job could print unscrubbed. */
+test("a Codex API key's auth.json scrubs the key itself", async (t) => {
+  const parent = await mkdtemp(join(tmpdir(), "chuggy-codex-test-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const auth = JSON.stringify({
+    OPENAI_API_KEY: "sk-api-key-long-enough",
+    tokens: null,
+  });
+
+  const prepared = await prepareCodexCredential(auth, join(parent, "home"));
+
+  assert.deepEqual(prepared.secrets, [auth, "sk-api-key-long-enough"]);
+});
+
 /** Catches a Codex home outside HOME, the directory a job's check found writable. */
 test("a Codex credential's home is under HOME where none is named", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "chuggy-codex-default-"));

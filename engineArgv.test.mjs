@@ -46,7 +46,7 @@ const job = {
   envFile: "/run/user/1000/chuggy-runner/job-x/env",
   cpuMillis: 1500,
   memoryMib: 4096,
-  tokenFile: "/home/op/.config/chuggy-runner/claude-token",
+  credentialFile: "/home/op/.config/chuggy-runner/claude-token",
   network: "chuggy-jobs",
   image,
 };
