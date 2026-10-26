@@ -1874,10 +1874,11 @@ test("the configuration read says where the agent that does the work is named", 
 
 /**
  * What the server does with a brief that no answer shows until it is too late
- * to act on: that its checks need a commanded Check stage and where the
- * initialization says which one, where a brief naming no landing takes one and
- * that the write says whose it took, and that a proposal's branch is never the
- * default one. Every tool that takes a brief says it on its `brief` parameter.
+ * to act on: that its checks need a commanded Check stage, where the
+ * initialization says which one, and a program running it, where a brief
+ * naming no landing takes one and that the write says whose it took, and that
+ * a proposal's branch is never the default one. Every tool that takes a brief
+ * says it on its `brief` parameter.
  */
 const briefClaims = [
   /\{title\?, intent, links, images\?, checks\?/,
@@ -1888,7 +1889,7 @@ const briefClaims = [
   ),
   /`commandedCheckStage`, its program stage key, counted from one/,
   /`commandedCheckStageNote` \(the same stage and, for a catalog, its plan, or that none does and which plans would\)/,
-  /run only in a program that reaches that stage/,
+  /whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it \(ProgramSkipsBriefChecks\)/,
   /where it answers none a draft carrying checks is refused/,
   /\(BriefChecksUncommanded\)/,
   /the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown/,
@@ -1910,14 +1911,24 @@ test("every tool that takes a brief says on its parameter what the server does w
     for (const claim of briefClaims) assert.match(description, claim, name);
 });
 
+/** What a release or an update of a draft running less than its plan is answered, and what lets it through. */
+const programShortClaims = [
+  /runs less than its configuration plans/,
+  /an evaluator of a stage it keeps/,
+  /skip_planned_evaluations permit, which its administrators hold/,
+  /403 ProgramSkipsPlannedEvaluations and nothing is submitted/,
+  /`defaults\.program`/,
+];
+
 /**
  * What the server does that no answer shows until it is too late to act on:
  * that the refusal ledgers hold none of a command's refusals, that a
  * submission repeated in one turn answers the settled operation, that a
- * project has no lead before a release, that stages run in order and a stage's
- * evaluators side by side, which stage a brief's checks join, what a ticket's
- * run totals sum, and what a binding says of its repository. Each is said in
- * the description of the tool the session reads it from.
+ * project has no lead before a release, who may release a program running
+ * less than its plan, that stages run in order and a stage's evaluators side
+ * by side, which stage a brief's checks join, what a ticket's run totals sum,
+ * and what a binding says of its repository. Each is said in the description
+ * of the tool the session reads it from.
  */
 test("the descriptions say what the server does where a session reads it", () => {
   const described = (tool) =>
@@ -1934,7 +1945,9 @@ test("the descriptions say what the server does where a session reads it", () =>
       /same turn is the same operation/,
       /other than Pending/,
       /revise_draft/,
+      ...programShortClaims,
     ],
+    update_ticket: programShortClaims,
     revoke_ticket: [/same turn is the same operation/, /other than Pending/],
     read_lead: [
       /None, and `absence\.reason` says why/,
