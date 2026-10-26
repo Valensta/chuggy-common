@@ -28,7 +28,7 @@ import {
   remoteRefs,
 } from "./checkout.fixture.mjs";
 import { forgeServed } from "./gitForge.fixture.mjs";
-import { gitRemotePauseMs } from "./gitRemote.mjs";
+import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
 import { workerCredentialEnvironment } from "./repository.mjs";
 import {
   RunStepFailure,
@@ -395,6 +395,38 @@ test("a push the forge failed with a server error is tried again under the one c
   assert.equal(refreshes, 1);
   assert.deepEqual(pauses, [gitRemotePauseMs]);
   assert.deepEqual(from, [made, made]);
+  assert.equal(left, false, "the push's repository outlived it");
+});
+
+/** GitHub's answer to a credential minted moments before, as git reports it. */
+const notFound = gitFailed(
+  "remote: Repository not found.\nfatal: repository 'http://git/rig.git/' not found\n",
+);
+
+test("a push the forge answered not found is tried again under the one credential from the one repository, and lands", async () => {
+  const { outcome, pushed, refreshes, pauses, from, made } =
+    await pushedThrough([notFound]);
+
+  assert.equal(outcome.commit, stubbedCommit);
+  assert.equal(pushed, 2);
+  assert.equal(refreshes, 1);
+  assert.deepEqual(pauses, [gitRemotePauseMs]);
+  assert.deepEqual(from, [made, made]);
+});
+
+test("a push the forge never finds the repository for fails the push step once every try is spent, led by git's own line", async () => {
+  const { outcome, pushed, left } = await pushedThrough(
+    Array.from({ length: gitRemoteTriesMax + 1 }, () => notFound),
+  );
+
+  assert.ok(outcome instanceof RunStepFailure);
+  assert.equal(outcome.evidence, runPushFailed);
+  assert.equal(
+    outcome.message.split("\n")[0],
+    "fatal: repository 'http://git/rig.git/' not found",
+  );
+  assert.equal(outcome.cause, notFound);
+  assert.equal(pushed, gitRemoteTriesMax);
   assert.equal(left, false, "the push's repository outlived it");
 });
 
