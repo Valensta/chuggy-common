@@ -23,7 +23,7 @@ function gitFailed(stderr) {
 const refused = {
   "a denied credential": `remote: Permission to acme/widgets.git denied to bot.\nfatal: unable to access '${remote}': The requested URL returned error: 403\n`,
   "a denial git ends by hanging up": `error: RPC failed; HTTP 403 curl 22 The requested URL returned error: 403\nsend-pack: unexpected disconnect while reading sideband packet\nfatal: the remote end hung up unexpectedly\n`,
-  "a missing repository": `remote: Repository not found.\nfatal: unable to access '${remote}': The requested URL returned error: 404\n`,
+  "a missing repository git names by its status": `remote: Repository not found.\nfatal: unable to access '${remote}': The requested URL returned error: 404\n`,
   "a failed authentication": `fatal: Authentication failed for '${remote}'\n`,
   "a protected branch": `remote: error: GH006: Protected branch update failed for refs/heads/main.\nTo ${remote}\n ! [remote rejected] main -> main (protected branch hook declined)\nerror: failed to push some refs to '${remote}'\n`,
   "a rejected update": `To ${remote}\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '${remote}'\n`,
@@ -45,9 +45,17 @@ const transient = {
   "a dropped sideband": `fetch-pack: unexpected disconnect while reading sideband packet\nfatal: early EOF\nfatal: fetch-pack: invalid index-pack output\n`,
 };
 
+/** What git writes when the remote found no repository, each as git reports it. */
+const notFound = {
+  "GitHub's answer": `remote: Repository not found.\nfatal: repository '${remote}' not found\n`,
+  "a remote's answer with no words of its own": `fatal: repository '${remote}' not found\n`,
+};
+
 /** Failures nothing here names, each final. */
 const unnamed = {
   "a pre-push hook": `lint failed: 3 problems\nerror: failed to push some refs to '${remote}'\n`,
+  "a pre-push hook, for a repository named for GitHub's words": `lint failed: 3 problems\nerror: failed to push some refs to 'https://github.com/acme/remote: Repository not found.git/'\n`,
+  "a pre-push hook, for a repository named for git's words": `lint failed: 3 problems\nerror: failed to push some refs to 'https://github.com/acme/fatal: repository 'widgets' not found/'\n`,
   "a remote that hung up": `fatal: the remote end hung up unexpectedly\n`,
   "a certificate the image does not trust": `fatal: unable to access '${remote}': SSL certificate problem: unable to get local issuer certificate\n`,
   "a child with no standard error": undefined,
@@ -109,6 +117,35 @@ test("a transport failure is tried again once it pauses, and what clears it is t
     assert.deepEqual(pauses, [gitRemotePauseMs], name);
     assert.equal(agains, 1, name);
   }
+});
+
+test("a remote that found no repository is tried again once it pauses, and what clears it is the answer", async () => {
+  for (const [name, stderr] of Object.entries(notFound)) {
+    assert.equal(gitRemoteRetries(gitFailed(stderr)), true, name);
+    const { outcome, tries, pauses } = await triedThrough([gitFailed(stderr)]);
+    assert.equal(outcome, "reached", name);
+    assert.equal(tries, 2, name);
+    assert.deepEqual(pauses, [gitRemotePauseMs], name);
+  }
+});
+
+test("either line of GitHub's answer, on its own, is the remote finding no repository", () => {
+  for (const line of notFound["GitHub's answer"].trim().split("\n"))
+    assert.equal(gitRemoteRetries(gitFailed(`${line}\n`)), true, line);
+});
+
+test("a repository never found is tried to the bound and thrown as it came, named by git's own line", async () => {
+  const failures = Array.from({ length: gitRemoteTriesMax + 1 }, () =>
+    gitFailed(notFound["GitHub's answer"]),
+  );
+  const { outcome, tries } = await triedThrough(failures);
+
+  assert.equal(outcome.failure, failures[gitRemoteTriesMax - 1]);
+  assert.equal(tries, gitRemoteTriesMax);
+  assert.equal(
+    gitFailureLine(outcome.failure),
+    `fatal: repository '${remote}' not found`,
+  );
 });
 
 test("a transport failure that never clears is tried to the bound, each pause doubling", async () => {

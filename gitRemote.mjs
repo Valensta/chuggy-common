@@ -1,11 +1,16 @@
 /**
- * Git's reach of a remote, tried again where git says its transport failed and
- * never where the remote refused.
+ * Git's reach of a remote, tried again where git says its transport failed or
+ * the remote found no repository, and never where the remote refused.
  *
  * A REFUSAL IS FINAL. A remote that denied the credential, refused the
  * request or the ref, or declined the push answers the same on every try, so a
  * failure naming one is not tried again, whatever else it names. A failure naming git's own
  * transport is tried again; anything else, a hook's included, is final.
+ *
+ * BUT NOT FINDING THE REPOSITORY IS NOT FINAL. GitHub answers a credential
+ * minted moments before as if no such repository existed, so a remote's saying
+ * it found none is tried again where nothing names a refusal, and a repository
+ * truly missing fails only once the tries are spent.
  *
  * WHAT IS READ IS GIT'S STANDARD ERROR. A failure carrying none, a child that
  * could not start among them, is final.
@@ -44,6 +49,16 @@ const gitTransportFailures = [
   /early EOF/u,
 ];
 
+/**
+ * Lines saying the remote found no repository: the remote's own words, as
+ * GitHub writes them, and git's. Each is the whole line, so a repository named
+ * for either is not one.
+ */
+const gitRepositoryNotFound = [
+  /^remote: Repository not found\.$/u,
+  /^fatal: repository '[^']+' not found$/u,
+];
+
 /** What git wrote to standard error, line by line. */
 function gitErrorLines(failure) {
   const stderr = failure?.stderr;
@@ -78,7 +93,8 @@ export function gitRemoteRetries(failure) {
   const lines = gitErrorLines(failure);
   return (
     lineMatching(lines, gitRefusals) === undefined &&
-    lineMatching(lines, gitTransportFailures) !== undefined
+    lineMatching(lines, [...gitTransportFailures, ...gitRepositoryNotFound]) !==
+      undefined
   );
 }
 
