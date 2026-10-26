@@ -17,12 +17,15 @@ import {
   chuggyToolResponseBytesMax,
   chuggyToolRunErrorResponseBytesMax,
   chuggyToolRunTranscriptResponseBytesMax,
+  chuggyToolTicketLandingBytesMax,
+  chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
   nativeHttpPageItemsMax,
   runTranscriptBatchBytesMax,
   runTranscriptPageBatchesMax,
   selectorHistoryLimitMax,
   threadTurnsAnsweredMax,
+  ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
 import { workerPlaneUploadBytesMax } from "@chuggy/worker-contract/workerPlane";
 import { z } from "zod";
@@ -869,6 +872,191 @@ test("an error text's answer at its draw bound is read, and one past it is refus
   );
 });
 
+/** A ticket's landings read over a route answering `body`, and the one path it asked. */
+async function landingsRead(body, status = 200) {
+  const api = apiOf(() => ({ status, body }));
+  const answer = await routeOf("read_ticket_landings", { ticket: 7 }, api);
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    ["/api/v1/tenants/vteng/projects/chuggy/tickets/7/landings"],
+  );
+  return answer;
+}
+
+/**
+ * A landing of the cycle given weighing `bytes` as the route answers it, of
+ * backslashes, the text an answer's escaping weighs twice: every byte of a JSON
+ * text escapes to at most two, and a backslash is one that does.
+ */
+function landingWeighing(cycle, bytes) {
+  const landing = { state: "Held", cycle, held: "", pad: "" };
+  const fixed = Buffer.byteLength(JSON.stringify(landing));
+  const held = Math.floor((bytes - fixed) / 2);
+  const weighed = {
+    ...landing,
+    held: "\\".repeat(held),
+    pad: "a".repeat(bytes - fixed - 2 * held),
+  };
+  assert.equal(Buffer.byteLength(JSON.stringify(weighed)), bytes);
+  return weighed;
+}
+
+/** Whether `landings` as one answer would fit, `truncated` as given. */
+function landingsFit(landings, truncated) {
+  return (
+    chuggyToolAnswerBytes(JSON.stringify({ landings, truncated })) <=
+    chuggyToolAnswerBytesMax
+  );
+}
+
+test("a ticket's landings that fit one answer are answered whole, as JSON", async () => {
+  for (const truncated of [false, true]) {
+    const body = {
+      landings: [
+        { state: "Failed", cycle: 1 },
+        { state: "AwaitingMerge", cycle: 2 },
+      ],
+      truncated,
+    };
+
+    const answer = await landingsRead(JSON.stringify(body));
+
+    assert.ok(answer.isError === undefined);
+    assert.deepEqual(JSON.parse(textOf(answer)), body);
+  }
+  const none = await landingsRead(
+    JSON.stringify({ landings: [], truncated: false }),
+  );
+  assert.deepEqual(JSON.parse(textOf(none)), {
+    landings: [],
+    truncated: false,
+  });
+});
+
+test("the heaviest landings the route answers are drawn whole, and the newest that fit are answered", async () => {
+  const landings = Array.from({ length: ticketLandingsAnsweredMax }, (_, at) =>
+    landingWeighing(at + 1, chuggyToolTicketLandingBytesMax),
+  );
+  const body = JSON.stringify({ landings, truncated: false });
+  assert.ok(
+    Buffer.byteLength(body) > chuggyToolResponseBytesMax &&
+      Buffer.byteLength(body) <= chuggyToolTicketLandingsResponseBytesMax,
+    "the landings under test are not ones only their own draw bound admits",
+  );
+
+  const answer = await landingsRead(body);
+
+  assert.ok(answer.isError === undefined, textOf(answer));
+  assert.ok(chuggyToolAnswerBytes(textOf(answer)) <= chuggyToolAnswerBytesMax);
+  const answered = JSON.parse(textOf(answer));
+  assert.equal(answered.truncated, true);
+  assert.ok(
+    answered.landings.length > 0,
+    "the newest landing was not answered",
+  );
+  assert.deepEqual(
+    answered.landings,
+    landings.slice(-answered.landings.length),
+  );
+  assert.ok(
+    !landingsFit(landings.slice(-answered.landings.length - 1), true),
+    "an older landing would have fit",
+  );
+});
+
+test("landings left out to fit say so, and the route's own truncation is kept where every one fits", async () => {
+  const landings = Array.from({ length: ticketLandingsAnsweredMax }, (_, at) =>
+    landingWeighing(at + 1, 4_000),
+  );
+  const fit = landings.findLastIndex(
+    (_, at) => !landingsFit(landings.slice(at), true),
+  );
+  assert.ok(fit > 0, "every landing under test fits one answer");
+
+  const cut = JSON.parse(
+    textOf(await landingsRead(JSON.stringify({ landings, truncated: false }))),
+  );
+  const whole = JSON.parse(
+    textOf(
+      await landingsRead(
+        JSON.stringify({ landings: landings.slice(fit + 1), truncated: true }),
+      ),
+    ),
+  );
+
+  assert.deepEqual(cut, { landings: landings.slice(fit + 1), truncated: true });
+  assert.deepEqual(whole, cut);
+});
+
+test("a newest landing too large alone is refused rather than cut", async () => {
+  const landing = landingWeighing(1, chuggyToolAnswerBytesMax);
+
+  const answer = await landingsRead(
+    JSON.stringify({ landings: [landing], truncated: false }),
+  );
+
+  assert.equal(answer.isError, true);
+  assert.match(textOf(answer), /newest landing is larger alone/u);
+});
+
+test("a ticket the project does not have, and a landings read the plane refuses, are relayed as the refusal they are", async () => {
+  for (const [status, code] of [
+    [404, "NotFound"],
+    [503, "Unavailable"],
+  ]) {
+    const body = JSON.stringify({ error: { code, message: code } });
+
+    const answer = await landingsRead(body, status);
+
+    assert.equal(answer.isError, true, code);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`, code);
+  }
+});
+
+test("a landings route's body that is not a ticket's landings is refused rather than answered", async () => {
+  for (const body of [
+    "{}",
+    "not JSON",
+    "null",
+    JSON.stringify({ landings: {}, truncated: false }),
+    JSON.stringify({ landings: [], truncated: "no" }),
+    JSON.stringify({
+      landings: Array.from({ length: ticketLandingsAnsweredMax + 1 }, () => ({
+        state: "Failed",
+      })),
+      truncated: false,
+    }),
+  ]) {
+    const answer = await landingsRead(body);
+
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /not a ticket's landings/u, body);
+  }
+});
+
+test("a landings answer at its draw bound is read, and one past it is refused", async () => {
+  const body = JSON.stringify({ landings: [], truncated: false });
+  const at = `${body}${" ".repeat(
+    chuggyToolTicketLandingsResponseBytesMax - Buffer.byteLength(body),
+  )}`;
+
+  const read = await landingsRead(at);
+  const over = await landingsRead(`${at} `);
+
+  assert.deepEqual(JSON.parse(textOf(read)), {
+    landings: [],
+    truncated: false,
+  });
+  assert.equal(over.isError, true);
+  assert.match(
+    textOf(over),
+    new RegExp(
+      `larger than the ${String(chuggyToolTicketLandingsResponseBytesMax)} bytes`,
+      "u",
+    ),
+  );
+});
+
 test("a raise too large to store is refused like any other answer", async () => {
   const huge = "x".repeat(chuggyToolAnswerBytesMax);
   const api = {
@@ -983,6 +1171,7 @@ test("each read reaches the route its roster names, and only it", async () => {
     ],
     [["read_refusals", { limit: 4 }], "/agentic-refusals?limit=4"],
     [["read_ticket_refusals", { ticket: 9 }], "/tickets/9/agentic-refusals"],
+    [["read_ticket_landings", { ticket: 9 }], "/tickets/9/landings"],
     [["read_lead", {}], "/lead"],
     [
       ["read_lead_transcript", { after: 2, entry: 3 }],
@@ -1797,6 +1986,25 @@ test("the descriptions say what the server does where a session reads it", () =>
     for (const claim of claims) assert.match(described(tool), claim, tool);
 });
 
+test("a ticket's landings are described as the route answers them, and read_ticket points at them", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const claims = [
+    /the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out/,
+    /Each landing carries its `state`/,
+    /A Held landing carries `hold`: its `kind`, [^.]*, and `since`, when a hold of that kind began/,
+    /An AwaitingMerge landing carries `wait`: its `reason`, [^.]*, and `checkedAt`, when the forge was last heard about its merge/,
+    /`proposal` is the pull request [^.]*: its `url`, [^.]*its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state`/,
+    /`conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut/,
+  ];
+  for (const claim of claims)
+    assert.match(described("read_ticket_landings"), claim);
+  assert.match(
+    described("read_ticket"),
+    /Where its work is landing or waits to land, read_ticket_landings says how/,
+  );
+});
+
 /**
  * A revised draft changes nothing its Pending ticket runs until update_ticket
  * releases it, so revise_draft says so, and update_ticket says whose word it
@@ -2107,6 +2315,7 @@ const projectToolArguments = {
   read_decision_log: {},
   read_refusals: {},
   read_ticket_refusals: { ticket: 7 },
+  read_ticket_landings: { ticket: 7 },
   read_lead: {},
   read_lead_transcript: {},
   list_executions: {},
@@ -2212,7 +2421,9 @@ test("every project tool a session holds asks its route, and answers what the ro
         ? JSON.stringify(pngAnswered)
         : path.endsWith("/error")
           ? JSON.stringify({ read: "Content", content: "x" })
-          : "{}",
+          : path.endsWith("/landings")
+            ? JSON.stringify({ landings: [], truncated: false })
+            : "{}",
     }));
 
     const answer = await call(name, projectToolArguments[name]);
