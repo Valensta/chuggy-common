@@ -246,8 +246,9 @@ test("Codex usage is translated into the run evidence vocabulary", () => {
   );
 });
 
-test("a mounted Codex OAuth document becomes a private writable CODEX_HOME", async () => {
+test("a mounted Codex OAuth document becomes a private writable CODEX_HOME", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "chuggy-codex-test-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
   const home = join(parent, "home");
   const auth = JSON.stringify({
     tokens: {
