@@ -22,13 +22,18 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
 
 import { z } from "zod";
 
-import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
+import {
+  fileLocked,
+  fileLockHolderAlive,
+  fileRemoval,
+  fileRenamedOver,
+} from "./fileLock.mjs";
 import { imageName } from "./imageSweep.mjs";
 
 /**
@@ -169,9 +174,9 @@ async function imageRecordWritten(file, record) {
       flag: "wx",
       mode: imageRecordFileMode,
     });
-    await rename(staged, file);
+    await fileRenamedOver(staged, file);
   } catch (failure) {
-    await rm(staged, { force: true });
+    await rm(staged, fileRemoval);
     throw failure;
   }
 }
