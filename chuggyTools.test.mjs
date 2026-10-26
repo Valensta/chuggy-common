@@ -1810,6 +1810,125 @@ test("updating a ticket submits one operation naming the ticket, the revision re
   assert.equal(textOf(answer), `HTTP 202\n${accepted}`);
 });
 
+/** A dispatch view page holding `candidates`, as the route answers one. */
+function dispatchViewPage(candidates) {
+  return JSON.stringify({
+    result: "Page",
+    token: {},
+    candidates,
+    notificationCursor: 0,
+  });
+}
+
+test("dispatching a ticket reads its version from the dispatch view and submits it, answering the operation's id", async () => {
+  const accepted = JSON.stringify({ operation: "o", state: "Pending" });
+  const { api, call } = toolsOf({}, (_path, init) =>
+    init?.method === "POST"
+      ? { status: 202, body: accepted }
+      : {
+          status: 200,
+          body: dispatchViewPage([{ ticket: 26, ticketVersion: 41 }]),
+        },
+  );
+
+  const answer = await call("dispatch_ticket", { ticket: 26 });
+
+  assert.equal(api.calls.length, 2);
+  assert.equal(api.calls[0].method, "GET");
+  assert.equal(
+    api.calls[0].path,
+    "/api/v1/tenants/vteng/projects/chuggy/dispatch-view?after=25&limit=1",
+  );
+  assert.equal(api.calls[1].method, "POST");
+  assert.equal(
+    api.calls[1].path,
+    "/api/v1/tenants/vteng/projects/chuggy/operations",
+  );
+  const body = JSON.parse(api.calls[1].init.body);
+  assert.deepEqual(body.mutation, {
+    mutation: "ManualDispatch",
+    ticket: 26,
+    expectedTicketVersion: 41,
+  });
+  assert.equal(
+    body.operation,
+    chuggyOperationIdentity("turn-1", body.mutation),
+  );
+  assert.equal(api.calls[1].init.headers["idempotency-key"], body.operation);
+  assert.equal(textOf(answer), `HTTP 202\n${accepted}`);
+});
+
+test("the first ticket is read from the start of the dispatch view", async () => {
+  const { api, call } = toolsOf({}, () => ({
+    status: 200,
+    body: dispatchViewPage([]),
+  }));
+
+  await call("dispatch_ticket", { ticket: 1 });
+
+  assert.equal(
+    api.calls[0].path,
+    "/api/v1/tenants/vteng/projects/chuggy/dispatch-view?limit=1",
+  );
+});
+
+test("a ticket the dispatch view does not hold is answered and nothing is submitted", async () => {
+  for (const candidates of [[], [{ ticket: 27, ticketVersion: 41 }]]) {
+    const { api, call } = toolsOf({}, () => ({
+      status: 200,
+      body: dispatchViewPage(candidates),
+    }));
+
+    const answer = await call("dispatch_ticket", { ticket: 26 });
+
+    assert.equal(answer.isError, true);
+    assert.match(textOf(answer), /ticket 26 cannot be dispatched now/);
+    assert.match(textOf(answer), /nothing was submitted/);
+    assert.equal(api.calls.length, 1);
+  }
+});
+
+test("a dispatch view being rebuilt, refused or unreadable submits nothing", async () => {
+  for (const [given, said] of [
+    [{ status: 200, body: JSON.stringify({ result: "Reset" }) }, /rebuilt/],
+    [
+      { status: 403, body: JSON.stringify({ error: { code: "Forbidden" } }) },
+      /^HTTP 403/,
+    ],
+    [{ status: 200, body: "{}" }, /not a dispatch view/],
+    [
+      {
+        status: 200,
+        body: dispatchViewPage([{ ticket: 26, ticketVersion: "41" }]),
+      },
+      /not a dispatch view/,
+    ],
+  ]) {
+    const { api, call } = toolsOf({}, () => given);
+
+    const answer = await call("dispatch_ticket", { ticket: 26 });
+
+    assert.equal(answer.isError, true);
+    assert.match(textOf(answer), said);
+    assert.equal(api.calls.length, 1);
+  }
+});
+
+test("the dispatch tool says whose word it takes and that it is the owner's own dispatch", () => {
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "dispatch_ticket",
+  );
+
+  for (const said of [
+    /on your owner's word only/,
+    /your owner's dispatch/,
+    /Pending ticket whose dependencies are all Done/,
+    /TicketChanged/,
+    /read_operation/,
+  ])
+    assert.match(description, said);
+});
+
 test("one call revokes one ticket: a list, a ticket that is no number and no ticket at all reach nothing", async () => {
   const { api, call } = toolsOf();
 
@@ -2358,6 +2477,7 @@ const projectToolArguments = {
   },
   create_draft: origination,
   revoke_ticket: { ticket: 26 },
+  dispatch_ticket: { ticket: 26 },
   update_ticket: {
     ticket: 26,
     expectedRevision: 3,
@@ -2397,7 +2517,7 @@ test("every project tool reaches its own session's project and nothing outside i
   }
 });
 
-test("origination, revocation and updating are registered for a thread's roster and for no lead's", () => {
+test("origination, revocation, updating and dispatching are registered for a thread's roster and for no lead's", () => {
   const registered = (capabilities) =>
     chuggyToolDefinitions(
       chuggyToolContext(task, bearer, {
@@ -2411,7 +2531,13 @@ test("origination, revocation and updating are registered for a thread's roster 
     "revoke_ticket",
     "update_ticket",
   ]);
-  for (const tool of ["create_draft", "revoke_ticket", "update_ticket"]) {
+  assert.deepEqual(registered(["TicketDispatch"]), ["dispatch_ticket"]);
+  for (const tool of [
+    "create_draft",
+    "revoke_ticket",
+    "update_ticket",
+    "dispatch_ticket",
+  ]) {
     assert.ok(registered([...threadRoster]).includes(tool), tool);
     assert.ok(
       !registered([...leadRoster]).includes(tool),
@@ -2436,12 +2562,14 @@ test("every project tool a session holds asks its route, and answers what the ro
           ? JSON.stringify({ read: "Content", content: "x" })
           : path.endsWith("/landings")
             ? JSON.stringify({ landings: [], truncated: false })
-            : "{}",
+            : path.includes("/dispatch-view")
+              ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
+              : "{}",
     }));
 
     const answer = await call(name, projectToolArguments[name]);
 
-    assert.equal(api.calls.length, 1, name);
+    assert.equal(api.calls.length, name === "dispatch_ticket" ? 2 : 1, name);
     assert.ok(answer.isError === undefined, name);
   }
 });

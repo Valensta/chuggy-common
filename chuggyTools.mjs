@@ -98,7 +98,7 @@
  * reach the tool, and the derived-work rule is that mapping rather than a
  * sentence in a description. `revoke_ticket` and `update_ticket` are under
  * that capability too, which is what keeps them from a roster that does not
- * hold it.
+ * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
  * `Prerequisite` is admitted by the schema only so its refusal can name the
  * reason — a released ticket's dependencies are immutable in chuggy's
  * `model/domain.qnt`, which names re-authoring machinery as deliberately absent.
@@ -556,6 +556,67 @@ async function readTicketLandings(context, path) {
         "its newest landing is larger alone, so it cannot be answered",
       )
     : answered(answer);
+}
+
+/**
+ * The version `ticket` is dispatched at, as its dispatch view entry names it,
+ * or why there is none: the view is being rebuilt, or the ticket is no
+ * candidate. A body that is no view as the contract answers one is undefined.
+ */
+function dispatchTicketVersion(text, ticket) {
+  let view;
+  try {
+    view = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (view?.result === "Reset") return { absent: "Reset" };
+  if (view?.result !== "Page" || !Array.isArray(view.candidates))
+    return undefined;
+  const candidate = view.candidates.find((entry) => entry?.ticket === ticket);
+  if (candidate === undefined) return { absent: "NotCandidate" };
+  return Number.isSafeInteger(candidate.ticketVersion)
+    ? { version: candidate.ticketVersion }
+    : undefined;
+}
+
+/**
+ * One ticket dispatched at the version the dispatch view names for it, so a
+ * ticket that is no candidate is answered without anything being submitted.
+ * The view is read a page of one, starting just before the ticket.
+ */
+async function dispatchTicket(context, ticket) {
+  const body = await drawn(
+    context,
+    `${projectPath(context, "dispatchView")}${search({
+      after: ticket > 1 ? ticket - 1 : undefined,
+      limit: 1,
+    })}`,
+    chuggyToolResponseBytesMax,
+    "this ticket's dispatch view entry",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const found = dispatchTicketVersion(body.text, ticket);
+  if (found === undefined)
+    return answered(
+      `the dispatch view answered HTTP ${String(body.status)} with a body that is not a dispatch view as the contract answers one.`,
+      true,
+    );
+  if (found.absent === "Reset")
+    return answered(
+      "the project's dispatch view is being rebuilt, so nothing was submitted; call again.",
+      true,
+    );
+  if (found.absent === "NotCandidate")
+    return answered(
+      `ticket ${String(ticket)} cannot be dispatched now, so nothing was submitted: only a Pending ticket whose dependencies are all Done can be, and read_ticket answers its phase and what it waits on.`,
+      true,
+    );
+  return submit(context, {
+    mutation: "ManualDispatch",
+    ticket,
+    expectedTicketVersion: found.version,
+  });
 }
 
 /** What names the directory one context's images are written into. */
@@ -1120,6 +1181,12 @@ export const chuggyProjectTools = [
         authoringVersion: args.authoringVersion,
         configurationRevision: args.configurationRevision,
       }),
+  },
+  {
+    name: "dispatch_ticket",
+    description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now rather than when the lead chooses it. It is your owner's dispatch: one they may not dispatch is refused. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
+    shape: (z) => ({ ticket: ticket(z) }),
+    call: (context, args) => dispatchTicket(context, args.ticket),
   },
 ];
 
