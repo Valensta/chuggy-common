@@ -38,7 +38,7 @@
  * page is what is answered. The refusal is left for where nothing smaller can
  * be asked for, which is a tool with no limit and an item too large alone.
  *
- * THE TRANSCRIPT READS ARE ONE OF THREE EXCEPTIONS, and `./transcriptPage.mjs`
+ * THE TRANSCRIPT READS ARE ONE OF THE EXCEPTIONS, and `./transcriptPage.mjs`
  * states why: their routes page by batch, a batch is bounded by a line bound or
  * a body bound, and one line is what a whole answer must fit inside. So no page
  * bound a caller could lower makes one of those pages answerable, and a refusal
@@ -50,6 +50,14 @@
  * rather than by what one answer holds, and its end is what says why the
  * attempt stopped, so `read_run_error` answers the longest end that fits and
  * the size of the whole.
+ *
+ * ANOTHER IS A TICKET'S LANDINGS, ANSWERED AS THE NEWEST THAT FIT. Its route
+ * answers as many landings as one read does, each bounded by its own fields
+ * rather than by what one answer holds, and the newest is what says where the
+ * ticket's work stands, so `read_ticket_landings` leaves out the oldest whole
+ * landings until the rest fit, and says so in `truncated`. The contract bounds
+ * what one landing weighs, and the suite holds the heaviest one inside an
+ * answer.
  *
  * THE LAST IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
  * bytes. Its route answers them as base64, bounded by the largest upload rather
@@ -123,6 +131,7 @@ import {
   chuggyToolRunErrorResponseBytesMax,
   chuggyToolRunTranscriptResponseBytesMax,
   chuggyToolServerName,
+  chuggyToolTicketLandingsResponseBytesMax,
   chuggyToolTimeoutMs,
   dependentRelationsAdmitted,
   imageMediaTypes,
@@ -131,6 +140,7 @@ import {
   projectArtifactEncoding,
   selectorHistoryLimitMax,
   threadTurnsAnsweredMax,
+  ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
 
 import { chuggyBoundedBody, chuggyRequest } from "./chuggyApi.mjs";
@@ -486,6 +496,65 @@ async function readRunError(context, path) {
   return answered(readRunErrorAnswer(content));
 }
 
+/** A landings route's body, or nothing where it is not one as the route answers one. */
+function readTicketLandingsBody(text) {
+  let answer;
+  try {
+    answer = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const landings = answer?.landings;
+  return Array.isArray(landings) &&
+    landings.length <= ticketLandingsAnsweredMax &&
+    typeof answer.truncated === "boolean"
+    ? answer
+    : undefined;
+}
+
+/**
+ * A ticket's landings as one answer: the newest that fit, oldest first, and
+ * `truncated` where the route left older ones out or this answer did. Nothing
+ * is answered where the newest alone does not fit, because a landing is never
+ * cut.
+ */
+function readTicketLandingsAnswer(body) {
+  const { landings } = body;
+  if (landings.length === 0) return JSON.stringify(body);
+  for (let kept = landings.length; kept > 0; kept -= 1) {
+    const answer = JSON.stringify({
+      ...body,
+      landings: landings.slice(landings.length - kept),
+      truncated: body.truncated || kept < landings.length,
+    });
+    if (chuggyToolAnswerFits(answer)) return answer;
+  }
+  return undefined;
+}
+
+/** One ticket's landings, newest kept where they are more than one answer holds. */
+async function readTicketLandings(context, path) {
+  const body = await drawn(
+    context,
+    path,
+    chuggyToolTicketLandingsResponseBytesMax,
+    "this ticket's landings",
+  );
+  if (body.refused !== undefined) return body.refused;
+  const landings = readTicketLandingsBody(body.text);
+  if (landings === undefined)
+    return answered(
+      `the landings route answered HTTP ${String(body.status)} with a body that is not a ticket's landings as the contract answers them.`,
+      true,
+    );
+  const answer = readTicketLandingsAnswer(landings);
+  return answer === undefined
+    ? answerTooLarge(
+        "its newest landing is larger alone, so it cannot be answered",
+      )
+    : answered(answer);
+}
+
 /** What names the directory one context's images are written into. */
 const chuggyToolImageDirectoryPrefix = "chuggy-tool-images-";
 
@@ -646,7 +715,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring and its brief, and `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text.",
+      "One ticket: its phase, its version, its authoring and its brief, and `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing or waits to land, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),
@@ -727,6 +796,17 @@ export const chuggyProjectTools = [
       read(
         context,
         projectPath(context, "ticketAgenticRefusals", { ticket: args.ticket }),
+      ),
+  },
+  {
+    name: "read_ticket_landings",
+    description:
+      "One ticket's landings, each a finalization of its work into its repository: the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out. A ticket whose work has not reached landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed or Landed, its `cycle`, its `attempts`, and its newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, and the `targetRef` it lands on. A Held landing carries `hold`: its `kind`, what holds it, and `since`, when a hold of that kind began. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on, and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status`, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
+    shape: (z) => ({ ticket: ticket(z) }),
+    call: (context, args) =>
+      readTicketLandings(
+        context,
+        projectPath(context, "ticketLandings", { ticket: args.ticket }),
       ),
   },
   {
