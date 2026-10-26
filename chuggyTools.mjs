@@ -123,6 +123,7 @@ import {
   briefLineCharsMax,
   builtInToolCapabilities,
   chuggyToolCapabilities,
+  chuggyToolDispatchViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolNames,
   chuggyToolPrefix,
@@ -592,7 +593,7 @@ async function dispatchTicket(context, ticket) {
       after: ticket > 1 ? ticket - 1 : undefined,
       limit: 1,
     })}`,
-    chuggyToolResponseBytesMax,
+    chuggyToolDispatchViewResponseBytesMax,
     "this ticket's dispatch view entry",
   );
   if (body.refused !== undefined) return body.refused;
@@ -1184,7 +1185,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "dispatch_ticket",
-    description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now rather than when the lead chooses it. It is your owner's dispatch: one they may not dispatch is refused. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
+    description: `Submits the dispatch of one released ticket, on your owner's word only, which starts its work now rather than when the lead chooses it. It is your owner's dispatch, so where they may not dispatch in this project the submission is answered 404, though the ticket exists. Only a Pending ticket whose dependencies are all Done can be dispatched, and any other is answered without anything being submitted. A ticket that moved between this tool reading it and submitting is refused (TicketChanged), so call again. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) => dispatchTicket(context, args.ticket),
   },
