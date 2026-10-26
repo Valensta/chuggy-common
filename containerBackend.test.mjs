@@ -55,6 +55,7 @@ import {
 import { poolProjectDigest } from "./poolIdentity.mjs";
 import { diskReclaimIntervalMs } from "./diskFloor.mjs";
 import { imageSweepIntervalMs } from "./imageCleanup.mjs";
+import { memoryStartCutMs } from "./memoryBudget.mjs";
 import {
   savedLogBytesMax,
   savedLogCutLine,
@@ -4073,7 +4074,7 @@ test("a log longer than a saved log's bound is saved as its end, opening with th
 const memoryGib = 2 ** 30;
 
 /**
- * A backend keeping 2 GiB of its fake engine's 16 GiB free, whose held job's
+ * A backend keeping 2 GiB of its fake engine's memory free, whose held job's
  * every check waits for `checked()`, which moves its clock on by the wait.
  *
  * @param {import("node:test").TestContext} t
@@ -4216,9 +4217,16 @@ test("a pass's room is what its own placements will take less, and no job is tak
 });
 
 test("a job that does not fit the room is held, and is started once a later check finds room, its deadline counted from its start", async (t) => {
-  const { backend, state, log, checked, waiting } = await memoryHarness(t);
+  const { backend, state, clock, log, checked, waiting } =
+    await memoryHarness(t);
   occupied(state, "chuggy-jobs-postgres", { usedBytes: 8 * memoryGib });
   await backend.held();
+  let moved = false;
+  state.intercept = () => {
+    if (!moved) clock.nowMs += 10_000;
+    moved = true;
+    return undefined;
+  };
   await backend.place(assignment({ memoryMib: 8192 }), "Job");
   await until(() => waiting() === 1);
 
@@ -4240,9 +4248,10 @@ test("a job that does not fit the room is held, and is started once a later chec
     "io.chuggy.held": "vteng/chuggy/shame",
     "io.chuggy.assignment": "asg-1",
     "io.chuggy.held.memory-mib": "8192",
-    "io.chuggy.held.since-ms": String(startMs),
+    "io.chuggy.held.since-ms": String(startMs + 10_000),
     "io.chuggy.held.pid": String(process.pid),
     "io.chuggy.held.until-ms": String(startMs + 3600 * 1000),
+    "io.chuggy.held.starting": "false",
   });
   assert.deepEqual(await backend.held(), heldJobs("asg-1"));
   assert.equal(backend.jobsTaken(), false);
@@ -4258,7 +4267,7 @@ test("a job that does not fit the room is held, and is started once a later chec
   assert.deepEqual(runningWorkloads(state), [name]);
   assert.equal(
     state.containers.get(name)?.labels["io.chuggy.deadline"],
-    String(startMs / 1000 + 30 + 3600),
+    String(startMs / 1000 + 10 + 30 + 3600),
   );
   assert.deepEqual(holdNames(state), []);
   assert.deepEqual(
@@ -4289,6 +4298,7 @@ test("another service's hold is counted against this one's room, and neither tak
       heldMs: startMs + 1,
       pid: process.pid,
       untilMs: startMs + 3600 * 1000,
+      starting: false,
     }),
   );
   await first.backend.held();
@@ -4370,7 +4380,7 @@ test("a job asking more than the memory budget is refused, naming it, and one wi
   await backend.settled();
 });
 
-test("a held job stopped, or past its deadline, leaves no hold", async (t) => {
+test("a held job stopped, or too near its deadline to start, leaves no hold", async (t) => {
   const { backend, state, log, checked, waiting } = await memoryHarness(t);
   occupied(state, "chuggy-jobs-postgres", { usedBytes: 12 * memoryGib });
   await backend.held();
@@ -4383,7 +4393,7 @@ test("a held job stopped, or past its deadline, leaves no hold", async (t) => {
   assert.ok(log.includes(`${name} was stopped before it started`));
 
   await backend.place(
-    assignment({ assignment: "asg-2", memoryMib: 4096, deadlineSecs: 40 }),
+    assignment({ assignment: "asg-2", memoryMib: 4096, deadlineSecs: 70 }),
     "Job",
   );
   await until(() => waiting() === 1);
@@ -4423,6 +4433,7 @@ test("a hold whose runner is no longer running, or whose deadline has passed, is
         heldMs: startMs,
         pid: holder,
         untilMs,
+        starting: false,
       }),
     );
   await backend.held();
@@ -4522,21 +4533,183 @@ test("a job placed again once its container runs is counted by that container, m
   assert.deepEqual(holdNames(state), []);
 });
 
-test("a job is counted by its hold until its container has started, however long the start takes", async (t) => {
-  const { backend, state } = await memoryHarness(t);
+test("a job is counted by its hold until its container has started, however long the start takes, and a pass meanwhile takes no job and says nothing", async (t) => {
+  const { backend, engine, state, log } = await memoryHarness(t);
   const name = containerName(pool, "asg-1");
   /** @type {string[][]} */
   const heldAtRun = [];
+  /** @type {boolean[]} */
+  const takenAtRun = [];
   state.intercept = (call) => {
-    if (call.argv[0] === "run") heldAtRun.push(holdNames(state));
-    return undefined;
+    if (call.argv[0] !== "run" || heldAtRun.length > 0) return undefined;
+    heldAtRun.push(holdNames(state));
+    return (async () => {
+      await backend.held();
+      takenAtRun.push(backend.jobsTaken());
+      return engine.exec(call.argv);
+    })();
   };
   await backend.held();
   await backend.place(assignment({ memoryMib: 4096 }), "Job");
   await backend.settled();
   assert.deepEqual(heldAtRun, [[`${name}-held`]]);
+  assert.deepEqual(takenAtRun, [false]);
   assert.deepEqual(runningWorkloads(state), [name]);
   assert.deepEqual(holdNames(state), []);
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+  assert.deepEqual(
+    log.filter((line) => line.startsWith("this engine")),
+    [],
+  );
+});
+
+test("a job too near its deadline to start fails, so another service's count never finds its hold past that deadline while it starts, and the other's job alone takes the room", async (t) => {
+  const first = await memoryHarness(t);
+  const second = await memoryHarness(
+    t,
+    { pool: otherPool },
+    { engine: first.engine, nowMs: () => first.clock.nowMs },
+    first.memoryLock,
+  );
+  const { state } = first;
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 8 * memoryGib });
+  await first.backend.held();
+  await second.backend.held();
+  await first.backend.place(
+    assignment({ memoryMib: 8192, deadlineSecs: 50 }),
+    "Job",
+  );
+  await until(() => first.waiting() === 1);
+  first.checked();
+  await until(() => first.waiting() === 1);
+  state.containers.delete("chuggy-jobs-postgres");
+  const other = async () => {
+    await second.backend.place(
+      assignment({ assignment: "asg-2", memoryMib: 8192 }),
+      "Job",
+    );
+    await second.backend.settled();
+  };
+  /** @type {Promise<void> | undefined} */
+  let during;
+  state.intercept = (call) => {
+    if (
+      call.argv[0] !== "run" ||
+      !call.argv.includes(containerName(pool, "asg-1")) ||
+      during !== undefined
+    )
+      return undefined;
+    first.clock.nowMs += 21_000;
+    during = other();
+    return during.then(() => first.engine.exec(call.argv));
+  };
+  first.checked();
+  await first.backend.settled();
+  await (during ?? other());
+  assert.deepEqual(runningWorkloads(state), [
+    containerName(otherPool, "asg-2"),
+  ]);
+  assert.deepEqual(holdNames(state), []);
+  assert.ok(
+    first.log.includes(
+      `${containerName(pool, "asg-1")} was not started: it had no room on this engine by the assignment's deadline`,
+    ),
+    first.log.join("\n"),
+  );
+});
+
+test("a job whose check crosses its deadline fails, and does not remake its hold and start late", async (t) => {
+  const { backend, state, clock, log, checked, waiting } =
+    await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 8 * memoryGib });
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 8192, deadlineSecs: 60 }), "Job");
+  await until(() => waiting() === 1);
+  checked();
+  await until(() => waiting() === 1);
+  state.containers.delete("chuggy-jobs-postgres");
+  let crossed = false;
+  state.intercept = (call) => {
+    if (!crossed && call.argv[0] === "info") clock.nowMs += 34_000;
+    if (call.argv[0] === "info") crossed = true;
+    return undefined;
+  };
+  checked();
+  await backend.settled();
+  assert.equal(crossed, true);
+  assert.deepEqual(runningWorkloads(state), []);
+  assert.deepEqual(holdNames(state), []);
+  assert.ok(
+    log.includes(
+      `${name} was not started: it had no room on this engine by the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
+});
+
+test("a start still running as its hold's deadline nears is cut, the container it made removed, and the job fails too late to start", async (t) => {
+  const { backend, state, clock, log } = await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  /** @type {(string | undefined)[]} */
+  const starting = [];
+  state.intercept = (call) => {
+    if (call.argv[1] === "create" && call.argv.at(-1) === `${name}-held`) {
+      starting.push(
+        call.argv
+          .find((each) => each.startsWith("io.chuggy.held.starting="))
+          ?.split("=")[1],
+      );
+      clock.nowMs = startMs + 3600 * 1000 - memoryStartCutMs - 50;
+    }
+    if (call.argv[0] !== "run") return undefined;
+    occupied(state, name, {
+      labels: {
+        "io.chuggy.pool": "vteng/chuggy/shame",
+        "io.chuggy.assignment": "asg-1",
+        "io.chuggy.kind": "Job",
+      },
+      memoryBytes: 4 * memoryGib,
+    });
+    return waited(2000).then(() => ({ code: 0, stdout: "", stderr: "" }));
+  };
+  await backend.held();
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.deepEqual(runningWorkloads(state), []);
+  assert.ok(
+    state.calls.some((call) => call.argv.join(" ") === `rm --force ${name}`),
+  );
+  assert.deepEqual(holdNames(state), []);
+  assert.ok(
+    log.includes(
+      `${name} was not started: it could not start before the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
+  assert.deepEqual(starting, ["true"]);
+});
+
+test("a job whose hold was made too late for its start to be cut short of the deadline fails without running", async (t) => {
+  const { backend, state, clock, log } = await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  state.intercept = (call) => {
+    if (call.argv[1] === "create" && call.argv.at(-1) === `${name}-held`)
+      clock.nowMs = startMs + 3600 * 1000 - memoryStartCutMs;
+    return undefined;
+  };
+  await backend.held();
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+  assert.deepEqual(holdNames(state), []);
+  assert.ok(
+    log.includes(
+      `${name} was not started: it could not start before the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
 });
 
 test("a session is started however full the engine is, and a backend with no budget counts nothing", async (t) => {

@@ -577,6 +577,7 @@ test("what is running, what it uses, and a job's hold on the engine's memory are
       heldMs: 1_800_000_000_000,
       pid: 4242,
       untilMs: 1_800_000_600_000,
+      starting: false,
     }),
     [
       "volume",
@@ -593,6 +594,8 @@ test("what is running, what it uses, and a job's hold on the engine's memory are
       "io.chuggy.held.pid=4242",
       "--label",
       "io.chuggy.held.until-ms=1800000600000",
+      "--label",
+      "io.chuggy.held.starting=false",
       "chuggy-shame-a-held",
     ],
   );

@@ -76,13 +76,15 @@
  * A JOB STARTS ONLY INTO ROOM where the runner keeps a memory budget, as
  * `memoryBudget.mjs` says. Once its images are here and its volumes ready it
  * is held until the engine's memory has room for its cap, checked again every
- * `memoryHeldCheckMs` until it starts, is stopped or passes its deadline,
- * which bounds a hold as it bounds a pull. `held` names a held job held. No
- * job is taken while one on the engine is held or its room is short, and one
- * asking more than the whole budget is refused, as one asking more than the
- * machine is. A session is counted but never held: it is a person waiting on
- * a reply, and its own ceiling bounds it. A workload's container is given its
- * deadline as it is run, so neither a pull nor a hold takes from its run.
+ * `memoryHeldCheckMs` until it starts, is stopped or is too near its deadline
+ * to start, which bounds a hold as it bounds a pull. Its `run` is cut short of
+ * that deadline, and a container it may have made is removed, so its hold
+ * outlasts its start. `held` names a held job held. No job is taken while one
+ * on the engine has a hold or its room is short, and one asking more than the
+ * whole budget is refused, as one asking more than the machine is. A session
+ * is counted but never held: it is a person waiting on a reply, and its own
+ * ceiling bounds it. A workload's container is given its deadline as it is
+ * run, so neither a pull nor a hold takes from its run.
  *
  * `held` HOLDS A FLOOR OF FREE DISK where the runner measures one, as
  * `diskFloor.mjs` says. The job it stops is the one docker says holds most in
@@ -205,6 +207,7 @@ import {
   memoryHoldsRemoved,
   memoryLockCallsMsMax,
   memoryLocked,
+  memoryStartCutMs,
   memoryStartDecided,
 } from "./memoryBudget.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
@@ -278,7 +281,7 @@ import {
  * @property {string} name
  * @property {string} image
  * @property {"Placing" | "Pulling" | "Starting" | "Held"} phase
- * @property {number} deadlineEpochSecs by which it starts or fails
+ * @property {number} deadlineEpochSecs by which its images are pulled and, where it makes a memory hold, it has started, or it fails
  * @property {number} memoryMib its cap
  * @property {string} [waiting] what a held one waits for
  *
@@ -1897,15 +1900,18 @@ async function unstartedRemoved(state, name) {
  * owner can read, which is removed once `run` has answered. A container of
  * this name already carrying this assignment is a repeated placement. A job
  * started through chuggy's runtime whose image's shell could not be started
- * is refused with that fault, its unstarted container removed.
+ * is refused with that fault, its unstarted container removed. A `run` that
+ * `cut` ended fails the job too late to start, the container it may have
+ * made removed.
  *
  * @param {State} state
  * @param {Placement} placement
  * @param {WorkerPoolAssignment} assignment
  * @param {string} envelope
+ * @param {AbortSignal} [cut] what ends `run` where its start is bounded
  * @returns {Promise<"started" | "was already running">} what the log says of it
  */
-async function started(state, placement, assignment, envelope) {
+async function started(state, placement, assignment, envelope, cut) {
   const { settings, seams } = state;
   await mkdir(settings.runtimeDir, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(
@@ -1922,24 +1928,22 @@ async function started(state, placement, assignment, envelope) {
         flag: "wx",
       },
     );
-    answer = await seams.engine.exec(
-      runArgv(settings.engine, {
-        name: placement.name,
-        pool: poolLabelValue(settings.pool),
-        assignment: placement.assignment,
-        kind: placement.kind,
-        deadlineEpochSecs: Math.floor(seams.nowMs() / 1000) + placement.runSecs,
-        envFile,
-        cpuMillis: assignment.cpuMillis,
-        memoryMib: assignment.memoryMib,
-        credentialFile: placement.credential.file,
-        network: settings.network,
-        image: placement.image,
-        runtime: placement.runtime?.volumes,
-        engineSocket: workloadEngineSocket(settings, placement),
-        volumes: placement.volumes,
-      }),
-    );
+    answer = await startRun(state, placement, cut, {
+      name: placement.name,
+      pool: poolLabelValue(settings.pool),
+      assignment: placement.assignment,
+      kind: placement.kind,
+      deadlineEpochSecs: Math.floor(seams.nowMs() / 1000) + placement.runSecs,
+      envFile,
+      cpuMillis: assignment.cpuMillis,
+      memoryMib: assignment.memoryMib,
+      credentialFile: placement.credential.file,
+      network: settings.network,
+      image: placement.image,
+      runtime: placement.runtime?.volumes,
+      engineSocket: workloadEngineSocket(settings, placement),
+      volumes: placement.volumes,
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1964,12 +1968,44 @@ async function started(state, placement, assignment, envelope) {
   );
 }
 
+/**
+ * The placement's `run`, cut by `cut` where there is one, after which the
+ * container it may have made is removed and the job fails too late to start.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {AbortSignal | undefined} cut
+ * @param {import("./engineArgv.mjs").WorkloadContainer} spec
+ */
+async function startRun(state, placement, cut, spec) {
+  try {
+    return await state.seams.engine.exec(
+      runArgv(state.settings.engine, spec),
+      cut === undefined ? {} : { signal: cut },
+    );
+  } catch (failure) {
+    if (cut?.aborted !== true) throw failure;
+    const removed = await state.seams.engine.exec(
+      forcedRemoveArgv(placement.name),
+    );
+    if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
+      state.seams.log(
+        `${placement.name} was cut short of its start and was not removed: ${engineFailureLine(removed)}`,
+      );
+    throw new Error(memoryStartLate, { cause: failure });
+  }
+}
+
 /** What a held job had not found by its deadline, which a failure names. */
 const memoryHeldLate = "it had no room on this engine";
 
+/** Why a job that was not held fails too near its deadline to start. */
+const memoryStartLate = "it could not start before the assignment's deadline";
+
 /**
  * The hold a job's placement makes on its engine's memory, named for its
- * container, first held now and abandoned at the assignment's deadline.
+ * container, first held now and abandoned at the assignment's deadline. It is
+ * labelled starting where it is made for a job decided to start.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1984,6 +2020,7 @@ function memoryHoldOf(state, placement) {
     heldMs: state.seams.nowMs(),
     pid: process.pid,
     untilMs: placement.deadlineEpochSecs * 1000,
+    starting: false,
   };
 }
 
@@ -2046,10 +2083,11 @@ async function memoryCountedNow(state, signal) {
 
 /**
  * One check of a held job's room, under the memory lock: a count, the
- * decision, and the job's hold made where the count lists neither it nor a
- * container of its assignment, since a job about to start is counted by its
- * hold as a held one is. A check that could not take the lock or make the
- * hold holds the job.
+ * decision, and, unless the job is too late to start, its hold made where the
+ * count lists neither it nor a container of its assignment, since a job about
+ * to start is counted by its hold as a held one is. A check that could not
+ * take the lock or make the hold holds the job. One that finds its container
+ * running counts its hold made, which then goes as any hold does.
  *
  * @param {State} state
  * @param {import("./memoryBudget.mjs").MemoryBudget} budget
@@ -2062,24 +2100,31 @@ async function memoryChecked(state, budget, hold) {
     const decision = await memoryLocked(budget.lockFile, async () => {
       const signal = globalThis.AbortSignal.timeout(memoryLockCallsMsMax);
       const counted = await memoryCountedNow(state, signal);
+      const decided = memoryStartDecided(
+        budget.bytesFree,
+        counted,
+        hold,
+        state.seams.nowMs(),
+      );
       if (
-        !("unknown" in counted) &&
-        (counted.holds.some(({ name }) => name === hold.name) ||
-          counted.started.includes(hold.assignment))
+        decided.decided === "Running" ||
+        (!("unknown" in counted) &&
+          counted.holds.some(({ name }) => name === hold.name))
       )
         made = true;
-      else {
-        const answer = await state.seams.engine.exec(heldCreateArgv(hold), {
-          signal,
-        });
-        if (answer.code !== 0)
-          return {
-            decided: /** @type {const} */ ("Hold"),
-            why: `its hold could not be made: ${engineFailureLine(answer)}`,
-          };
-        made = true;
-      }
-      return memoryStartDecided(budget.bytesFree, counted, hold);
+      if (made || decided.decided === "Late") return decided;
+      const starting = decided.decided === "Start";
+      const answer = await state.seams.engine.exec(
+        heldCreateArgv({ ...hold, starting }),
+        { signal },
+      );
+      if (answer.code !== 0)
+        return {
+          decided: /** @type {const} */ ("Hold"),
+          why: `its hold could not be made: ${engineFailureLine(answer)}`,
+        };
+      made = true;
+      return decided;
     });
     return { made, decision };
   } catch (failure) {
@@ -2096,14 +2141,17 @@ async function memoryChecked(state, budget, hold) {
 /**
  * Runs `start` once the engine's memory has room for a job, where the runner
  * keeps a budget: each check is made under the memory lock, and a job held is
- * checked again every `memoryHeldCheckMs` until it starts, is stopped or
- * passes its deadline. Its hold goes once `start` has answered, or once it
- * failed to. A session starts as it would without a budget.
+ * checked again every `memoryHeldCheckMs` until it starts, is stopped or is
+ * too near its deadline to start. `start` is given what cuts it
+ * `memoryStartCutMs` short of the deadline its hold carries, unless the job's
+ * container is already running, when it starts nothing. Its hold goes once
+ * `start` has answered, or once it failed to. A session starts as it would
+ * without a budget.
  *
  * @template T
  * @param {State} state
  * @param {Placement} placement
- * @param {() => Promise<T>} start
+ * @param {(cut?: AbortSignal) => Promise<T>} start
  * @returns {Promise<T>}
  */
 async function memoryStarted(state, placement, start) {
@@ -2116,10 +2164,22 @@ async function memoryStarted(state, placement, start) {
       const checked = await memoryChecked(state, budget, hold);
       if (checked.made) placement.holding = true;
       placement.controller.signal.throwIfAborted();
-      if (checked.decision.decided === "Start") {
+      if (checked.decision.decided === "Running") {
         placement.phase = "Starting";
         placement.waiting = undefined;
         return await start();
+      }
+      const cutMs = hold.untilMs - memoryStartCutMs - state.seams.nowMs();
+      if (checked.decision.decided === "Late" || cutMs <= 0)
+        throw new Error(
+          placement.phase === "Held"
+            ? `${memoryHeldLate} by the assignment's deadline`
+            : memoryStartLate,
+        );
+      if (checked.decision.decided === "Start") {
+        placement.phase = "Starting";
+        placement.waiting = undefined;
+        return await start(globalThis.AbortSignal.timeout(cutMs));
       }
       if (placement.phase !== "Held")
         state.seams.log(
@@ -2255,8 +2315,8 @@ async function placementStarted(state, placement, assignment, envelope) {
     placement.phase = "Starting";
     if (runtime !== undefined) await runtimeFilled(state, placement, runtime);
     if (placement.kind === "Job") await ownerVolumesReady(state, placement);
-    outcome = await memoryStarted(state, placement, () =>
-      started(state, placement, assignment, envelope),
+    outcome = await memoryStarted(state, placement, (cut) =>
+      started(state, placement, assignment, envelope, cut),
     );
   } catch (failure) {
     if (runtime?.volumes !== undefined)

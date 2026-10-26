@@ -17,7 +17,9 @@ import {
   memoryRoomBytes,
   memoryRoomMibMin,
   memorySizeBytes,
+  memoryStartCutMs,
   memoryStartDecided,
+  memoryStartMsMin,
 } from "./memoryBudget.mjs";
 
 const gib = 2 ** 30;
@@ -61,6 +63,7 @@ async function held(engine, hold) {
       heldMs: 1000,
       pid: 101,
       untilMs: nowMs + 1,
+      starting: false,
       ...hold,
     }),
   );
@@ -279,6 +282,7 @@ test("where the engine refuses its stats, what no runner capped is counted at no
         heldMs: 1000,
         pid: 101,
         untilMs: nowMs + 1,
+        starting: false,
       },
     ],
     started: [],
@@ -296,6 +300,34 @@ test("where the engine refuses its stats, what no runner capped is counted at no
   assert.deepEqual((await counted(engine)).counted, {
     unknown: "docker did not answer in time",
   });
+});
+
+test("stats that found the engine unreachable, or whose CLI could not start, fail the count rather than count as a refusal", async () => {
+  const { engine, state } = fakeEngine();
+  running(state, "chuggy-jobs-postgres", { usedBytes: 256 * mib });
+  for (const unreachable of [
+    {
+      code: 1,
+      stdout: "",
+      stderr:
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n",
+    },
+    {
+      code: -1,
+      stdout: "",
+      stderr: "spawn docker EAGAIN",
+      failed: /** @type {const} */ ("Unstarted"),
+    },
+  ]) {
+    state.intercept = (call) =>
+      call.argv[0] === "stats" ? unreachable : undefined;
+    const { counted: unreached } = await counted(engine);
+    assert.ok("unknown" in unreached);
+    assert.match(
+      unreached.unknown,
+      /^docker could not say what its containers use: /u,
+    );
+  }
 });
 
 test("a job whose container starts and whose hold goes while the engine is counted is counted once, by the one or the other", async () => {
@@ -326,6 +358,26 @@ test("a job whose container starts and whose hold goes while the engine is count
   assert.deepEqual(both.holds, []);
   assert.deepEqual(both.started, ["asg-held"]);
   assert.equal(memoryRoomBytes(0, both), 11 * gib);
+
+  state.containers.delete("chuggy-shame-aaa");
+  await held(engine, {});
+  let listings = 0;
+  state.intercept = (call) => {
+    if (
+      call.argv[0] === "ps" ||
+      call.argv.slice(0, 2).join(" ") === "volume ls"
+    )
+      listings += 1;
+    if (listings === 2 && !state.containers.has("chuggy-shame-aaa")) {
+      running(state, "chuggy-shame-aaa", job);
+      state.volumes.delete("chuggy-shame-aaa-held");
+    }
+    return undefined;
+  };
+  const { counted: between } = await counted(engine);
+  assert.equal(listings, 2);
+  assert.ok("holds" in between);
+  assert.equal(memoryRoomBytes(0, between), 11 * gib);
 });
 
 test("no stats are asked while every running container is a capped workload", async () => {
@@ -373,6 +425,7 @@ test("a job is claimed only while the room left is at least the least a job asks
             heldMs: 0,
             pid: 1,
             untilMs: nowMs + 1,
+            starting: false,
           },
         ],
       }),
@@ -395,7 +448,8 @@ const hold = (name, heldMs, memoryMib = 4096) => ({
   memoryMib,
   heldMs,
   pid: 1,
-  untilMs: nowMs + 1,
+  untilMs: nowMs + memoryStartCutMs + memoryStartMsMin,
+  starting: false,
 });
 
 test("a job starts where it fits the room its own hold leaves, and is held where it does not", () => {
@@ -406,6 +460,7 @@ test("a job starts where it fits the room its own hold leaves, and is held where
       free,
       count({ cappedBytes: 6 * gib, holds: [own] }),
       own,
+      nowMs,
     ),
     { decided: "Start" },
   );
@@ -414,18 +469,19 @@ test("a job starts where it fits the room its own hold leaves, and is held where
       free,
       count({ cappedBytes: 6 * gib, usedBytes: 1, holds: [own] }),
       own,
+      nowMs,
     ),
     { decided: "Hold", why: "needs 8 GiB, room 8 GiB" },
   );
   assert.deepEqual(
-    memoryStartDecided(free, count({ cappedBytes: 13 * gib }), own),
+    memoryStartDecided(free, count({ cappedBytes: 13 * gib }), own, nowMs),
     { decided: "Hold", why: "needs 8 GiB, room 1 GiB" },
   );
   assert.deepEqual(
-    memoryStartDecided(free, count({ cappedBytes: 20 * gib }), own),
+    memoryStartDecided(free, count({ cappedBytes: 20 * gib }), own, nowMs),
     { decided: "Hold", why: "needs 8 GiB, room 0 GiB" },
   );
-  assert.deepEqual(memoryStartDecided(free, { unknown: "why" }, own), {
+  assert.deepEqual(memoryStartDecided(free, { unknown: "why" }, own, nowMs), {
     decided: "Hold",
     why: "the engine's memory could not be counted: why",
   });
@@ -438,8 +494,30 @@ test("a job starts where it fits the room its own hold leaves, and is held where
         started: [own.assignment],
       }),
       own,
+      nowMs,
     ),
-    { decided: "Start" },
+    { decided: "Running" },
+  );
+});
+
+test("a job whose start could not be given its least time before its hold's deadline, less the cut, is too late, whatever the count, unless its container is running", () => {
+  const free = 2 * gib;
+  const own = hold("own", 50, 512);
+  assert.deepEqual(memoryStartDecided(free, count(), own, nowMs), {
+    decided: "Start",
+  });
+  for (const counted of [count(), { unknown: "why" }])
+    assert.deepEqual(memoryStartDecided(free, counted, own, nowMs + 1), {
+      decided: "Late",
+    });
+  assert.deepEqual(
+    memoryStartDecided(
+      free,
+      count({ started: [own.assignment] }),
+      own,
+      nowMs + 1,
+    ),
+    { decided: "Running" },
   );
 });
 
@@ -447,25 +525,41 @@ test("a job waits behind every hold older than its own, oldest first, however it
   const free = 2 * gib;
   const own = hold("b", 50, 512);
   const holds = [hold("c", 50), hold("z", 40), hold("a", 50), own];
-  assert.deepEqual(memoryStartDecided(free, count({ holds }), own), {
+  assert.deepEqual(memoryStartDecided(free, count({ holds }), own, nowMs), {
     decided: "Hold",
     why: "behind z, held before it",
   });
   assert.deepEqual(
-    memoryStartDecided(free, count({ holds: [hold("c", 50), own] }), own),
+    memoryStartDecided(
+      free,
+      count({ holds: [hold("c", 50), own] }),
+      own,
+      nowMs,
+    ),
     { decided: "Start" },
   );
   assert.deepEqual(
-    memoryStartDecided(free, count({ holds: [hold("a", 50), own] }), own),
+    memoryStartDecided(
+      free,
+      count({ holds: [hold("a", 50), own] }),
+      own,
+      nowMs,
+    ),
     { decided: "Hold", why: "behind a, held before it" },
   );
   assert.deepEqual(
-    memoryStartDecided(free, count({ holds: [hold("a", 60)] }), {
-      name: "new",
-      assignment: "asg-new",
-      memoryMib: 512,
-      heldMs: 70,
-    }),
+    memoryStartDecided(
+      free,
+      count({ holds: [hold("a", 60)] }),
+      {
+        name: "new",
+        assignment: "asg-new",
+        memoryMib: 512,
+        heldMs: 70,
+        untilMs: own.untilMs,
+      },
+      nowMs,
+    ),
     { decided: "Hold", why: "behind a, held before it" },
   );
 });
@@ -532,10 +626,36 @@ test("a pass's count says what changed once, and takes no job while held, full o
       count({ cappedBytes: 4 * gib }),
       count({ cappedBytes: 14 * gib }),
       count({ holds: [hold("a", 1)] }),
+      count({ holds: [{ ...hold("a", 1), starting: true }] }),
+      count({ holds: [hold("a", 1), { ...hold("b", 1), starting: true }] }),
       { unknown: "no answer" },
     ].map((each) => memoryBudgetState(2 * gib, each, 0)),
-    ["Taking", "Full", "Held", "Unknown"],
+    ["Taking", "Full", "Held", "Starting", "Held", "Unknown"],
   );
+});
+
+test("a job starting takes no job and logs nothing, from whatever was last logged", () => {
+  const budget = memoryBudget(2 * gib, "/unused");
+  assert.ok(budget !== undefined);
+  /** @type {string[]} */
+  const log = [];
+  const starting = count({ holds: [{ ...hold("a", 1), starting: true }] });
+  memoryBudgetHeld(budget, starting, 0, log.push.bind(log));
+  assert.equal(budget.jobsTaken, false);
+  memoryBudgetHeld(budget, count(), 0, log.push.bind(log));
+  assert.equal(budget.jobsTaken, true);
+  memoryBudgetHeld(
+    budget,
+    count({ holds: [hold("a", 1)] }),
+    0,
+    log.push.bind(log),
+  );
+  memoryBudgetHeld(budget, starting, 0, log.push.bind(log));
+  memoryBudgetHeld(budget, count(), 0, log.push.bind(log));
+  assert.deepEqual(log, [
+    "this engine has 10 GiB of room in its 14 GiB memory budget, and a job on it is held for room: this runner takes no job until it starts",
+    "this engine has 14 GiB of room in its 14 GiB memory budget: this runner takes jobs again",
+  ]);
 });
 
 test("no budget is kept without what it keeps free or a lock", () => {
@@ -563,5 +683,12 @@ test("two holds of the memory lock never overlap", async (t) => {
       { wait: () => setImmediate() },
     );
   await Promise.all([hold("a"), hold("b")]);
-  assert.deepEqual(order, ["a in", "a out", "b in", "b out"]);
+  const [first] = order;
+  const [one, other] = first === "a in" ? ["a", "b"] : ["b", "a"];
+  assert.deepEqual(order, [
+    `${one} in`,
+    `${one} out`,
+    `${other} in`,
+    `${other} out`,
+  ]);
 });

@@ -23,13 +23,14 @@
  *
  * A HOLD IS A VOLUME, which every runner on the engine lists whatever its
  * user, and which needs no image and runs nothing. It carries the job's
- * assignment, its cap, when it was first held, the process holding it and
- * when the assignment's deadline passes. One whose process is not running, or
- * whose deadline has passed, is abandoned: no count counts it, and whichever
- * runner finds it removes it, so a process number another process has since
- * taken keeps a hold no longer than its deadline. Holds are listed before
- * what is running, so a job whose container starts and whose hold goes while
- * the engine is counted is counted by the one or the other.
+ * assignment, its cap, when it was first held, the process holding it, when
+ * the assignment's deadline passes, and whether it was made for a job
+ * decided to start rather than one held for room. One whose process is not
+ * running, or whose deadline has passed, is abandoned: no count counts it,
+ * and whichever runner finds it removes it, so a process number another
+ * process has since taken keeps a hold no longer than its deadline. Holds are
+ * listed before what is running, so a job whose container starts and whose
+ * hold goes while the engine is counted is counted by the one or the other.
  *
  * A JOB STARTS ONLY INTO ROOM. Its runner counts, decides and makes its hold
  * in one hold of a lock that every runner using the engine as this user
@@ -42,9 +43,16 @@
  * that died holding it, and costs at most one start into room another start
  * took.
  *
+ * A START ENDS BEFORE ITS HOLD'S DEADLINE. A job is decided to start only
+ * where its run can be given `memoryStartMsMin` before it is cut
+ * `memoryStartCutMs` short of that deadline, and its run is cut there, so no
+ * count judges a hold past its deadline while its job can still start. A job
+ * left less time fails as too late to start.
+ *
  * NO JOB IS CLAIMED while the room is under `memoryRoomMibMin`, or while any
- * job on the engine is held. A count that failed claims none and starts none,
- * since a full engine is the one slowest to answer.
+ * job on the engine has a hold, held for room or starting. A count that
+ * failed claims none and starts none, since a full engine is the one slowest
+ * to answer.
  */
 
 import { mkdir } from "node:fs/promises";
@@ -62,6 +70,7 @@ import {
   heldMemoryLabel,
   heldProcessLabel,
   heldSinceLabel,
+  heldStartingLabel,
   heldUntilLabel,
   inspectArgv,
   memoryStatsArgv,
@@ -95,17 +104,17 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @property {() => number} nowMs
  * @property {AbortSignal} signal which every call of the count is made under
  *
- * @typedef {"Taking" | "Full" | "Held" | "Unknown"} MemoryBudgetState whether a count takes jobs, and why not
+ * @typedef {"Taking" | "Full" | "Held" | "Starting" | "Unknown"} MemoryBudgetState whether a count takes jobs, and why not
  *
  * @typedef {object} MemoryBudget
  * @property {number} bytesFree what its runner keeps free of the engine's memory
  * @property {string} lockFile the memory lock's
  * @property {MemoryCounted | undefined} counted what the last `held` found, none before the first
  * @property {boolean} jobsTaken
- * @property {MemoryBudgetState} said what was last logged of it, `Taking` before anything was
+ * @property {Exclude<MemoryBudgetState, "Starting">} said what was last logged of it, `Taking` before anything was
  * @property {boolean} saidUnmeasured whether the use was last logged as counted at none
  *
- * @typedef {{decided: "Start"} | {decided: "Hold", why: string}} MemoryDecision
+ * @typedef {{decided: "Start"} | {decided: "Running"} | {decided: "Hold", why: string} | {decided: "Late"}} MemoryDecision
  */
 
 const mibBytes = 2 ** 20;
@@ -132,6 +141,12 @@ export const memoryLockWaitMsMax = memoryLockHeldMsMax + 60_000;
 
 /** Between two checks of a held job's room, each a count under the lock. */
 export const memoryHeldCheckMs = 15_000;
+
+/** The least time a job's run is given once it is decided to start. */
+export const memoryStartMsMin = 30_000;
+
+/** How long before its hold's deadline a job's run is cut, so its runner has given the start up before any count judges the hold past it. */
+export const memoryStartCutMs = 5_000;
 
 const memoryUnitBytes = new Map([
   ["B", 1],
@@ -265,8 +280,9 @@ async function memoryRunning(ports) {
 
 /**
  * What these running containers use together, as the engine says, or none
- * and why where it refuses to say. One it names no use of has ended since it
- * was listed.
+ * and why where it refuses to say. An engine that could not be reached, or
+ * whose CLI could not run, refuses nothing, and the count fails. One it names
+ * no use of has ended since it was listed.
  *
  * @param {MemoryCountPorts} ports
  * @param {ReadonlySet<string>} names
@@ -276,11 +292,11 @@ async function memoryUsedBytes(ports, names) {
   const answer = await ports.engine.exec(memoryStatsArgv(), {
     signal: ports.signal,
   });
-  if (answer.code !== 0)
-    return {
-      usedBytes: 0,
-      unmeasured: `${ports.name} could not say what its containers use: ${engineFailureLine(answer)}`,
-    };
+  if (answer.code !== 0) {
+    const why = `${ports.name} could not say what its containers use: ${engineFailureLine(answer)}`;
+    if (engineFailure(answer) === "Unreachable") throw new MemoryUncounted(why);
+    return { usedBytes: 0, unmeasured: why };
+  }
   let used = 0;
   for (const line of answer.stdout.split("\n")) {
     const match = /^(\S+) (\S+) \/ /u.exec(line.trim());
@@ -316,6 +332,7 @@ function memoryHoldRead(name, labels) {
   const heldMs = Number(labels[heldSinceLabel]);
   const pid = Number(labels[heldProcessLabel]);
   const untilMs = Number(labels[heldUntilLabel]);
+  const starting = labels[heldStartingLabel];
   if (
     pool === undefined ||
     assignment === undefined ||
@@ -324,10 +341,20 @@ function memoryHoldRead(name, labels) {
     !Number.isSafeInteger(heldMs) ||
     !Number.isSafeInteger(pid) ||
     pid <= 0 ||
-    !Number.isSafeInteger(untilMs)
+    !Number.isSafeInteger(untilMs) ||
+    (starting !== "true" && starting !== "false")
   )
     return undefined;
-  return { name, pool, assignment, memoryMib, heldMs, pid, untilMs };
+  return {
+    name,
+    pool,
+    assignment,
+    memoryMib,
+    heldMs,
+    pid,
+    untilMs,
+    starting: starting === "true",
+  };
 }
 
 /**
@@ -499,23 +526,29 @@ function memoryHoldOlder(hold, other) {
 }
 
 /**
- * Whether a job starts into the room a count leaves it: where its container
- * is already running, and so counted, or where no other hold is older than
- * its own and it fits the room its own hold leaves. Otherwise it is held, and
- * why says what it waits for.
+ * Whether a job starts into the room a count leaves it. One whose container
+ * is already running, and so counted, is running, and starts nothing. One
+ * whose run could not be given `memoryStartMsMin` before its hold's deadline
+ * less `memoryStartCutMs` is too late. Otherwise it starts where no other
+ * hold is older than its own and it fits the room its own hold leaves, and is
+ * held where not, why saying what it waits for.
  *
  * @param {number} bytesFree
  * @param {MemoryCounted} counted
- * @param {Pick<MemoryHold, "name" | "assignment" | "memoryMib" | "heldMs">} job
+ * @param {Pick<MemoryHold, "name" | "assignment" | "memoryMib" | "heldMs" | "untilMs">} job
+ * @param {number} nowMs
  * @returns {MemoryDecision}
  */
-export function memoryStartDecided(bytesFree, counted, job) {
+export function memoryStartDecided(bytesFree, counted, job, nowMs) {
+  if (!("unknown" in counted) && counted.started.includes(job.assignment))
+    return { decided: "Running" };
+  if (job.untilMs - memoryStartCutMs - nowMs < memoryStartMsMin)
+    return { decided: "Late" };
   if ("unknown" in counted)
     return {
       decided: "Hold",
       why: `the engine's memory could not be counted: ${counted.unknown}`,
     };
-  if (counted.started.includes(job.assignment)) return { decided: "Start" };
   const [oldest] = counted.holds
     .filter((hold) => hold.name !== job.name && memoryHoldOlder(hold, job))
     .toSorted((a, b) => (memoryHoldOlder(a, b) ? -1 : 1));
@@ -551,7 +584,8 @@ export function memoryBudget(bytesFree, lockFile) {
 
 /**
  * Whether a count takes jobs, and why not: it is unknown, a job on the engine
- * is held, or the room left once `placingBytes` is taken is short.
+ * is held for room, one is starting, or the room left once `placingBytes` is
+ * taken is short.
  *
  * @param {number} bytesFree
  * @param {MemoryCounted} counted
@@ -560,7 +594,8 @@ export function memoryBudget(bytesFree, lockFile) {
  */
 export function memoryBudgetState(bytesFree, counted, placingBytes) {
   if ("unknown" in counted) return "Unknown";
-  if (counted.holds.length > 0) return "Held";
+  if (counted.holds.some(({ starting }) => !starting)) return "Held";
+  if (counted.holds.length > 0) return "Starting";
   return memoryJobsTaken(bytesFree, counted, placingBytes) ? "Taking" : "Full";
 }
 
@@ -585,7 +620,8 @@ function memoryBudgetSaidUse(budget, counted, log) {
 }
 
 /**
- * What a pass found, logged where it differs from what was last logged.
+ * What a pass found, logged where it differs from what was last logged. A job
+ * starting is not logged, since its hold goes once it has started.
  *
  * @param {MemoryBudget} budget
  * @param {MemoryCounted} counted
@@ -594,7 +630,7 @@ function memoryBudgetSaidUse(budget, counted, log) {
  */
 function memoryBudgetSaid(budget, counted, now, log) {
   memoryBudgetSaidUse(budget, counted, log);
-  if (now === budget.said) return;
+  if (now === "Starting" || now === budget.said) return;
   budget.said = now;
   if ("unknown" in counted) {
     log(
