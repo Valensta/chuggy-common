@@ -795,8 +795,9 @@ export function fakeEngine() {
         environment: { ...engineCall.environment },
       };
       state.calls.push(call);
-      engineCall.signal?.throwIfAborted();
-      return Promise.race([answer(state, call), aborted(engineCall.signal)]);
+      const signal = engineCall.signal ?? engineCall.cut;
+      signal?.throwIfAborted();
+      return Promise.race([answer(state, call), aborted(signal)]);
     },
     execTail: async (argv, bytesMax) => {
       state.calls.push({ argv: [...argv], environment: {} });

@@ -4712,6 +4712,46 @@ test("a job whose hold was made too late for its start to be cut short of the de
   );
 });
 
+test("a job first held near its deadline is given half the time left to start, and starts where it has room", async (t) => {
+  const { backend, state } = await memoryHarness(t);
+  await backend.held();
+  await backend.place(assignment({ deadlineSecs: 30 }), "Job");
+  await backend.settled();
+  assert.deepEqual(runningWorkloads(state), [containerName(pool, "asg-1")]);
+});
+
+test("a job whose count leaves it too little time to start fails without running, its time read once the count is done", async (t) => {
+  const { backend, state, clock, log, checked, waiting } =
+    await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 8 * memoryGib });
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 8192, deadlineSecs: 90 }), "Job");
+  await until(() => waiting() === 1);
+  checked();
+  await until(() => waiting() === 1);
+  state.containers.delete("chuggy-jobs-postgres");
+  let counted = false;
+  state.intercept = (call) => {
+    if (!counted && call.argv[0] === "info") {
+      counted = true;
+      clock.nowMs += 30_000;
+    }
+    return undefined;
+  };
+  checked();
+  await backend.settled();
+  assert.equal(counted, true);
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+  assert.deepEqual(holdNames(state), []);
+  assert.ok(
+    log.includes(
+      `${name} was not started: it had no room on this engine by the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
+});
+
 test("a session is started however full the engine is, and a backend with no budget counts nothing", async (t) => {
   const { backend, state } = await memoryHarness(t);
   occupied(state, "chuggy-jobs-postgres", { usedBytes: 15 * memoryGib });

@@ -1969,8 +1969,9 @@ async function started(state, placement, assignment, envelope, cut) {
 }
 
 /**
- * The placement's `run`, cut by `cut` where there is one, after which the
- * container it may have made is removed and the job fails too late to start.
+ * The placement's `run`, capped as any call is and cut sooner by `cut` where
+ * there is one, after which the container it may have made is removed and the
+ * job fails too late to start.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1981,7 +1982,7 @@ async function startRun(state, placement, cut, spec) {
   try {
     return await state.seams.engine.exec(
       runArgv(state.settings.engine, spec),
-      cut === undefined ? {} : { signal: cut },
+      cut === undefined ? {} : { cut },
     );
   } catch (failure) {
     if (cut?.aborted !== true) throw failure;

@@ -44,8 +44,8 @@
  * took.
  *
  * A START ENDS BEFORE ITS HOLD'S DEADLINE. A job is decided to start only
- * where its run can be given `memoryStartMsMin` before it is cut
- * `memoryStartCutMs` short of that deadline, and its run is cut there, so no
+ * where its run can be given `memoryStartMsMin`, or half its hold's life where
+ * that is less, before it is cut `memoryStartCutMs` short of that deadline, and its run is cut there, so no
  * count judges a hold past its deadline while its job can still start. A job
  * left less time fails as too late to start.
  *
@@ -142,7 +142,7 @@ export const memoryLockWaitMsMax = memoryLockHeldMsMax + 60_000;
 /** Between two checks of a held job's room, each a count under the lock. */
 export const memoryHeldCheckMs = 15_000;
 
-/** The least time a job's run is given once it is decided to start. */
+/** The least time a job's run is given once it is decided to start, or half its hold's life where that is less. */
 export const memoryStartMsMin = 30_000;
 
 /** How long before its hold's deadline a job's run is cut, so its runner has given the start up before any count judges the hold past it. */
@@ -528,8 +528,9 @@ function memoryHoldOlder(hold, other) {
 /**
  * Whether a job starts into the room a count leaves it. One whose container
  * is already running, and so counted, is running, and starts nothing. One
- * whose run could not be given `memoryStartMsMin` before its hold's deadline
- * less `memoryStartCutMs` is too late. Otherwise it starts where no other
+ * whose run could not be given `memoryStartMsMin`, or half its hold's life
+ * where that is less, before its hold's deadline less `memoryStartCutMs` is too
+ * late. Otherwise it starts where no other
  * hold is older than its own and it fits the room its own hold leaves, and is
  * held where not, why saying what it waits for.
  *
@@ -542,7 +543,8 @@ function memoryHoldOlder(hold, other) {
 export function memoryStartDecided(bytesFree, counted, job, nowMs) {
   if (!("unknown" in counted) && counted.started.includes(job.assignment))
     return { decided: "Running" };
-  if (job.untilMs - memoryStartCutMs - nowMs < memoryStartMsMin)
+  const leastMs = Math.min(memoryStartMsMin, (job.untilMs - job.heldMs) / 2);
+  if (job.untilMs - memoryStartCutMs - nowMs < leastMs)
     return { decided: "Late" };
   if ("unknown" in counted)
     return {

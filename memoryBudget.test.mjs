@@ -26,7 +26,7 @@ const gib = 2 ** 30;
 const mib = 2 ** 20;
 
 /** When every count here is made. */
-const nowMs = 5000;
+const nowMs = 100_000;
 
 /**
  * A container on the fake engine.
@@ -500,7 +500,7 @@ test("a job starts where it fits the room its own hold leaves, and is held where
   );
 });
 
-test("a job whose start could not be given its least time before its hold's deadline, less the cut, is too late, whatever the count, unless its container is running", () => {
+test("a job whose start could not be given its least time, or half its hold's life where that is less, before its hold's deadline, less the cut, is too late, whatever the count, unless its container is running", () => {
   const free = 2 * gib;
   const own = hold("own", 50, 512);
   assert.deepEqual(memoryStartDecided(free, count(), own, nowMs), {
@@ -519,6 +519,13 @@ test("a job whose start could not be given its least time before its hold's dead
     ),
     { decided: "Running" },
   );
+  const short = { ...own, heldMs: nowMs - 10_000, untilMs: nowMs + 30_000 };
+  assert.deepEqual(memoryStartDecided(free, count(), short, nowMs), {
+    decided: "Start",
+  });
+  assert.deepEqual(memoryStartDecided(free, count(), short, nowMs + 5001), {
+    decided: "Late",
+  });
 });
 
 test("a job waits behind every hold older than its own, oldest first, however it fits", () => {
