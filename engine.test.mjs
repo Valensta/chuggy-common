@@ -79,6 +79,21 @@ test("a call with a signal of its own is not capped, and rejects when it aborts"
   await assert.rejects(aborted, { name: "AbortError" });
 });
 
+test("a call cut by a signal is still capped, and rejects when the signal aborts", async () => {
+  const capped = containerEngine(process.execPath, 50);
+  const hung = await capped.exec(["-e", "setTimeout(() => {}, 10_000)"], {
+    cut: new globalThis.AbortController().signal,
+  });
+  assert.equal(hung.failed, "Interrupted");
+  const controller = new globalThis.AbortController();
+  const cut = containerEngine(process.execPath, 10_000).exec(
+    ["-e", "setTimeout(() => {}, 10_000)"],
+    { cut: controller.signal },
+  );
+  controller.abort();
+  await assert.rejects(cut, { name: "AbortError" });
+});
+
 test("output of any length is kept to its last bytes, with whether more came and how many lines it had", async () => {
   const answer = await node.execTail(
     ["-e", "process.stdout.write('x\\n'.repeat(1 << 20))"],

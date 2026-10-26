@@ -7,6 +7,8 @@ import {
   engineInfoArgv,
   dockerInfoArgv,
   forcedRemoveArgv,
+  heldCreateArgv,
+  heldListArgv,
   imageInspectArgv,
   imageInspectManyArgv,
   imageListArgv,
@@ -22,11 +24,13 @@ import {
   killArgv,
   listArgv,
   logsArgv,
+  memoryStatsArgv,
   networkCreateArgv,
   networkInspectArgv,
   pullArgv,
   removeArgv,
   runArgv,
+  runningListArgv,
   runtimeFillArgv,
   runtimeVolumeCreateArgv,
   volumeInspectArgv,
@@ -554,4 +558,52 @@ test("an image's containers, what docker's hold on disk, and all an engine says 
     "json",
   ]);
   assert.deepEqual(engineInfoArgv(), ["info", "--format", "{{json .}}"]);
+});
+
+test("what is running, what it uses, and a job's hold on the engine's memory are asked with this argv", () => {
+  assert.deepEqual(runningListArgv(), ["ps", "--quiet", "--no-trunc"]);
+  assert.deepEqual(memoryStatsArgv(), [
+    "stats",
+    "--no-stream",
+    "--format",
+    "{{.Name}} {{.MemUsage}}",
+  ]);
+  assert.deepEqual(
+    heldCreateArgv({
+      name: "chuggy-shame-a-held",
+      pool: "vteng/chuggy/shame",
+      assignment: "asg-1",
+      memoryMib: 4096,
+      heldMs: 1_800_000_000_000,
+      pid: 4242,
+      untilMs: 1_800_000_600_000,
+      starting: false,
+    }),
+    [
+      "volume",
+      "create",
+      "--label",
+      "io.chuggy.held=vteng/chuggy/shame",
+      "--label",
+      "io.chuggy.assignment=asg-1",
+      "--label",
+      "io.chuggy.held.memory-mib=4096",
+      "--label",
+      "io.chuggy.held.since-ms=1800000000000",
+      "--label",
+      "io.chuggy.held.pid=4242",
+      "--label",
+      "io.chuggy.held.until-ms=1800000600000",
+      "--label",
+      "io.chuggy.held.starting=false",
+      "chuggy-shame-a-held",
+    ],
+  );
+  assert.deepEqual(heldListArgv(), [
+    "volume",
+    "ls",
+    "--quiet",
+    "--filter",
+    "label=io.chuggy.held",
+  ]);
 });

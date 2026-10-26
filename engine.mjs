@@ -19,6 +19,7 @@ import { execFile, spawn } from "node:child_process";
  * @typedef {object} EngineCall
  * @property {Readonly<Record<string, string>>} [environment] added to this process's own
  * @property {AbortSignal} [signal] which replaces the call cap, for a call bounded by a deadline of its own
+ * @property {AbortSignal} [cut] which ends a call sooner than the call cap, which still holds
  *
  * @typedef {EngineAnswer & {tail: Buffer, cut: boolean, lines: number}} EngineTail
  * what a call printed on both streams, as it arrived: only its last bytes in
@@ -104,7 +105,7 @@ export function containerEngine(binary, callTimeoutMs) {
           argv,
           {
             env: { ...process.env, ...call.environment },
-            signal: call.signal,
+            signal: call.signal ?? call.cut,
             timeout: call.signal === undefined ? callTimeoutMs : 0,
             maxBuffer: engineAnswerBytesMax,
             encoding: "utf8",

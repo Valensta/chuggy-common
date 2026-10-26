@@ -73,6 +73,19 @@
  * before it looks, and records the use once `run` has answered. With no
  * record, no image is held, recorded or removed.
  *
+ * A JOB STARTS ONLY INTO ROOM where the runner keeps a memory budget, as
+ * `memoryBudget.mjs` says. Once its images are here and its volumes ready it
+ * is held until the engine's memory has room for its cap, checked again every
+ * `memoryHeldCheckMs` until it starts, is stopped or is too near its deadline
+ * to start, which bounds a hold as it bounds a pull. Its `run` is cut short of
+ * that deadline, and a container it may have made is removed, so its hold
+ * outlasts its start. `held` names a held job held. No job is taken while one
+ * on the engine has a hold or its room is short, and one asking more than the
+ * whole budget is refused, as one asking more than the machine is. A session
+ * is counted but never held: it is a person waiting on a reply, and its own
+ * ceiling bounds it. A workload's container is given its deadline as it is
+ * run, so neither a pull nor a hold takes from its run.
+ *
  * `held` HOLDS A FLOOR OF FREE DISK where the runner measures one, as
  * `diskFloor.mjs` says. The job it stops is the one docker says holds most in
  * its container and workspace, where several run, and otherwise the newest;
@@ -124,6 +137,7 @@ import {
   dockerDiskUsageArgv,
   fillLabel,
   forcedRemoveArgv,
+  heldCreateArgv,
   imageInspectArgv,
   inspectArgv,
   killArgv,
@@ -177,11 +191,25 @@ import {
   diskFloorHeld,
   dockerDiskUsage,
 } from "./diskFloor.mjs";
+import { fileLockHolderAlive } from "./fileLock.mjs";
 import {
   imageCleanup,
   imageCleanupNone,
   imageUnusedSecsMaxDefault,
 } from "./imageCleanup.mjs";
+import {
+  memoryBudget,
+  memoryBudgetBytes,
+  memoryBudgetHeld,
+  memoryCountMsMax,
+  memoryCounted,
+  memoryHeldCheckMs,
+  memoryHoldsRemoved,
+  memoryLockCallsMsMax,
+  memoryLocked,
+  memoryStartCutMs,
+  memoryStartDecided,
+} from "./memoryBudget.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
 import {
@@ -228,6 +256,8 @@ import {
  * @property {string} [imageRecord] the file `imageCleanup.mjs` keeps this machine's images' record in, one for every runner using this engine as this user; none, and no image is held, recorded or removed
  * @property {number} [imageUnusedSecsMax] how long a job's image this runner pulled may go unused before it is removed, 0 keeping them; `imageUnusedSecsMaxDefault` where none
  * @property {number} [diskFreeBytesMin] the floor `held` keeps free where `diskFree` measures; none or 0, and none is kept
+ * @property {number} [memoryFreeBytesMin] what the memory budget keeps free of the engine's memory; none, and no budget is kept
+ * @property {string} [memoryLock] the file every runner using this engine as this user takes the memory lock at, which a budget needs; none, and no budget is kept
  *
  * @typedef {z.infer<typeof ownerVolumesSchema>[number]} OwnerVolumeListed a volume as its owner lists it, which `ownerVolumesServed` makes one a job mounts
  *
@@ -243,14 +273,17 @@ import {
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
  * @property {() => Promise<import("./diskFloor.mjs").DiskFree>} [diskFree] the bytes free where the engine stores what it holds, the runner's to measure, since an engine in a VM answers for the VM's disk; none, and no floor is kept
+ * @property {(pid: number) => boolean} [holderAlive] whether the process a memory hold names is running; `fileLockHolderAlive` where none
  *
  * @typedef {object} InFlightPlacement
  * @property {string} assignment
  * @property {WorkerPoolWorkloadKind} kind
  * @property {string} name
  * @property {string} image
- * @property {"Placing" | "Pulling" | "Starting"} phase
- * @property {number} deadlineEpochSecs
+ * @property {"Placing" | "Pulling" | "Starting" | "Held"} phase
+ * @property {number} deadlineEpochSecs by which its images are pulled and, where it makes a memory hold, it has started, or it fails
+ * @property {number} memoryMib its cap
+ * @property {string} [waiting] what a held one waits for
  *
  * @typedef {object} PlacementRuntime what a job placed through chuggy's runtime starts from
  * @property {string} image the runtime image its assignment named
@@ -258,13 +291,15 @@ import {
  * @property {import("./engineArgv.mjs").RuntimeVolumes | undefined} volumes once both are made, and the container that fills them can have been run
  *
  * @typedef {InFlightPlacement & {
+ *   runSecs: number,
+ *   holding: boolean,
  *   credential: import("./job.mjs").JobCredential,
  *   runtime: PlacementRuntime | undefined,
  *   volumes: readonly OwnerVolume[] | undefined,
  *   pulled: Map<string, string>,
  *   controller: AbortController,
  *   done: Promise<void>,
- * }} Placement each image it pulled in `pulled`, by the id it was pulled as
+ * }} Placement each image it pulled in `pulled`, by the id it was pulled as; how long its container may run in `runSecs`; whether it holds memory on the engine in `holding`
  *
  * @typedef {object} PoolContainer
  * @property {string} id
@@ -307,6 +342,7 @@ import {
  * @property {import("./imageCleanup.mjs").ImageCleanup} images
  * @property {Map<string, number>} logFailures when each listed container's logs first could not be saved, by its id
  * @property {import("./diskFloor.mjs").DiskFloor | undefined} disk
+ * @property {import("./memoryBudget.mjs").MemoryBudget | undefined} memory
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -476,11 +512,16 @@ export function checkedContainerBackendSettings(settings) {
     );
   if (settings.imageRecord !== undefined && settings.imageRecord.length === 0)
     throw new RangeError("imageRecord must name a file");
-  const floor = settings.diskFreeBytesMin;
-  if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 0))
-    throw new RangeError(
-      "diskFreeBytesMin must be a whole number of bytes, 0 or more",
-    );
+  for (const key of /** @type {const} */ ([
+    "diskFreeBytesMin",
+    "memoryFreeBytesMin",
+  ])) {
+    const floor = settings[key];
+    if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 0))
+      throw new RangeError(`${key} must be a whole number of bytes, 0 or more`);
+  }
+  if (settings.memoryLock !== undefined && settings.memoryLock.length === 0)
+    throw new RangeError("memoryLock must name a file");
   return settings;
 }
 
@@ -1070,6 +1111,7 @@ async function heldAssignments(state) {
         running.push({ inspected, container: { ...container, assignment } });
     }
   }
+  await memoryHeld(state);
   if (state.disk !== undefined)
     await diskFloorHeld(state.disk, {
       ...state.seams,
@@ -1285,7 +1327,26 @@ function placementRefusal(state, assignment) {
     return `the assignment asks for ${String(assignment.cpuMillis)} CPU millis and this machine has ${String(machine.cpuMillis)}`;
   if (assignment.memoryMib > machine.memoryMib)
     return `the assignment asks for ${String(assignment.memoryMib)} MiB and this machine has ${String(machine.memoryMib)}`;
-  return undefined;
+  return placementRefusalMemory(state, assignment);
+}
+
+/** @param {number} bytes */
+const placementRefusalMib = (bytes) => String(Math.floor(bytes / 2 ** 20));
+
+/**
+ * Why the memory budget will not take an assignment, as the last count found
+ * it: where it asks more than the whole budget, which no room ever has.
+ *
+ * @param {State} state
+ * @param {WorkerPoolAssignment} assignment
+ */
+function placementRefusalMemory(state, assignment) {
+  const counted = state.memory?.counted;
+  if (state.memory === undefined || counted === undefined) return undefined;
+  if ("unknown" in counted) return undefined;
+  const budget = memoryBudgetBytes(state.memory.bytesFree, counted);
+  if (assignment.memoryMib * 2 ** 20 <= budget) return undefined;
+  return `the assignment asks for ${String(assignment.memoryMib)} MiB and this runner's memory budget is ${placementRefusalMib(budget)} MiB: the engine's ${placementRefusalMib(counted.engineBytes)} MiB less the ${placementRefusalMib(state.memory.bytesFree)} MiB this runner keeps free`;
 }
 
 /**
@@ -1839,15 +1900,18 @@ async function unstartedRemoved(state, name) {
  * owner can read, which is removed once `run` has answered. A container of
  * this name already carrying this assignment is a repeated placement. A job
  * started through chuggy's runtime whose image's shell could not be started
- * is refused with that fault, its unstarted container removed.
+ * is refused with that fault, its unstarted container removed. A `run` that
+ * `cut` ended fails the job too late to start, the container it may have
+ * made removed.
  *
  * @param {State} state
  * @param {Placement} placement
  * @param {WorkerPoolAssignment} assignment
  * @param {string} envelope
+ * @param {AbortSignal} [cut] what ends `run` where its start is bounded
  * @returns {Promise<"started" | "was already running">} what the log says of it
  */
-async function started(state, placement, assignment, envelope) {
+async function started(state, placement, assignment, envelope, cut) {
   const { settings, seams } = state;
   await mkdir(settings.runtimeDir, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(
@@ -1864,24 +1928,22 @@ async function started(state, placement, assignment, envelope) {
         flag: "wx",
       },
     );
-    answer = await seams.engine.exec(
-      runArgv(settings.engine, {
-        name: placement.name,
-        pool: poolLabelValue(settings.pool),
-        assignment: placement.assignment,
-        kind: placement.kind,
-        deadlineEpochSecs: placement.deadlineEpochSecs,
-        envFile,
-        cpuMillis: assignment.cpuMillis,
-        memoryMib: assignment.memoryMib,
-        credentialFile: placement.credential.file,
-        network: settings.network,
-        image: placement.image,
-        runtime: placement.runtime?.volumes,
-        engineSocket: workloadEngineSocket(settings, placement),
-        volumes: placement.volumes,
-      }),
-    );
+    answer = await startRun(state, placement, cut, {
+      name: placement.name,
+      pool: poolLabelValue(settings.pool),
+      assignment: placement.assignment,
+      kind: placement.kind,
+      deadlineEpochSecs: Math.floor(seams.nowMs() / 1000) + placement.runSecs,
+      envFile,
+      cpuMillis: assignment.cpuMillis,
+      memoryMib: assignment.memoryMib,
+      credentialFile: placement.credential.file,
+      network: settings.network,
+      image: placement.image,
+      runtime: placement.runtime?.volumes,
+      engineSocket: workloadEngineSocket(settings, placement),
+      volumes: placement.volumes,
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1904,6 +1966,273 @@ async function started(state, placement, assignment, envelope) {
   throw new Error(
     `its container could not be run: ${engineFailureLine(answer)}`,
   );
+}
+
+/**
+ * The placement's `run`, capped as any call is and cut sooner by `cut` where
+ * there is one, after which the container it may have made is removed and the
+ * job fails too late to start.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {AbortSignal | undefined} cut
+ * @param {import("./engineArgv.mjs").WorkloadContainer} spec
+ */
+async function startRun(state, placement, cut, spec) {
+  try {
+    return await state.seams.engine.exec(
+      runArgv(state.settings.engine, spec),
+      cut === undefined ? {} : { cut },
+    );
+  } catch (failure) {
+    if (cut?.aborted !== true) throw failure;
+    const removed = await state.seams.engine.exec(
+      forcedRemoveArgv(placement.name),
+    );
+    if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
+      state.seams.log(
+        `${placement.name} was cut short of its start and was not removed: ${engineFailureLine(removed)}`,
+      );
+    throw new Error(memoryStartLate, { cause: failure });
+  }
+}
+
+/** What a held job had not found by its deadline, which a failure names. */
+const memoryHeldLate = "it had no room on this engine";
+
+/** Why a job that was not held fails too near its deadline to start. */
+const memoryStartLate = "it could not start before the assignment's deadline";
+
+/**
+ * The hold a job's placement makes on its engine's memory, named for its
+ * container, first held now and abandoned at the assignment's deadline. It is
+ * labelled starting where it is made for a job decided to start.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @returns {import("./memoryBudget.mjs").MemoryHold}
+ */
+function memoryHoldOf(state, placement) {
+  return {
+    name: `${placement.name}-held`,
+    pool: poolLabelValue(state.settings.pool),
+    assignment: placement.assignment,
+    memoryMib: placement.memoryMib,
+    heldMs: state.seams.nowMs(),
+    pid: process.pid,
+    untilMs: placement.deadlineEpochSecs * 1000,
+    starting: false,
+  };
+}
+
+/**
+ * Removes holds and logs each: as removed where `why` says why it went,
+ * and otherwise only where it could not be.
+ *
+ * @param {State} state
+ * @param {readonly string[]} names
+ * @param {AbortSignal} signal
+ * @param {string} [why]
+ */
+async function memoryHoldsGone(state, names, signal, why) {
+  if (names.length === 0) return;
+  let failed;
+  try {
+    failed = await memoryHoldsRemoved(
+      { engine: state.seams.engine, signal },
+      names,
+    );
+  } catch {
+    failed = names.map((name) => ({
+      name,
+      why: "the engine did not answer in time",
+    }));
+  }
+  const left = new Map(failed.map((each) => [each.name, each.why]));
+  for (const name of names) {
+    const cause = left.get(name);
+    if (cause !== undefined)
+      state.seams.log(`the hold ${name} was not removed: ${cause}`);
+    else if (why !== undefined)
+      state.seams.log(`the hold ${name}, ${why}, was removed`);
+  }
+}
+
+/**
+ * The engine's memory as a check or a pass counts it, the holds found
+ * abandoned removed.
+ *
+ * @param {State} state
+ * @param {AbortSignal} signal
+ */
+async function memoryCountedNow(state, signal) {
+  const { counted, abandoned } = await memoryCounted({
+    engine: state.seams.engine,
+    name: state.settings.engine,
+    holderAlive: state.seams.holderAlive ?? fileLockHolderAlive,
+    nowMs: state.seams.nowMs,
+    signal,
+  });
+  await memoryHoldsGone(
+    state,
+    abandoned,
+    signal,
+    "whose runner is no longer running or whose deadline has passed",
+  );
+  return counted;
+}
+
+/**
+ * One check of a held job's room, under the memory lock: a count, the
+ * decision, and, unless the job is too late to start, its hold made where the
+ * count lists neither it nor a container of its assignment, since a job about
+ * to start is counted by its hold as a held one is. A check that could not
+ * take the lock or make the hold holds the job. One that finds its container
+ * running counts its hold made, which then goes as any hold does.
+ *
+ * @param {State} state
+ * @param {import("./memoryBudget.mjs").MemoryBudget} budget
+ * @param {import("./memoryBudget.mjs").MemoryHold} hold
+ * @returns {Promise<{made: boolean, decision: import("./memoryBudget.mjs").MemoryDecision}>}
+ */
+async function memoryChecked(state, budget, hold) {
+  let made = false;
+  try {
+    const decision = await memoryLocked(budget.lockFile, async () => {
+      const signal = globalThis.AbortSignal.timeout(memoryLockCallsMsMax);
+      const counted = await memoryCountedNow(state, signal);
+      const decided = memoryStartDecided(
+        budget.bytesFree,
+        counted,
+        hold,
+        state.seams.nowMs(),
+      );
+      if (
+        decided.decided === "Running" ||
+        (!("unknown" in counted) &&
+          counted.holds.some(({ name }) => name === hold.name))
+      )
+        made = true;
+      if (made || decided.decided === "Late") return decided;
+      const starting = decided.decided === "Start";
+      const answer = await state.seams.engine.exec(
+        heldCreateArgv({ ...hold, starting }),
+        { signal },
+      );
+      if (answer.code !== 0)
+        return {
+          decided: /** @type {const} */ ("Hold"),
+          why: `its hold could not be made: ${engineFailureLine(answer)}`,
+        };
+      made = true;
+      return decided;
+    });
+    return { made, decision };
+  } catch (failure) {
+    const why =
+      failure instanceof Error && failure.name === "AbortError"
+        ? "the engine did not answer in time"
+        : failure instanceof Error
+          ? failure.message
+          : String(failure);
+    return { made, decision: { decided: "Hold", why } };
+  }
+}
+
+/**
+ * Runs `start` once the engine's memory has room for a job, where the runner
+ * keeps a budget: each check is made under the memory lock, and a job held is
+ * checked again every `memoryHeldCheckMs` until it starts, is stopped or is
+ * too near its deadline to start. `start` is given what cuts it
+ * `memoryStartCutMs` short of the deadline its hold carries, unless the job's
+ * container is already running, when it starts nothing. Its hold goes once
+ * `start` has answered, or once it failed to. A session starts as it would
+ * without a budget.
+ *
+ * @template T
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {(cut?: AbortSignal) => Promise<T>} start
+ * @returns {Promise<T>}
+ */
+async function memoryStarted(state, placement, start) {
+  const budget = state.memory;
+  if (budget === undefined || placement.kind !== "Job") return start();
+  const hold = memoryHoldOf(state, placement);
+  try {
+    for (;;) {
+      const signal = placementSignal(state, placement, memoryHeldLate);
+      const checked = await memoryChecked(state, budget, hold);
+      if (checked.made) placement.holding = true;
+      placement.controller.signal.throwIfAborted();
+      if (checked.decision.decided === "Running") {
+        placement.phase = "Starting";
+        placement.waiting = undefined;
+        return await start();
+      }
+      const cutMs = hold.untilMs - memoryStartCutMs - state.seams.nowMs();
+      if (checked.decision.decided === "Late" || cutMs <= 0)
+        throw new Error(
+          placement.phase === "Held"
+            ? `${memoryHeldLate} by the assignment's deadline`
+            : memoryStartLate,
+        );
+      if (checked.decision.decided === "Start") {
+        placement.phase = "Starting";
+        placement.waiting = undefined;
+        return await start(globalThis.AbortSignal.timeout(cutMs));
+      }
+      if (placement.phase !== "Held")
+        state.seams.log(
+          `${placement.name} is held for room on this engine: ${checked.decision.why}`,
+        );
+      placement.phase = "Held";
+      placement.waiting = checked.decision.why;
+      await state.seams.sleep(memoryHeldCheckMs, signal);
+    }
+  } finally {
+    if (placement.holding)
+      await memoryHoldsGone(
+        state,
+        [hold.name],
+        globalThis.AbortSignal.timeout(memoryCountMsMax),
+      );
+    placement.holding = false;
+  }
+}
+
+/**
+ * The pass's count of the engine's memory, which `jobsTaken` answers from.
+ * Each of this pool's holds that no placement of this runner's is making is
+ * removed first, as one a runner before it left.
+ *
+ * @param {State} state
+ */
+async function memoryHeld(state) {
+  const budget = state.memory;
+  if (budget === undefined) return;
+  const signal = globalThis.AbortSignal.timeout(memoryCountMsMax);
+  let counted = await memoryCountedNow(state, signal);
+  if (!("unknown" in counted)) {
+    const pool = poolLabelValue(state.settings.pool);
+    /** @param {import("./memoryBudget.mjs").MemoryHold} hold */
+    const left = (hold) =>
+      hold.pool === pool && !state.placements.has(hold.assignment);
+    await memoryHoldsGone(
+      state,
+      counted.holds.filter(left).map(({ name }) => name),
+      signal,
+      "which no placement of this runner's makes",
+    );
+    counted = {
+      ...counted,
+      holds: counted.holds.filter((hold) => !left(hold)),
+    };
+  }
+  const placing = [...state.placements.values()]
+    .filter(({ holding }) => !holding)
+    .reduce((sum, { memoryMib }) => sum + memoryMib * 2 ** 20, 0);
+  memoryBudgetHeld(budget, counted, placing, state.seams.log);
 }
 
 /**
@@ -1987,7 +2316,9 @@ async function placementStarted(state, placement, assignment, envelope) {
     placement.phase = "Starting";
     if (runtime !== undefined) await runtimeFilled(state, placement, runtime);
     if (placement.kind === "Job") await ownerVolumesReady(state, placement);
-    outcome = await started(state, placement, assignment, envelope);
+    outcome = await memoryStarted(state, placement, (cut) =>
+      started(state, placement, assignment, envelope, cut),
+    );
   } catch (failure) {
     if (runtime?.volumes !== undefined)
       await fillRemoved(state, placement.name, runtime.volumes.fill);
@@ -2011,7 +2342,9 @@ function placementFailure(placement, failure) {
   if (placement.controller.signal.aborted)
     return "was stopped before it started";
   if (failure instanceof Error && failure.name === "AbortError")
-    return "was not started: its image was not pulled by the assignment's deadline";
+    return placement.phase === "Held"
+      ? `was not started: ${memoryHeldLate} by the assignment's deadline`
+      : "was not started: its image was not pulled by the assignment's deadline";
   return `was not started: ${failure instanceof Error ? failure.message : String(failure)}`;
 }
 
@@ -2080,6 +2413,9 @@ async function placed(state, assignment, kind) {
     deadlineEpochSecs:
       Math.floor(placedMs / 1000) +
       Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    memoryMib: assignment.memoryMib,
+    runSecs: Math.min(assignment.deadlineSecs, bounds.timeoutSecsMax),
+    holding: false,
     credential,
     runtime:
       kind === "Job" && assignment.runtime !== undefined
@@ -2258,6 +2594,7 @@ export function containerBackend(settings, seams) {
           ),
     logFailures: new Map(),
     disk: diskFloor(checked.diskFreeBytesMin, seams.diskFree),
+    memory: memoryBudget(checked.memoryFreeBytesMin, checked.memoryLock),
   };
   return {
     place: (assignment, kind) => placed(state, assignment, kind),
@@ -2272,10 +2609,15 @@ export function containerBackend(settings, seams) {
         image: placement.image,
         phase: placement.phase,
         deadlineEpochSecs: placement.deadlineEpochSecs,
+        memoryMib: placement.memoryMib,
+        ...(placement.waiting === undefined
+          ? {}
+          : { waiting: placement.waiting }),
       })),
     containers: async () => (await poolContainers(state)).map(poolContainer),
     imagesReclaimed: (signal) => state.images.reclaimed(signal),
-    jobsTaken: () => state.disk?.jobsTaken ?? true,
+    jobsTaken: () =>
+      (state.disk?.jobsTaken ?? true) && (state.memory?.jobsTaken ?? true),
     settled: async () => {
       await Promise.all(
         [...state.placements.values()].map((placement) => placement.done),

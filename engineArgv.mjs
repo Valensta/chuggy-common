@@ -74,6 +74,18 @@ export const fillLabel = "io.chuggy.fill";
 export const ownerVolumeLabel = "io.chuggy.owner-volume";
 /** The label of an owner's named volume that is one project's alone, whose value names that project. */
 export const ownerVolumeProjectLabel = "io.chuggy.owner-volume.project";
+/**
+ * The labels of a job's hold on its engine's memory, a volume whose
+ * `heldLabel` names the pool label's value of the runner holding it, beside
+ * `assignmentLabel`. A hold carries no `poolLabel`, so no listing of a pool's
+ * containers or volumes takes one for its own.
+ */
+export const heldLabel = "io.chuggy.held";
+export const heldMemoryLabel = "io.chuggy.held.memory-mib";
+export const heldSinceLabel = "io.chuggy.held.since-ms";
+export const heldProcessLabel = "io.chuggy.held.pid";
+export const heldUntilLabel = "io.chuggy.held.until-ms";
+export const heldStartingLabel = "io.chuggy.held.starting";
 
 /**
  * Every path `runArgv` mounts in a workload's container, whichever of them a
@@ -608,6 +620,60 @@ export function listArgv(pool, assignment) {
       ? []
       : ["--filter", `label=${assignmentLabel}=${assignment}`]),
   ];
+}
+
+/** Every running container on the engine, whoever ran it. */
+export function runningListArgv() {
+  return ["ps", "--quiet", "--no-trunc"];
+}
+
+/**
+ * What each running container uses of memory, a line each: its name, then
+ * its use and its limit as the engine prints them, which docker counts in
+ * binary units and podman in decimal ones.
+ */
+export function memoryStatsArgv() {
+  return ["stats", "--no-stream", "--format", "{{.Name}} {{.MemUsage}}"];
+}
+
+/**
+ * @typedef {object} MemoryHoldLabels
+ * @property {string} name the hold's volume
+ * @property {string} pool the pool label's value of the runner holding it
+ * @property {string} assignment
+ * @property {number} memoryMib the job's cap
+ * @property {number} heldMs when it was first held
+ * @property {number} pid the process holding it
+ * @property {number} untilMs when its assignment's deadline passes
+ * @property {boolean} starting whether it was made for a job decided to start, rather than one held for room
+ */
+
+/** @param {MemoryHoldLabels} hold */
+export function heldCreateArgv(hold) {
+  return [
+    "volume",
+    "create",
+    "--label",
+    `${heldLabel}=${hold.pool}`,
+    "--label",
+    `${assignmentLabel}=${hold.assignment}`,
+    "--label",
+    `${heldMemoryLabel}=${String(hold.memoryMib)}`,
+    "--label",
+    `${heldSinceLabel}=${String(hold.heldMs)}`,
+    "--label",
+    `${heldProcessLabel}=${String(hold.pid)}`,
+    "--label",
+    `${heldUntilLabel}=${String(hold.untilMs)}`,
+    "--label",
+    `${heldStartingLabel}=${String(hold.starting)}`,
+    hold.name,
+  ];
+}
+
+/** Every hold on the engine, whichever runner made it. */
+export function heldListArgv() {
+  return ["volume", "ls", "--quiet", "--filter", `label=${heldLabel}`];
 }
 
 /** @param {readonly string[]} containers */

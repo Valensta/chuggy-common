@@ -5,8 +5,8 @@
  * chuggy's `src/interpreter/workerPoolClient.ts` is the same loop in
  * TypeScript, and a change to one is a change to both, but for a runner's
  * update of itself, which that cluster client never makes, and a backend
- * that takes no job while its disk is low, which a cluster leaves to its
- * kubelet.
+ * that takes no job while its disk is low or its engine's memory has no
+ * room, which a cluster leaves to its kubelet.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
@@ -83,7 +83,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent, whichever kind it is
  * @property {() => Promise<readonly WorkerPoolHeld[]>} held every workload of either kind, each with the kind it was placed as
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
- * @property {() => boolean} [jobsTaken] whether it takes a job now, as its last `held` found; false while its machine's disk is low, and true for a backend without it
+ * @property {() => boolean} [jobsTaken] whether it takes a job now, as its last `held` found; false while its machine's disk is low or its engine's memory has no room, and true for a backend that keeps neither
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
  *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease}
