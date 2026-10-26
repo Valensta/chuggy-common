@@ -11,6 +11,11 @@
  * 28 does, and a removal of the last name of an image a container was run
  * from is refused in docker 28's words, as its classic store refuses it once
  * every other name is gone.
+ *
+ * A CONTAINER'S MEMORY is the cap `--memory` ran it with, which an inspection
+ * answers as docker's `HostConfig.Memory`, and what `stats` prints it uses,
+ * which is `usedBytes`, in docker's binary units. `info` answers the engine's
+ * own memory in docker's words and podman's alike.
  */
 
 import { Buffer } from "node:buffer";
@@ -35,6 +40,8 @@ import { dirname } from "node:path";
  * @property {string[]} [command] what it was run with after its image
  * @property {string} [entrypoint]
  * @property {string} [log] what `logs` prints of it, which is a line naming it where none
+ * @property {number} [memoryBytes] its cap, none where 0
+ * @property {number} [usedBytes] what `stats` prints it uses, none where absent
  *
  * @typedef {object} FakeVolume
  * @property {Record<string, string>} labels
@@ -249,6 +256,8 @@ function fakeEngineState() {
      */
     contextHost: "unix:///var/run/docker.sock",
     nextId: 1,
+    /** The engine's memory, as `info` answers it. */
+    memTotalBytes: 16 * 2 ** 30,
     /**
      * An answer a suite gives a call in the engine's place, or nothing to
      * leave the call to the engine.
@@ -324,6 +333,49 @@ function filled(state, call, image) {
 }
 
 /**
+ * The bytes a `run`'s `--memory` caps it at, which is a count of MiB as the
+ * runner writes it; 0 where none.
+ *
+ * @param {string[]} argv
+ */
+function runMemoryBytes(argv) {
+  const [memory] = flagValues(argv, "--memory");
+  return memory === undefined ? 0 : Number(memory.replace(/m$/u, "")) * 2 ** 20;
+}
+
+/**
+ * Bytes as docker's `units.BytesSize` prints them, in binary units.
+ *
+ * @param {number} bytes
+ */
+function binarySize(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${String(Number(value.toPrecision(4)))}${units[unit]}`;
+}
+
+/**
+ * What `stats` prints of each running container: its name, its use and its
+ * limit, which is the engine's memory where it has no cap.
+ *
+ * @param {FakeEngineState} state
+ */
+function statsPrinted(state) {
+  return [...state.containers.values()]
+    .filter((container) => container.status === "running")
+    .map(
+      (container) =>
+        `${container.name} ${binarySize(container.usedBytes ?? 0)} / ${binarySize(container.memoryBytes || state.memTotalBytes)}\n`,
+    )
+    .join("");
+}
+
+/**
  * @param {FakeEngineState} state
  * @param {FakeCall} call
  */
@@ -354,6 +406,7 @@ function run(state, call) {
     status: unstarted ? "created" : "running",
     image,
     env,
+    memoryBytes: runMemoryBytes(argv),
     exitCode: unstarted ? 127 : 0,
     volumes: flagValues(argv, "--volume"),
     command,
@@ -381,6 +434,7 @@ function inspected(state, references) {
             Id: container.id,
             Name: `/${container.name}`,
             Config: { Labels: container.labels, Env: container.env ?? null },
+            HostConfig: { Memory: container.memoryBytes ?? 0 },
             State: {
               Status: container.status,
               ExitCode: container.exitCode,
@@ -459,17 +513,31 @@ function networked(state, network, verb) {
 }
 
 /**
- * The labels a listing's `--filter`s ask for, as key and value.
+ * The labels a listing's `--filter`s ask for, as key and value, the value
+ * none where a filter asks only that the label is there.
  *
  * @param {string[]} argv
+ * @returns {[string, string | undefined][]}
  */
 function labelFilters(argv) {
   return flagValues(argv, "--filter")
     .filter((filter) => filter.startsWith("label="))
     .map((filter) => {
       const [key, ...value] = filter.replace(/^label=/u, "").split("=");
-      return [key, value.join("=")];
+      return [key, value.length === 0 ? undefined : value.join("=")];
     });
+}
+
+/**
+ * Whether labels pass every one of a listing's label filters.
+ *
+ * @param {Record<string, string>} labels
+ * @param {[string, string | undefined][]} wanted
+ */
+function labelsMatched(labels, wanted) {
+  return wanted.every(([key, value]) =>
+    value === undefined ? Object.hasOwn(labels, key) : labels[key] === value,
+  );
 }
 
 /**
@@ -536,9 +604,7 @@ function volumed(state, call) {
     const wanted = labelFilters(argv);
     return answered(
       [...state.volumes]
-        .filter(([, volume]) =>
-          wanted.every(([key, value]) => volume.labels[key] === value),
-        )
+        .filter(([, volume]) => labelsMatched(volume.labels, wanted))
         .map(([listed]) => `${listed}\n`)
         .join(""),
     );
@@ -679,8 +745,13 @@ function answer(state, call) {
     return state.podmanServiceRemote === undefined
       ? failed("Error: cannot connect to Podman")
       : answered(`${state.podmanServiceRemote}\n`);
+  if (verb === "info" && call.argv[2] === "{{json .}}")
+    return answered(
+      `${JSON.stringify({ MemTotal: state.memTotalBytes, host: { memTotal: state.memTotalBytes }, SecurityOptions: state.securityOptions })}\n`,
+    );
   if (verb === "info")
     return answered(`${JSON.stringify(state.securityOptions)}\n`);
+  if (verb === "stats") return answered(statsPrinted(state));
   if (verb === "context")
     return state.contextHost === undefined
       ? failed('context "default": context not found')
@@ -692,7 +763,8 @@ function answer(state, call) {
       [...state.containers.values()]
         .filter(
           (container) =>
-            wanted.every(([key, value]) => container.labels[key] === value) &&
+            (call.argv.includes("--all") || container.status === "running") &&
+            labelsMatched(container.labels, wanted) &&
             ancestorsMatched(state, container, call.argv),
         )
         .map((container) => `${container.id}\n`)

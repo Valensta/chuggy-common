@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { setImmediate } from "node:timers/promises";
+import { setImmediate, setTimeout as waited } from "node:timers/promises";
 
 import {
   mintedCredentialDirectory,
@@ -41,7 +41,11 @@ import {
   fakeImageId,
   unstartedEntrypoint,
 } from "./engine.fixture.mjs";
-import { ownerVolumeCreateArgv, ownerVolumesOpenArgv } from "./engineArgv.mjs";
+import {
+  heldCreateArgv,
+  ownerVolumeCreateArgv,
+  ownerVolumesOpenArgv,
+} from "./engineArgv.mjs";
 import {
   jobEngineSocket,
   jobEnvelope,
@@ -135,6 +139,7 @@ async function harness(t, overrides = {}, seams = {}) {
   });
   return {
     backend,
+    engine,
     state,
     clock,
     log,
@@ -4063,4 +4068,429 @@ test("a log longer than a saved log's bound is saved as its end, opening with th
       `${savedLogCutLine}${end}`,
     );
   }
+});
+
+const memoryGib = 2 ** 30;
+
+/**
+ * A backend keeping 2 GiB of its fake engine's 16 GiB free, whose held job's
+ * every check waits for `checked()`, which moves its clock on by the wait.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {Partial<import("./containerBackend.mjs").ContainerBackendSettings>} [overrides]
+ * @param {Partial<import("./containerBackend.mjs").ContainerBackendSeams>} [seams]
+ * @param {string} [lockFile] another backend's, which shares its engine through `seams`
+ */
+async function memoryHarness(t, overrides = {}, seams = {}, lockFile) {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-memory-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  /** @type {(() => void)[]} */
+  const waits = [];
+  const memoryLock = lockFile ?? join(directory, "memory", "podman.lock");
+  const context = await harness(
+    t,
+    { memoryFreeBytesMin: 2 * memoryGib, memoryLock, ...overrides },
+    {
+      sleep: (ms, signal) =>
+        new Promise((resolve, reject) => {
+          waits.push(() => {
+            context.clock.nowMs += ms;
+            resolve();
+          });
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+      ...seams,
+    },
+  );
+  context.state.images.add(image);
+  return {
+    ...context,
+    memoryLock,
+    /** Ends one held check's wait. */
+    checked: () => waits.shift()?.(),
+    waiting: () => waits.length,
+  };
+}
+
+/**
+ * Waits, in real time, since the memory lock is polled in it, until `ready`.
+ *
+ * @param {() => boolean} ready
+ */
+async function until(ready) {
+  for (let tries = 0; tries < 1000; tries += 1) {
+    if (ready()) return;
+    await waited(5);
+  }
+  assert.fail("what the test waited for never came");
+}
+
+/**
+ * A running container on the engine, labelled as given and capped where a
+ * cap is given.
+ *
+ * @param {ReturnType<typeof fakeEngine>["state"]} state
+ * @param {string} name
+ * @param {{labels?: Record<string, string>, memoryBytes?: number, usedBytes?: number}} what
+ */
+function occupied(state, name, what) {
+  state.containers.set(name, {
+    id: `id-${name}`,
+    name,
+    status: "running",
+    image: "registry.example/other",
+    labels: what.labels ?? {},
+    memoryBytes: what.memoryBytes ?? 0,
+    usedBytes: what.usedBytes ?? 0,
+  });
+}
+
+const otherPool = { tenant: "vteng", project: "chuggy", pool: "other" };
+
+/** @param {ReturnType<typeof fakeEngine>["state"]} state */
+const holdNames = (state) =>
+  [...state.volumes.entries()]
+    .filter(([, volume]) => volume.labels["io.chuggy.held"] !== undefined)
+    .map(([name]) => name);
+
+/** @param {ReturnType<typeof fakeEngine>["state"]} state */
+const runningWorkloads = (state) =>
+  [...state.containers.values()]
+    .filter(
+      (container) =>
+        container.status === "running" &&
+        container.labels["io.chuggy.kind"] === "Job",
+    )
+    .map(({ name }) => name);
+
+test("a pass counts every service's workloads at their caps, sessions among them, and everything else at its use", async (t) => {
+  const { backend, state } = await memoryHarness(t);
+  occupied(state, "chuggy-other-job", {
+    labels: { "io.chuggy.pool": "vteng/chuggy/other", "io.chuggy.kind": "Job" },
+    memoryBytes: 4 * memoryGib,
+  });
+  occupied(state, "chuggy-shame-session", {
+    labels: {
+      "io.chuggy.pool": "vteng/chuggy/shame",
+      "io.chuggy.kind": "Session",
+    },
+    memoryBytes: 4 * memoryGib,
+  });
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 5.5 * memoryGib });
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+
+  occupied(state, "chuggy-jobs-postgres", {
+    usedBytes: 5.5 * memoryGib + 2 ** 20,
+  });
+  await backend.held();
+  assert.equal(backend.jobsTaken(), false);
+});
+
+test("a pass's room is what its own placements will take less, and no job is taken while it is under the least a job asks", async (t) => {
+  const { backend, state, log } = await memoryHarness(t);
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 9 * memoryGib });
+  const pull = deferred();
+  state.pull = () => pull.promise;
+  state.images.delete(image);
+  await backend.place(assignment({ memoryMib: 4096 }), "Job");
+  await setImmediate();
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+  await backend.place(
+    assignment({ assignment: "asg-2", memoryMib: 1024 }),
+    "Session",
+  );
+  await backend.held();
+  assert.equal(backend.jobsTaken(), false);
+  assert.deepEqual(
+    log.filter((line) => line.startsWith("this engine")),
+    [
+      "this engine has 5 GiB of room in its 14 GiB memory budget, under the 0.5 GiB a job needs: this runner takes no job until it has more",
+    ],
+  );
+  pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
+  await backend.settled();
+});
+
+test("a job that does not fit the room is held, and is started once a later check finds room, its deadline counted from its start", async (t) => {
+  const { backend, state, log, checked, waiting } = await memoryHarness(t);
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 8 * memoryGib });
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 8192 }), "Job");
+  await until(() => waiting() === 1);
+
+  const name = containerName(pool, "asg-1");
+  assert.deepEqual(backend.inFlight(), [
+    {
+      assignment: "asg-1",
+      kind: "Job",
+      name,
+      image,
+      phase: "Held",
+      deadlineEpochSecs: startMs / 1000 + 3600,
+      memoryMib: 8192,
+      waiting: "needs 8 GiB, room 6 GiB",
+    },
+  ]);
+  assert.deepEqual(holdNames(state), [`${name}-held`]);
+  assert.deepEqual(state.volumes.get(`${name}-held`)?.labels, {
+    "io.chuggy.held": "vteng/chuggy/shame",
+    "io.chuggy.assignment": "asg-1",
+    "io.chuggy.held.memory-mib": "8192",
+    "io.chuggy.held.since-ms": String(startMs),
+    "io.chuggy.held.pid": String(process.pid),
+  });
+  assert.deepEqual(await backend.held(), heldJobs("asg-1"));
+  assert.equal(backend.jobsTaken(), false);
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+
+  checked();
+  await until(() => waiting() === 1);
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+
+  state.containers.delete("chuggy-jobs-postgres");
+  checked();
+  await backend.settled();
+  assert.deepEqual(runningWorkloads(state), [name]);
+  assert.equal(
+    state.containers.get(name)?.labels["io.chuggy.deadline"],
+    String(startMs / 1000 + 30 + 3600),
+  );
+  assert.deepEqual(holdNames(state), []);
+  assert.deepEqual(
+    log.filter((line) => line.startsWith(name)),
+    [
+      `${name} is held for room on this engine: needs 8 GiB, room 6 GiB`,
+      `${name} started`,
+    ],
+  );
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+});
+
+test("another service's hold is counted against this one's room, and neither takes a job while either holds one", async (t) => {
+  const first = await memoryHarness(t);
+  const second = await memoryHarness(
+    t,
+    { pool: otherPool },
+    { engine: first.engine },
+    first.memoryLock,
+  );
+  await first.engine.exec(
+    heldCreateArgv({
+      name: "chuggy-third-later-held",
+      pool: "vteng/chuggy/third",
+      assignment: "asg-later",
+      memoryMib: 6144,
+      heldMs: startMs + 1,
+      pid: process.pid,
+    }),
+  );
+  await first.backend.held();
+  await second.backend.held();
+  assert.equal(first.backend.jobsTaken(), false);
+  assert.equal(second.backend.jobsTaken(), false);
+
+  await first.backend.place(assignment({ memoryMib: 10240 }), "Job");
+  await until(() => first.waiting() === 1);
+  assert.equal(
+    first.backend.inFlight()[0]?.waiting,
+    "needs 10 GiB, room 8 GiB",
+  );
+  first.backend.stop("asg-1");
+  await first.backend.settled();
+});
+
+test("two services starting into the same room start one, and the other is held behind its hold until there is room", async (t) => {
+  const first = await memoryHarness(t);
+  const second = await memoryHarness(
+    t,
+    { pool: otherPool },
+    { engine: first.engine },
+    first.memoryLock,
+  );
+  const { state } = first;
+  second.state.images.delete(image);
+  await first.backend.held();
+  await second.backend.held();
+  await Promise.all([
+    first.backend.place(assignment({ memoryMib: 8192 }), "Job"),
+    second.backend.place(
+      assignment({ assignment: "asg-2", memoryMib: 8192 }),
+      "Job",
+    ),
+  ]);
+  await until(() => first.waiting() + second.waiting() === 1);
+  const [held] = [first, second].filter(({ waiting }) => waiting() === 1);
+  const [ran] = [first, second].filter(({ waiting }) => waiting() === 0);
+  assert.ok(held !== undefined && ran !== undefined);
+  await ran.backend.settled();
+  assert.equal(runningWorkloads(state).length, 1);
+  assert.equal(held.backend.inFlight()[0]?.phase, "Held");
+  assert.equal(holdNames(state).length, 1);
+  await held.backend.held();
+  assert.equal(held.backend.jobsTaken(), false);
+
+  held.checked();
+  await until(() => held.waiting() === 1);
+  assert.equal(runningWorkloads(state).length, 1);
+
+  const [started] = runningWorkloads(state);
+  const container = state.containers.get(started ?? "");
+  if (container !== undefined) container.status = "exited";
+  held.checked();
+  await held.backend.settled();
+  assert.equal(runningWorkloads(state).length, 1);
+  assert.deepEqual(holdNames(state), []);
+});
+
+test("a job asking more than the memory budget is refused, naming it, and one within it is placed", async (t) => {
+  const { backend } = await memoryHarness(t);
+  await backend.held();
+  assert.deepEqual(
+    await backend.place(assignment({ memoryMib: 14337 }), "Job"),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment asks for 14337 MiB and this runner's memory budget is 14336 MiB: the engine's 16384 MiB less the 2048 MiB this runner keeps free",
+    },
+  );
+  assert.deepEqual(
+    await backend.place(
+      assignment({ assignment: "asg-2", memoryMib: 14336 }),
+      "Job",
+    ),
+    { placed: "Placed" },
+  );
+  await backend.settled();
+});
+
+test("a held job stopped, or past its deadline, leaves no hold", async (t) => {
+  const { backend, state, log, checked, waiting } = await memoryHarness(t);
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 12 * memoryGib });
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 4096 }), "Job");
+  await until(() => waiting() === 1);
+  assert.equal(holdNames(state).length, 1);
+  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  assert.deepEqual(holdNames(state), []);
+  const name = containerName(pool, "asg-1");
+  assert.ok(log.includes(`${name} was stopped before it started`));
+
+  await backend.place(
+    assignment({ assignment: "asg-2", memoryMib: 4096, deadlineSecs: 40 }),
+    "Job",
+  );
+  await until(() => waiting() === 1);
+  checked();
+  await until(() => waiting() === 1);
+  checked();
+  await until(() => waiting() === 1);
+  checked();
+  await backend.settled();
+  assert.deepEqual(holdNames(state), []);
+  assert.ok(
+    log.includes(
+      `${containerName(pool, "asg-2")} was not started: it had no room on this engine by the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
+});
+
+test("a hold whose runner is no longer running is not counted and is removed, and one of this pool's no placement makes is removed", async (t) => {
+  const { backend, engine, state, log } = await memoryHarness(
+    t,
+    {},
+    { holderAlive: (pid) => pid !== 4242 },
+  );
+  for (const [name, holder, ownPool] of /** @type {const} */ ([
+    ["chuggy-other-gone-held", 4242, "vteng/chuggy/other"],
+    ["chuggy-shame-left-held", process.pid, "vteng/chuggy/shame"],
+    ["chuggy-other-live-held", process.pid, "vteng/chuggy/other"],
+  ]))
+    await engine.exec(
+      heldCreateArgv({
+        name,
+        pool: ownPool,
+        assignment: `asg-${name}`,
+        memoryMib: 1024,
+        heldMs: startMs,
+        pid: holder,
+      }),
+    );
+  await backend.held();
+  assert.deepEqual(holdNames(state), ["chuggy-other-live-held"]);
+  assert.deepEqual(
+    log.filter((line) => line.startsWith("the hold")),
+    [
+      "the hold chuggy-other-gone-held, whose runner is no longer running, was removed",
+      "the hold chuggy-shame-left-held, which no placement of this runner's makes, was removed",
+    ],
+  );
+  assert.equal(backend.jobsTaken(), false);
+  state.volumes.delete("chuggy-other-live-held");
+  await backend.held();
+  assert.equal(backend.jobsTaken(), true);
+});
+
+test("a count the engine cannot answer takes no job and starts none", async (t) => {
+  const { backend, state, log, waiting } = await memoryHarness(t);
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: memoryGib });
+  state.intercept = (call) =>
+    call.argv[0] === "stats"
+      ? {
+          code: 125,
+          stdout: "",
+          stderr: "Error: cgroups v1 is not supported\n",
+        }
+      : undefined;
+  await backend.held();
+  assert.equal(backend.jobsTaken(), false);
+  await backend.place(assignment(), "Job");
+  await until(() => waiting() === 1);
+  assert.equal(
+    backend.inFlight()[0]?.waiting,
+    "the engine's memory could not be counted: podman could not say what its containers use: Error: cgroups v1 is not supported",
+  );
+  assert.ok(
+    log.includes(
+      "this engine's memory could not be counted, so this runner takes no job: podman could not say what its containers use: Error: cgroups v1 is not supported",
+    ),
+  );
+  await backend.stop("asg-1");
+  await backend.settled();
+});
+
+test("a session is started however full the engine is, and a backend with no budget counts nothing", async (t) => {
+  const { backend, state } = await memoryHarness(t);
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 15 * memoryGib });
+  await backend.held();
+  await backend.place(assignment(), "Session");
+  await backend.settled();
+  assert.ok(state.calls.some((call) => call.argv[0] === "run"));
+  assert.deepEqual(holdNames(state), []);
+
+  const none = await harness(t);
+  none.state.images.add(image);
+  await none.backend.held();
+  await none.backend.place(assignment(), "Job");
+  await none.backend.settled();
+  assert.ok(
+    !none.state.calls.some(
+      (call) =>
+        call.argv[0] === "stats" || call.argv.includes("label=io.chuggy.held"),
+    ),
+  );
+  for (const [key, value] of /** @type {const} */ ([
+    ["memoryFreeBytesMin", -1],
+    ["memoryFreeBytesMin", 0.5],
+    ["memoryLock", ""],
+  ]))
+    assert.throws(
+      () => checkedContainerBackendSettings({ ...none.settings, [key]: value }),
+      RangeError,
+    );
 });
