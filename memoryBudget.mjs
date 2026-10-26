@@ -9,24 +9,27 @@
  * and a memory cap, as a runner runs each workload, at that cap whichever
  * runner ran it; and every other, such as what a job started through the
  * engine's socket, at what the engine says it uses. A job held for room, or
- * about to start into it, is counted at its cap by its hold. What is left is
- * the room.
+ * about to start into it, is counted at its cap by its hold until its
+ * container runs, and then by its container alone. What is left is the room.
  *
  * WHAT IS APPROXIMATE: a container counted by its use is counted at what it
  * used when the engine was asked, so its growth, and what a job starts once
  * it runs, are counted only by a later count; what the engine and its machine
- * use outside every container is only what the runner keeps free; and a
+ * use outside every container is only what the runner keeps free; a
  * container counted at its cap is counted at what it may take, not at what it
- * takes.
+ * takes; and where the engine refuses to say what its containers use, as
+ * rootless podman on cgroup v1 does, every container counted by its use is
+ * counted at none, which the count says.
  *
  * A HOLD IS A VOLUME, which every runner on the engine lists whatever its
  * user, and which needs no image and runs nothing. It carries the job's
- * assignment, its cap, when it was first held and the process holding it.
- * One whose process is not running is abandoned: no count counts it, and
- * whichever runner finds it removes it. A process number another process has
- * since taken keeps a hold until that process ends, or until the hold's own
- * pool's runner, which removes every hold of its pool it is not holding,
- * counts again.
+ * assignment, its cap, when it was first held, the process holding it and
+ * when the assignment's deadline passes. One whose process is not running, or
+ * whose deadline has passed, is abandoned: no count counts it, and whichever
+ * runner finds it removes it, so a process number another process has since
+ * taken keeps a hold no longer than its deadline. Holds are listed before
+ * what is running, so a job whose container starts and whose hold goes while
+ * the engine is counted is counted by the one or the other.
  *
  * A JOB STARTS ONLY INTO ROOM. Its runner counts, decides and makes its hold
  * in one hold of a lock that every runner using the engine as this user
@@ -59,6 +62,7 @@ import {
   heldMemoryLabel,
   heldProcessLabel,
   heldSinceLabel,
+  heldUntilLabel,
   inspectArgv,
   memoryStatsArgv,
   poolLabel,
@@ -78,7 +82,9 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @property {number} engineBytes the engine's memory
  * @property {number} cappedBytes every running container a runner ran, at its cap
  * @property {number} usedBytes every other running container, at its use
- * @property {readonly MemoryHold[]} holds every hold whose process is running
+ * @property {string} [unmeasured] why `usedBytes` counts none: the engine refused to say what its containers use
+ * @property {readonly MemoryHold[]} holds every hold not abandoned whose assignment no running container counted at its cap carries
+ * @property {readonly string[]} started the assignments the running containers counted at their caps carry
  *
  * @typedef {MemoryCount | {unknown: string}} MemoryCounted
  *
@@ -86,14 +92,18 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @property {Engine} engine
  * @property {"docker" | "podman"} name the engine's
  * @property {(pid: number) => boolean} holderAlive
+ * @property {() => number} nowMs
  * @property {AbortSignal} signal which every call of the count is made under
+ *
+ * @typedef {"Taking" | "Full" | "Held" | "Unknown"} MemoryBudgetState whether a count takes jobs, and why not
  *
  * @typedef {object} MemoryBudget
  * @property {number} bytesFree what its runner keeps free of the engine's memory
  * @property {string} lockFile the memory lock's
  * @property {MemoryCounted | undefined} counted what the last `held` found, none before the first
  * @property {boolean} jobsTaken
- * @property {"Taking" | "Full" | "Held" | "Unknown"} said what was last logged of it, `Taking` before anything was
+ * @property {MemoryBudgetState} said what was last logged of it, `Taking` before anything was
+ * @property {boolean} saidUnmeasured whether the use was last logged as counted at none
  *
  * @typedef {{decided: "Start"} | {decided: "Hold", why: string}} MemoryDecision
  */
@@ -222,8 +232,8 @@ const memoryInspectedSchema = z.array(
 );
 
 /**
- * Every running container, by name, with its labels and its cap, which is 0
- * where it has none. One removed since the listing is left out.
+ * Every running container, by name, with its assignment and its cap, which is
+ * 0 where it has none. One removed since the listing is left out.
  *
  * @param {MemoryCountPorts} ports
  */
@@ -245,6 +255,7 @@ async function memoryRunning(ports) {
     "an inspection",
   ).map((inspected) => ({
     name: inspected.Name.replace(/^\//u, ""),
+    assignment: inspected.Config.Labels?.[assignmentLabel],
     capped:
       inspected.Config.Labels?.[poolLabel] !== undefined &&
       (inspected.HostConfig?.Memory ?? 0) > 0,
@@ -253,20 +264,25 @@ async function memoryRunning(ports) {
 }
 
 /**
- * What these running containers use together, as the engine says. One it
- * names no use of has ended since it was listed.
+ * What these running containers use together, as the engine says, or none
+ * and why where it refuses to say. One it names no use of has ended since it
+ * was listed.
  *
  * @param {MemoryCountPorts} ports
  * @param {ReadonlySet<string>} names
+ * @returns {Promise<{usedBytes: number, unmeasured?: string}>}
  */
 async function memoryUsedBytes(ports, names) {
-  const { stdout } = await memoryAsked(
-    ports,
-    memoryStatsArgv(),
-    "what its containers use",
-  );
+  const answer = await ports.engine.exec(memoryStatsArgv(), {
+    signal: ports.signal,
+  });
+  if (answer.code !== 0)
+    return {
+      usedBytes: 0,
+      unmeasured: `${ports.name} could not say what its containers use: ${engineFailureLine(answer)}`,
+    };
   let used = 0;
-  for (const line of stdout.split("\n")) {
+  for (const line of answer.stdout.split("\n")) {
     const match = /^(\S+) (\S+) \/ /u.exec(line.trim());
     if (match === null || !names.has(match[1])) continue;
     const bytes = memorySizeBytes(match[2]);
@@ -276,7 +292,7 @@ async function memoryUsedBytes(ports, names) {
       );
     used += bytes;
   }
-  return used;
+  return { usedBytes: used };
 }
 
 const memoryHeldVolumesSchema = z.array(
@@ -299,6 +315,7 @@ function memoryHoldRead(name, labels) {
   const memoryMib = Number(labels[heldMemoryLabel]);
   const heldMs = Number(labels[heldSinceLabel]);
   const pid = Number(labels[heldProcessLabel]);
+  const untilMs = Number(labels[heldUntilLabel]);
   if (
     pool === undefined ||
     assignment === undefined ||
@@ -306,14 +323,16 @@ function memoryHoldRead(name, labels) {
     memoryMib <= 0 ||
     !Number.isSafeInteger(heldMs) ||
     !Number.isSafeInteger(pid) ||
-    pid <= 0
+    pid <= 0 ||
+    !Number.isSafeInteger(untilMs)
   )
     return undefined;
-  return { name, pool, assignment, memoryMib, heldMs, pid };
+  return { name, pool, assignment, memoryMib, heldMs, pid, untilMs };
 }
 
 /**
- * Every hold on the engine, those whose process is not running apart.
+ * Every hold on the engine, those abandoned apart: whose process is not
+ * running, or whose deadline has passed.
  *
  * @param {MemoryCountPorts} ports
  */
@@ -343,7 +362,8 @@ async function memoryHoldsListed(ports) {
   )) {
     const hold = memoryHoldRead(volume.Name, volume.Labels ?? {});
     if (hold === undefined) continue;
-    if (ports.holderAlive(hold.pid)) holds.push(hold);
+    if (ports.holderAlive(hold.pid) && hold.untilMs > ports.nowMs())
+      holds.push(hold);
     else abandoned.push(hold.name);
   }
   return { holds, abandoned };
@@ -359,18 +379,30 @@ async function memoryHoldsListed(ports) {
 export async function memoryCounted(ports) {
   try {
     const engineBytes = await memoryEngineBytes(ports);
+    const { holds, abandoned } = await memoryHoldsListed(ports);
     const running = await memoryRunning(ports);
+    const capped = running.filter((container) => container.capped);
+    const started = capped.flatMap(({ assignment }) =>
+      assignment === undefined ? [] : [assignment],
+    );
     const measured = new Set(
       running.filter(({ capped }) => !capped).map(({ name }) => name),
     );
-    const usedBytes =
-      measured.size === 0 ? 0 : await memoryUsedBytes(ports, measured);
-    const { holds, abandoned } = await memoryHoldsListed(ports);
-    const cappedBytes = running
-      .filter(({ capped }) => capped)
-      .reduce((sum, { memoryBytes }) => sum + memoryBytes, 0);
+    const used =
+      measured.size === 0
+        ? { usedBytes: 0 }
+        : await memoryUsedBytes(ports, measured);
     return {
-      counted: { engineBytes, cappedBytes, usedBytes, holds },
+      counted: {
+        engineBytes,
+        cappedBytes: capped.reduce(
+          (sum, { memoryBytes }) => sum + memoryBytes,
+          0,
+        ),
+        ...used,
+        holds: holds.filter(({ assignment }) => !started.includes(assignment)),
+        started,
+      },
       abandoned,
     };
   } catch (failure) {
@@ -467,13 +499,14 @@ function memoryHoldOlder(hold, other) {
 }
 
 /**
- * Whether a job starts into the room a count leaves it: where no other hold
- * is older than its own and it fits the room its own hold leaves. Otherwise
- * it is held, and why says what it waits for.
+ * Whether a job starts into the room a count leaves it: where its container
+ * is already running, and so counted, or where no other hold is older than
+ * its own and it fits the room its own hold leaves. Otherwise it is held, and
+ * why says what it waits for.
  *
  * @param {number} bytesFree
  * @param {MemoryCounted} counted
- * @param {Pick<MemoryHold, "name" | "memoryMib" | "heldMs">} job
+ * @param {Pick<MemoryHold, "name" | "assignment" | "memoryMib" | "heldMs">} job
  * @returns {MemoryDecision}
  */
 export function memoryStartDecided(bytesFree, counted, job) {
@@ -482,6 +515,7 @@ export function memoryStartDecided(bytesFree, counted, job) {
       decided: "Hold",
       why: `the engine's memory could not be counted: ${counted.unknown}`,
     };
+  if (counted.started.includes(job.assignment)) return { decided: "Start" };
   const [oldest] = counted.holds
     .filter((hold) => hold.name !== job.name && memoryHoldOlder(hold, job))
     .toSorted((a, b) => (memoryHoldOlder(a, b) ? -1 : 1));
@@ -511,29 +545,56 @@ export function memoryBudget(bytesFree, lockFile) {
     counted: undefined,
     jobsTaken: true,
     said: "Taking",
+    saidUnmeasured: false,
   };
+}
+
+/**
+ * Whether a count takes jobs, and why not: it is unknown, a job on the engine
+ * is held, or the room left once `placingBytes` is taken is short.
+ *
+ * @param {number} bytesFree
+ * @param {MemoryCounted} counted
+ * @param {number} placingBytes the caps of what the runner is placing and has made no hold for
+ * @returns {MemoryBudgetState}
+ */
+export function memoryBudgetState(bytesFree, counted, placingBytes) {
+  if ("unknown" in counted) return "Unknown";
+  if (counted.holds.length > 0) return "Held";
+  return memoryJobsTaken(bytesFree, counted, placingBytes) ? "Taking" : "Full";
+}
+
+/**
+ * Whether the use of what no runner capped was counted, logged where it
+ * differs from what was last logged. A count that failed says nothing of it.
+ *
+ * @param {MemoryBudget} budget
+ * @param {MemoryCounted} counted
+ * @param {(line: string) => void} log
+ */
+function memoryBudgetSaidUse(budget, counted, log) {
+  if ("unknown" in counted) return;
+  const unmeasured = counted.unmeasured !== undefined;
+  if (unmeasured === budget.saidUnmeasured) return;
+  budget.saidUnmeasured = unmeasured;
+  log(
+    unmeasured
+      ? `this engine's containers no runner capped are counted as using no memory, since ${String(counted.unmeasured)}`
+      : "this engine's containers no runner capped are counted at what they use again",
+  );
 }
 
 /**
  * What a pass found, logged where it differs from what was last logged.
  *
  * @param {MemoryBudget} budget
+ * @param {MemoryCounted} counted
+ * @param {MemoryBudgetState} now
  * @param {(line: string) => void} log
  */
-function memoryBudgetSaid(budget, log) {
-  const { counted } = budget;
-  if (counted === undefined) return;
-  /** @type {MemoryBudget["said"]} */
-  const now =
-    "unknown" in counted
-      ? "Unknown"
-      : counted.holds.length > 0
-        ? "Held"
-        : budget.jobsTaken
-          ? "Taking"
-          : "Full";
-  const was = budget.said;
-  if (now === was) return;
+function memoryBudgetSaid(budget, counted, now, log) {
+  memoryBudgetSaidUse(budget, counted, log);
+  if (now === budget.said) return;
   budget.said = now;
   if ("unknown" in counted) {
     log(
@@ -563,9 +624,10 @@ function memoryBudgetSaid(budget, log) {
  * @param {(line: string) => void} log
  */
 export function memoryBudgetHeld(budget, counted, placingBytes, log) {
+  const now = memoryBudgetState(budget.bytesFree, counted, placingBytes);
   budget.counted = counted;
-  budget.jobsTaken = memoryJobsTaken(budget.bytesFree, counted, placingBytes);
-  memoryBudgetSaid(budget, log);
+  budget.jobsTaken = now === "Taking";
+  memoryBudgetSaid(budget, counted, now, log);
 }
 
 /** @type {import("./fileLock.mjs").FileLockPorts} */

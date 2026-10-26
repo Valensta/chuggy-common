@@ -10,6 +10,7 @@ import { heldCreateArgv } from "./engineArgv.mjs";
 import {
   memoryBudget,
   memoryBudgetHeld,
+  memoryBudgetState,
   memoryCounted,
   memoryJobsTaken,
   memoryLocked,
@@ -21,6 +22,9 @@ import {
 
 const gib = 2 ** 30;
 const mib = 2 ** 20;
+
+/** When every count here is made. */
+const nowMs = 5000;
 
 /**
  * A container on the fake engine.
@@ -56,6 +60,7 @@ async function held(engine, hold) {
       memoryMib: 4096,
       heldMs: 1000,
       pid: 101,
+      untilMs: nowMs + 1,
       ...hold,
     }),
   );
@@ -71,6 +76,7 @@ function counted(engine, what = {}) {
     engine,
     name: what.name ?? "docker",
     holderAlive: what.alive ?? (() => true),
+    nowMs: () => nowMs,
     signal: new globalThis.AbortController().signal,
   });
 }
@@ -81,6 +87,7 @@ const count = (count = {}) => ({
   cappedBytes: 0,
   usedBytes: 0,
   holds: [],
+  started: [],
   ...count,
 });
 
@@ -139,6 +146,7 @@ test("every pool's workloads are counted at their caps, and everything else at i
     cappedBytes: 12 * gib,
     usedBytes: 656 * mib,
     holds: [],
+    started: [],
   });
   assert.deepEqual(abandoned, []);
 });
@@ -160,7 +168,7 @@ test("the engine's memory is podman's own where the engine is podman", async () 
   assert.equal("engineBytes" in found && found.engineBytes, 24 * gib);
 });
 
-test("a hold is counted at its cap whichever runner holds it, and one whose process ended is not", async () => {
+test("a hold is counted at its cap whichever runner holds it, and one whose process ended or whose deadline passed is not", async () => {
   const { engine } = fakeEngine();
   await held(engine, {
     name: "chuggy-other-x-held",
@@ -172,6 +180,7 @@ test("a hold is counted at its cap whichever runner holds it, and one whose proc
     memoryMib: 2048,
   });
   await held(engine, { name: "chuggy-shame-z-held", pid: 303 });
+  await held(engine, { name: "chuggy-shame-late-held", untilMs: nowMs });
 
   const { counted: found, abandoned } = await counted(engine, {
     alive: (pid) => pid !== 303,
@@ -200,7 +209,10 @@ test("a hold is counted at its cap whichever runner holds it, and one whose proc
       },
     ],
   );
-  assert.deepEqual(abandoned, ["chuggy-shame-z-held"]);
+  assert.deepEqual(abandoned, [
+    "chuggy-shame-z-held",
+    "chuggy-shame-late-held",
+  ]);
   assert.equal(memoryRoomBytes(2 * gib, found), 8 * gib);
 });
 
@@ -208,12 +220,12 @@ test("a count the engine cannot answer is unknown, and says why", async () => {
   const { engine, state } = fakeEngine();
   running(state, "chuggy-jobs-postgres", { usedBytes: 256 * mib });
   state.intercept = (call) =>
-    call.argv[0] === "stats"
-      ? { code: 1, stdout: "", stderr: "Error: stats are not supported\n" }
+    call.argv[0] === "volume"
+      ? { code: 1, stdout: "", stderr: "Error: volumes are not served\n" }
       : undefined;
   assert.deepEqual((await counted(engine)).counted, {
     unknown:
-      "docker could not say what its containers use: Error: stats are not supported",
+      "docker could not say what it holds: Error: volumes are not served",
   });
 
   state.intercept = (call) =>
@@ -232,6 +244,88 @@ test("a count the engine cannot answer is unknown, and says why", async () => {
   assert.deepEqual((await counted(engine)).counted, {
     unknown: "docker answered an info this runner cannot read",
   });
+});
+
+test("where the engine refuses its stats, what no runner capped is counted at none and the count says why; stats that never answer fail the count", async () => {
+  const { engine, state } = fakeEngine();
+  running(state, "chuggy-jobs-postgres", { usedBytes: 256 * mib });
+  running(state, "chuggy-shame-job", {
+    labels: { "io.chuggy.pool": "vteng/chuggy/shame" },
+    memoryBytes: 4 * gib,
+  });
+  await held(engine, { memoryMib: 1024 });
+  state.intercept = (call) =>
+    call.argv[0] === "stats"
+      ? {
+          code: 125,
+          stdout: "",
+          stderr:
+            "Error: stats is not supported in rootless mode without cgroups v2\n",
+        }
+      : undefined;
+  const { counted: refused } = await counted(engine, { name: "podman" });
+  assert.deepEqual(refused, {
+    engineBytes: 16 * gib,
+    cappedBytes: 4 * gib,
+    usedBytes: 0,
+    unmeasured:
+      "podman could not say what its containers use: Error: stats is not supported in rootless mode without cgroups v2",
+    holds: [
+      {
+        name: "chuggy-shame-aaa-held",
+        pool: "vteng/chuggy/shame",
+        assignment: "asg-held",
+        memoryMib: 1024,
+        heldMs: 1000,
+        pid: 101,
+        untilMs: nowMs + 1,
+      },
+    ],
+    started: [],
+  });
+  assert.equal(memoryRoomBytes(0, refused), 11 * gib);
+
+  state.intercept = (call) =>
+    call.argv[0] === "stats"
+      ? Promise.reject(
+          Object.assign(new Error("The operation was aborted"), {
+            name: "AbortError",
+          }),
+        )
+      : undefined;
+  assert.deepEqual((await counted(engine)).counted, {
+    unknown: "docker did not answer in time",
+  });
+});
+
+test("a job whose container starts and whose hold goes while the engine is counted is counted once, by the one or the other", async () => {
+  const { engine, state } = fakeEngine();
+  const job = {
+    labels: {
+      "io.chuggy.pool": "vteng/chuggy/shame",
+      "io.chuggy.assignment": "asg-held",
+    },
+    memoryBytes: 4 * gib,
+  };
+  running(state, "chuggy-jobs-postgres", { usedBytes: 1 * gib });
+  await held(engine, {});
+  state.intercept = (call) => {
+    if (call.argv[0] === "stats" && !state.containers.has("chuggy-shame-aaa")) {
+      running(state, "chuggy-shame-aaa", job);
+      state.volumes.delete("chuggy-shame-aaa-held");
+    }
+    return undefined;
+  };
+  const { counted: during } = await counted(engine);
+  assert.ok("holds" in during);
+  assert.equal(memoryRoomBytes(0, during), 11 * gib);
+
+  await held(engine, {});
+  const { counted: both } = await counted(engine);
+  assert.ok("holds" in both);
+  assert.deepEqual(both.holds, []);
+  assert.deepEqual(both.started, ["asg-held"]);
+  assert.equal(memoryRoomBytes(0, both), 11 * gib);
 });
 
 test("no stats are asked while every running container is a capped workload", async () => {
@@ -278,6 +372,7 @@ test("a job is claimed only while the room left is at least the least a job asks
             memoryMib: 512,
             heldMs: 0,
             pid: 1,
+            untilMs: nowMs + 1,
           },
         ],
       }),
@@ -300,6 +395,7 @@ const hold = (name, heldMs, memoryMib = 4096) => ({
   memoryMib,
   heldMs,
   pid: 1,
+  untilMs: nowMs + 1,
 });
 
 test("a job starts where it fits the room its own hold leaves, and is held where it does not", () => {
@@ -333,6 +429,18 @@ test("a job starts where it fits the room its own hold leaves, and is held where
     decided: "Hold",
     why: "the engine's memory could not be counted: why",
   });
+  assert.deepEqual(
+    memoryStartDecided(
+      free,
+      count({
+        cappedBytes: 14 * gib,
+        holds: [hold("older", 10)],
+        started: [own.assignment],
+      }),
+      own,
+    ),
+    { decided: "Start" },
+  );
 });
 
 test("a job waits behind every hold older than its own, oldest first, however it fits", () => {
@@ -354,6 +462,7 @@ test("a job waits behind every hold older than its own, oldest first, however it
   assert.deepEqual(
     memoryStartDecided(free, count({ holds: [hold("a", 60)] }), {
       name: "new",
+      assignment: "asg-new",
       memoryMib: 512,
       heldMs: 70,
     }),
@@ -399,12 +508,34 @@ test("a pass's count says what changed once, and takes no job while held, full o
   assert.equal(budget.jobsTaken, false);
   memoryBudgetHeld(budget, count(), 0, log.push.bind(log));
   assert.equal(budget.jobsTaken, true);
+  const refused = count({
+    unmeasured:
+      "podman could not say what its containers use: Error: no cgroups",
+  });
+  memoryBudgetHeld(budget, refused, 0, log.push.bind(log));
+  memoryBudgetHeld(budget, { unknown: "no answer" }, 0, log.push.bind(log));
+  memoryBudgetHeld(budget, refused, 0, log.push.bind(log));
+  assert.equal(budget.jobsTaken, true);
+  memoryBudgetHeld(budget, count(), 0, log.push.bind(log));
   assert.deepEqual(log, [
     "this engine has 0 GiB of room in its 14 GiB memory budget, under the 0.5 GiB a job needs: this runner takes no job until it has more",
     "this engine has 10 GiB of room in its 14 GiB memory budget, and a job on it is held for room: this runner takes no job until it starts",
     "this engine's memory could not be counted, so this runner takes no job: no answer",
     "this engine has 14 GiB of room in its 14 GiB memory budget: this runner takes jobs again",
+    "this engine's containers no runner capped are counted as using no memory, since podman could not say what its containers use: Error: no cgroups",
+    "this engine's memory could not be counted, so this runner takes no job: no answer",
+    "this engine has 14 GiB of room in its 14 GiB memory budget: this runner takes jobs again",
+    "this engine's containers no runner capped are counted at what they use again",
   ]);
+  assert.deepEqual(
+    [
+      count({ cappedBytes: 4 * gib }),
+      count({ cappedBytes: 14 * gib }),
+      count({ holds: [hold("a", 1)] }),
+      { unknown: "no answer" },
+    ].map((each) => memoryBudgetState(2 * gib, each, 0)),
+    ["Taking", "Full", "Held", "Unknown"],
+  );
 });
 
 test("no budget is kept without what it keeps free or a lock", () => {

@@ -1969,7 +1969,7 @@ const memoryHeldLate = "it had no room on this engine";
 
 /**
  * The hold a job's placement makes on its engine's memory, named for its
- * container and first held now.
+ * container, first held now and abandoned at the assignment's deadline.
  *
  * @param {State} state
  * @param {Placement} placement
@@ -1983,6 +1983,7 @@ function memoryHoldOf(state, placement) {
     memoryMib: placement.memoryMib,
     heldMs: state.seams.nowMs(),
     pid: process.pid,
+    untilMs: placement.deadlineEpochSecs * 1000,
   };
 }
 
@@ -2031,22 +2032,24 @@ async function memoryCountedNow(state, signal) {
     engine: state.seams.engine,
     name: state.settings.engine,
     holderAlive: state.seams.holderAlive ?? fileLockHolderAlive,
+    nowMs: state.seams.nowMs,
     signal,
   });
   await memoryHoldsGone(
     state,
     abandoned,
     signal,
-    "whose runner is no longer running",
+    "whose runner is no longer running or whose deadline has passed",
   );
   return counted;
 }
 
 /**
  * One check of a held job's room, under the memory lock: a count, the
- * decision, and the job's hold made where the count lists none, since a job
- * about to start is counted by its hold as a held one is. A check that could
- * not take the lock or make the hold holds the job.
+ * decision, and the job's hold made where the count lists neither it nor a
+ * container of its assignment, since a job about to start is counted by its
+ * hold as a held one is. A check that could not take the lock or make the
+ * hold holds the job.
  *
  * @param {State} state
  * @param {import("./memoryBudget.mjs").MemoryBudget} budget
@@ -2061,7 +2064,8 @@ async function memoryChecked(state, budget, hold) {
       const counted = await memoryCountedNow(state, signal);
       if (
         !("unknown" in counted) &&
-        counted.holds.some(({ name }) => name === hold.name)
+        (counted.holds.some(({ name }) => name === hold.name) ||
+          counted.started.includes(hold.assignment))
       )
         made = true;
       else {

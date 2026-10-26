@@ -84,6 +84,7 @@ export const heldLabel = "io.chuggy.held";
 export const heldMemoryLabel = "io.chuggy.held.memory-mib";
 export const heldSinceLabel = "io.chuggy.held.since-ms";
 export const heldProcessLabel = "io.chuggy.held.pid";
+export const heldUntilLabel = "io.chuggy.held.until-ms";
 
 /**
  * Every path `runArgv` mounts in a workload's container, whichever of them a
@@ -642,6 +643,7 @@ export function memoryStatsArgv() {
  * @property {number} memoryMib the job's cap
  * @property {number} heldMs when it was first held
  * @property {number} pid the process holding it
+ * @property {number} untilMs when its assignment's deadline passes
  */
 
 /** @param {MemoryHoldLabels} hold */
@@ -659,6 +661,8 @@ export function heldCreateArgv(hold) {
     `${heldSinceLabel}=${String(hold.heldMs)}`,
     "--label",
     `${heldProcessLabel}=${String(hold.pid)}`,
+    "--label",
+    `${heldUntilLabel}=${String(hold.untilMs)}`,
     hold.name,
   ];
 }
