@@ -100,8 +100,8 @@
  * that capability too, which is what keeps them from a roster that does not
  * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
  * `Prerequisite` is admitted by the schema only so its refusal can name the
- * reason — a released ticket's dependencies are immutable in chuggy's
- * `model/domain.qnt`, which names re-authoring machinery as deliberately absent.
+ * reason — it would point an existing ticket at the new draft, which is an
+ * update of that ticket and not a draft `file_dependent` files.
  *
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
  * the shapes are functions of a `z` the caller resolves rather than of an import
@@ -1049,7 +1049,7 @@ export const chuggyProjectTools = [
     call: (context, args) => {
       if (!dependentRelationsAdmitted.includes(args.relation))
         return answered(
-          `${args.relation} is not derivable: a released ticket's dependencies are immutable in this machine, so ticket ${String(args.parent)} cannot come to depend on a new one. File a FollowUp instead; a prerequisite of a ticket still in draft is a revise_draft of that draft's dependencies.`,
+          `${args.relation} is not derivable: file_dependent changes no ticket but the draft it files, so ticket ${String(args.parent)} cannot come to depend on that draft here. File a FollowUp instead; a prerequisite of a ticket still in draft is a revise_draft of that draft's dependencies, and of a Pending ticket a revise_draft of its draft's dependencies that update_ticket releases.`,
           true,
         );
       const dependencies = args.authoring?.dependencies;
@@ -1160,14 +1160,14 @@ export const chuggyProjectTools = [
   },
   {
     name: "revoke_ticket",
-    description: `Submits the revocation of one ticket, on your owner's word only. Revoking ends the ticket for good: it cancels the work running for it and undoes nothing that already landed. It revokes no other ticket. A ticket depending on a revoked one can never start, read_ticket names those dependencies in \`revokedDependencies\`, and its only exit is to be revoked too. ${chuggySubmissionDescription}`,
+    description: `Submits the revocation of one ticket, on your owner's word only. Revoking ends the ticket for good: it cancels the work running for it and undoes nothing that already landed. It revokes no other ticket. A ticket depending on a revoked one cannot start, and read_ticket names those dependencies in \`revokedDependencies\`: while it is Pending, an update that drops them (revise_draft, then update_ticket) lets it start, and otherwise it can only be revoked too. ${chuggySubmissionDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       submit(context, { mutation: "RevokeTicket", ticket: args.ticket }),
   },
   {
     name: "update_ticket",
-    description: `Submits the update of one Pending ticket to its draft as revise_draft last left it, on your owner's word only. \`expectedRevision\` is the ticket's \`revision\` as read_ticket answers it, and \`authoringVersion\` and \`configurationRevision\` are the draft's as read_draft or that revision answers them. A ticket no longer Pending is refused (TicketNotPending), and one whose revision moved since it was read is refused (TicketRevisionStale), so read_ticket it again. ${chuggySubmissionDescription} ${chuggyProgramShortDescription}`,
+    description: `Submits the update of one Pending ticket to its draft as revise_draft last left it, on your owner's word only. \`expectedRevision\` is the ticket's \`revision\` as read_ticket answers it, and \`authoringVersion\` and \`configurationRevision\` are the draft's as read_draft or that revision answers them. A ticket no longer Pending is refused (TicketNotPending), and one whose revision moved since it was read is refused (TicketRevisionStale), so read_ticket it again. The draft's dependencies replace the ticket's: dropping one is never refused, and one it adds is refused if it was revoked (DependenciesRevoked) or already waits on this ticket (DependencyCycle). ${chuggySubmissionDescription} ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z),
       expectedRevision: ticket(z),
