@@ -43,6 +43,7 @@ export const threadRoster = [
   "ProjectRead",
   "DraftAuthor",
   "DraftOriginate",
+  "TicketDispatch",
 ];
 
 /** The rejection frame kasofsk/chuggy#386 reports, as the runtime declares it. */

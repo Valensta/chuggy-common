@@ -161,6 +161,7 @@ test("a submitted command is described as a new operation each call, and every o
     } else assert.equal(config.description, pod.description);
   }
   assert.deepEqual(submissions.sort(), [
+    "dispatch_ticket",
     "release_draft",
     "revoke_ticket",
     "update_ticket",

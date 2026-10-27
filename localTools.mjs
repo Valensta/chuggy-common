@@ -49,6 +49,7 @@ export const localToolCapabilities = [
   "ProjectRead",
   "DraftAuthor",
   "DraftOriginate",
+  "TicketDispatch",
 ];
 
 /** What a submitted command made again answers here, where every call is a turn of its own. */
