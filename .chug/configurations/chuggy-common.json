@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "name": "chuggy-common",
+  "configuration": {
+    "version": 2,
+    "image": "registry.chuggy.internal/chuggy/worker@sha256:6c351228ee60d7bb77d5aed573a9c0a2996aff63031fe06ec80b8634c6f6d868",
+    "workloads": {
+      "build": {
+        "runner": "Agent",
+        "prompt": { "path": ".chug/prompts/work.md" },
+        "worker": {
+          "mode": {
+            "type": "SingleAgent",
+            "agent": "Claude",
+            "arguments": ["--allowedTools=Bash,Edit,Read,Write,Glob,Grep", "--model=opus"]
+          },
+          "setup": ["npm ci"],
+          "files": []
+        },
+        "authority": {
+          "tools": ["claude-code", "shell"],
+          "credentials": ["chuggy-github-worker", "claude-code", "track-record"],
+          "network": true,
+          "filesystem": "WriteWorkspace",
+          "mayCompleteTask": false
+        }
+      },
+      "ci": {
+        "runner": "Commands",
+        "commands": [".chug/tasks/ci.sh"],
+        "worker": { "setup": ["npm ci"], "files": [] },
+        "authority": {
+          "tools": ["shell"],
+          "credentials": ["chuggy-github-worker", "track-record"],
+          "network": true,
+          "filesystem": "WriteWorkspace",
+          "mayCompleteTask": false
+        }
+      },
+      "review": {
+        "runner": "Agent",
+        "purpose": "Review",
+        "prompt": { "path": ".chug/prompts/review.md" },
+        "worker": {
+          "mode": {
+            "type": "SingleAgent",
+            "agent": "Claude",
+            "arguments": ["--allowedTools=Bash,Edit,Read,Write,Glob,Grep", "--model=opus"]
+          },
+          "setup": ["npm ci"],
+          "files": []
+        },
+        "authority": {
+          "tools": ["claude-code", "shell"],
+          "credentials": ["chuggy-github-worker", "claude-code", "track-record"],
+          "network": true,
+          "filesystem": "WriteWorkspace",
+          "mayCompleteTask": false
+        }
+      }
+    },
+    "plans": {
+      "standard": [
+        { "name": "checks", "evaluators": ["ci"] },
+        { "name": "review", "evaluators": ["review"] }
+      ]
+    },
+    "defaults": { "work": "build", "evaluation": "standard" }
+  }
+}
