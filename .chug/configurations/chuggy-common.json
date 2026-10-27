@@ -7,19 +7,24 @@
     "workloads": {
       "build": {
         "runner": "Agent",
-        "prompt": { "path": ".chug/prompts/work.md" },
+        "prompt": {
+          "path": ".chug/prompts/work.md"
+        },
         "worker": {
           "mode": {
             "type": "SingleAgent",
             "agent": "Claude",
-            "arguments": ["--allowedTools=Bash,Edit,Read,Write,Glob,Grep", "--model=opus"]
+            "arguments": [
+              "--allowedTools=Bash,Edit,Read,Write,Glob,Grep",
+              "--model=opus"
+            ]
           },
           "setup": ["npm ci"],
           "files": []
         },
         "authority": {
           "tools": ["claude-code", "shell"],
-          "credentials": ["chuggy-github-worker", "claude-code", "track-record"],
+          "credentials": ["chuggy-github-worker", "claude-code"],
           "network": true,
           "filesystem": "WriteWorkspace",
           "mayCompleteTask": false
@@ -28,10 +33,13 @@
       "ci": {
         "runner": "Commands",
         "commands": [".chug/tasks/ci.sh"],
-        "worker": { "setup": ["npm ci"], "files": [] },
+        "worker": {
+          "setup": ["npm ci"],
+          "files": []
+        },
         "authority": {
           "tools": ["shell"],
-          "credentials": ["chuggy-github-worker", "track-record"],
+          "credentials": ["chuggy-github-worker"],
           "network": true,
           "filesystem": "WriteWorkspace",
           "mayCompleteTask": false
@@ -40,19 +48,24 @@
       "review": {
         "runner": "Agent",
         "purpose": "Review",
-        "prompt": { "path": ".chug/prompts/review.md" },
+        "prompt": {
+          "path": ".chug/prompts/review.md"
+        },
         "worker": {
           "mode": {
             "type": "SingleAgent",
             "agent": "Claude",
-            "arguments": ["--allowedTools=Bash,Edit,Read,Write,Glob,Grep", "--model=opus"]
+            "arguments": [
+              "--allowedTools=Bash,Edit,Read,Write,Glob,Grep",
+              "--model=opus"
+            ]
           },
           "setup": ["npm ci"],
           "files": []
         },
         "authority": {
           "tools": ["claude-code", "shell"],
-          "credentials": ["chuggy-github-worker", "claude-code", "track-record"],
+          "credentials": ["chuggy-github-worker", "claude-code"],
           "network": true,
           "filesystem": "WriteWorkspace",
           "mayCompleteTask": false
@@ -61,10 +74,19 @@
     },
     "plans": {
       "standard": [
-        { "name": "checks", "evaluators": ["ci"] },
-        { "name": "review", "evaluators": ["review"] }
+        {
+          "name": "checks",
+          "evaluators": ["ci"]
+        },
+        {
+          "name": "review",
+          "evaluators": ["review"]
+        }
       ]
     },
-    "defaults": { "work": "build", "evaluation": "standard" }
+    "defaults": {
+      "work": "build",
+      "evaluation": "standard"
+    }
   }
 }
