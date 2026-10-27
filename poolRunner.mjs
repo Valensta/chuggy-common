@@ -14,6 +14,7 @@
 import { poolJobPlaneClient } from "./poolJobPlane.mjs";
 import {
   checkedWorkerPoolClientSettings,
+  workerPoolClaimWaitMs,
   workerPoolClientPass,
   workerPoolUpdating,
 } from "./poolLoop.mjs";
@@ -145,7 +146,10 @@ export async function poolRunnerLoop(client, seams) {
     if (pass.passed === "Unavailable") {
       seams.log(`outage: ${pass.evidence}`);
       await seams.sleep(client.settings.outageBackoffMs);
-    } else if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
+      continue;
+    }
+    if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
       seams.log(poolRunnerPassLine(pass));
+    if (pass.claim !== undefined) await seams.sleep(workerPoolClaimWaitMs);
   }
 }

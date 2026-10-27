@@ -91,6 +91,21 @@ async function fileLockLinked(lockPath, ports) {
 }
 
 /**
+ * Whether this attempt holds the lock: it linked one into place, or found one
+ * abandoned, removed it and then linked one.
+ *
+ * @param {string} lockPath
+ * @param {Pick<FileLockBounds, "heldMsMax">} bounds
+ * @param {FileLockPorts} ports
+ */
+async function fileLockTried(lockPath, bounds, ports) {
+  if (await fileLockLinked(lockPath, ports)) return true;
+  if (!(await fileLockAbandoned(lockPath, bounds, ports))) return false;
+  await rm(lockPath, { force: true });
+  return fileLockLinked(lockPath, ports);
+}
+
+/**
  * @param {string} lockPath
  * @param {FileLockBounds} bounds
  * @param {FileLockPorts} ports
@@ -99,11 +114,23 @@ async function fileLockAcquired(lockPath, bounds, ports) {
   const deadlineMs = ports.nowMs() + bounds.waitMsMax;
   for (;;) {
     if (ports.nowMs() >= deadlineMs) throw new Error(bounds.busy);
-    if (await fileLockLinked(lockPath, ports)) return;
-    if (await fileLockAbandoned(lockPath, bounds, ports))
-      await rm(lockPath, { force: true });
-    else await ports.wait(bounds.pollMs);
+    if (await fileLockTried(lockPath, bounds, ports)) return;
+    await ports.wait(bounds.pollMs);
   }
+}
+
+/**
+ * The lock at `lockPath`, whose directory is there, taken without waiting:
+ * what lets it go, or nothing where another process holds it.
+ *
+ * @param {string} lockPath
+ * @param {Pick<FileLockBounds, "heldMsMax">} bounds
+ * @param {FileLockPorts} ports
+ * @returns {Promise<(() => Promise<void>) | undefined>}
+ */
+export async function fileLockTaken(lockPath, bounds, ports) {
+  if (!(await fileLockTried(lockPath, bounds, ports))) return undefined;
+  return () => rm(lockPath, { force: true });
 }
 
 /**

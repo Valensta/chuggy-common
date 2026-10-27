@@ -7,6 +7,7 @@ import {
 } from "@chuggy/worker-contract/workerPool";
 
 import {
+  workerPoolClaimWaitMs,
   workerPoolClientPass,
   workerPoolClientRun,
   workerPoolUpdateBackoffMs,
@@ -416,6 +417,267 @@ test("a backend that takes no job is asked for none after its read and places no
     ["job", "Unavailable"],
     ["session", "Accepted"],
   ]);
+});
+
+/**
+ * A pool whose backend keeps a budget and a claim, and whose plane claims by
+ * room unless told not to, every call it makes recorded in order: each read
+ * answering the next of `reads`, the last one again once they run out, and
+ * each poll the next of `answers`.
+ *
+ * @param {{reads?: {held?: object[], room?: object, taken?: boolean}[], answers?: object[], busy?: boolean, byRoom?: boolean, place?: () => Promise<object>}} [scenario]
+ */
+function claimingRoom(scenario = {}) {
+  const reads = scenario.reads ?? [{}];
+  const answers = [...(scenario.answers ?? [])];
+  const events = [];
+  const takenAsked = [];
+  let read = -1;
+  const now = () => reads[Math.min(read, reads.length - 1)];
+  const backend = {
+    ...idle,
+    held: async () => {
+      read += 1;
+      events.push("held");
+      return now().held ?? [];
+    },
+    jobsTaken: (byRoom) => {
+      takenAsked.push(byRoom);
+      return now().taken ?? true;
+    },
+    memoryRoom: () => now().room ?? { roomMib: 4096, ceilingMib: 12288 },
+    place: async (offered) => {
+      events.push(`place ${offered.assignment}`);
+      return scenario.place === undefined
+        ? { placed: "Placed" }
+        : scenario.place();
+    },
+    claimed: async () => {
+      events.push(scenario.busy === true ? "claim busy" : "claim");
+      return scenario.busy === true
+        ? undefined
+        : async () => {
+            events.push("release");
+          };
+    },
+  };
+  const plane = {
+    claimsByRoom: () => scenario.byRoom ?? true,
+    poll: async (_token, _held, wanted, wantedSessions, terms) => {
+      events.push({ poll: [wanted, wantedSessions], terms });
+      return answers.shift() ?? reconciled();
+    },
+    settle: async (_token, named, outcome) => {
+      events.push(`settle ${named} ${outcome.outcome}`);
+      return "Settled";
+    },
+  };
+  return {
+    events,
+    takenAsked,
+    pooled: client({
+      settings: { ...settings, concurrencyMax: 2, sessionsMax: 1 },
+      backend,
+      plane,
+    }),
+  };
+}
+
+/** A reconciliation saying whether a job waits that fits the poll's room. */
+const waiting = (jobsWaiting) => ({ ...reconciled(), jobsWaiting });
+
+const room = { roomMib: 4096, ceilingMib: 12288 };
+
+test("against a plane that claims by room, a pool asks for no job naming its room, and one told a job waits takes the claim, reads again, asks at once for what that read has room for, places it and lets the claim go", async () => {
+  const { events, takenAsked, pooled } = claimingRoom({
+    reads: [{}, { room: { roomMib: 3072, ceilingMib: 12288 } }],
+    answers: [waiting(true), reconciled([assignment("job")])],
+  });
+  const passed = await workerPoolClientPass(pooled);
+  assert.deepEqual(events, [
+    "held",
+    { poll: [0, 1], terms: { memory: room } },
+    "claim",
+    "held",
+    {
+      poll: [2, 0],
+      terms: { memory: { roomMib: 3072, ceilingMib: 12288 }, waitSecs: 0 },
+    },
+    "place job",
+    "settle job Accepted",
+    "release",
+  ]);
+  assert.deepEqual(takenAsked, [true, true]);
+  assert.deepEqual(passed, {
+    passed: "Reconciled",
+    placed: 1,
+    stopped: 0,
+    refused: 0,
+    ended: 0,
+  });
+});
+
+test("a pool told no job waits takes no claim", async () => {
+  const { events, pooled } = claimingRoom({ answers: [waiting(false)] });
+  await workerPoolClientPass(pooled);
+  assert.deepEqual(events, ["held", { poll: [0, 1], terms: { memory: room } }]);
+});
+
+test("a pool that finds the claim held asks for no more, and its run waits before it polls again", async () => {
+  const { events, pooled } = claimingRoom({
+    busy: true,
+    answers: [waiting(true), waiting(true), waiting(true)],
+  });
+  assert.deepEqual(await workerPoolClientPass(pooled), {
+    passed: "Reconciled",
+    placed: 0,
+    stopped: 0,
+    refused: 0,
+    ended: 0,
+    claim: "Busy",
+  });
+  assert.deepEqual(events, [
+    "held",
+    { poll: [0, 1], terms: { memory: room } },
+    "claim busy",
+  ]);
+  const slept = [];
+  await workerPoolClientRun(
+    { ...pooled, settings: { ...pooled.settings, passesMax: 2 } },
+    async (ms) => {
+      slept.push(ms);
+    },
+  );
+  assert.deepEqual(slept, [workerPoolClaimWaitMs, workerPoolClaimWaitMs]);
+});
+
+test("a claim whose read leaves no room under the ceiling, or takes no job, asks for nothing, lets the claim go and is empty", async () => {
+  for (const second of [
+    { held: holding("Job", "one", "two") },
+    { taken: false },
+  ]) {
+    const { events, pooled } = claimingRoom({
+      reads: [{}, second],
+      answers: [waiting(true)],
+    });
+    assert.equal((await workerPoolClientPass(pooled)).claim, "Empty");
+    assert.deepEqual(events, [
+      "held",
+      { poll: [0, 1], terms: { memory: room } },
+      "claim",
+      "held",
+      "release",
+    ]);
+  }
+});
+
+test("a claim given no job, or only jobs it refuses, is empty, and its run waits before it polls again", async () => {
+  const { events, pooled } = claimingRoom({
+    answers: [
+      waiting(true),
+      waiting(true),
+      waiting(true),
+      reconciled([assignment("job")]),
+    ],
+    place: async () => ({ placed: "Refused", evidence: "too large" }),
+  });
+  assert.deepEqual(await workerPoolClientPass(pooled), {
+    passed: "Reconciled",
+    placed: 0,
+    stopped: 0,
+    refused: 0,
+    ended: 0,
+    claim: "Empty",
+  });
+  assert.equal(events.at(-1), "release");
+  const slept = [];
+  await workerPoolClientRun(
+    { ...pooled, settings: { ...pooled.settings, passesMax: 1 } },
+    async (ms) => {
+      slept.push(ms);
+    },
+  );
+  assert.deepEqual(slept, [workerPoolClaimWaitMs]);
+  assert.ok(events.includes("settle job Refused"));
+});
+
+test("a claim whose poll is not reconciled ends the pass, and lets the claim go", async () => {
+  const { events, pooled } = claimingRoom({
+    answers: [
+      waiting(true),
+      { polled: "Unavailable", evidence: "the plane could not be reached" },
+    ],
+  });
+  assert.deepEqual(await workerPoolClientPass(pooled), {
+    passed: "Unavailable",
+    evidence: "the plane could not be reached",
+  });
+  assert.equal(events.at(-1), "release");
+});
+
+test("the claim goes only once each job placed under it has been answered, which is once it holds its memory", async () => {
+  let answer;
+  const placedAnswered = new Promise((resolve) => {
+    answer = resolve;
+  });
+  const { events, pooled } = claimingRoom({
+    answers: [waiting(true), reconciled([assignment("job")])],
+    place: () => placedAnswered,
+  });
+  const passing = workerPoolClientPass(pooled);
+  for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+  assert.equal(events.at(-1), "place job");
+  answer({ placed: "Placed" });
+  await passing;
+  assert.deepEqual(events.slice(-3), [
+    "place job",
+    "settle job Accepted",
+    "release",
+  ]);
+});
+
+test("against a plane that does not claim by room, or with a backend keeping no claim, a pool asks for jobs as it always has, naming its room, and takes no claim", async () => {
+  const old = claimingRoom({
+    byRoom: false,
+    answers: [waiting(true)],
+  });
+  await workerPoolClientPass(old.pooled);
+  assert.deepEqual(old.events, [
+    "held",
+    { poll: [2, 1], terms: { memory: room } },
+  ]);
+  assert.deepEqual(old.takenAsked, [false]);
+
+  const unclaimed = claimingRoom({ answers: [waiting(true)] });
+  await workerPoolClientPass({
+    ...unclaimed.pooled,
+    backend: { ...unclaimed.pooled.backend, claimed: undefined },
+  });
+  assert.deepEqual(unclaimed.events, [
+    "held",
+    { poll: [2, 1], terms: { memory: room } },
+  ]);
+  assert.deepEqual(unclaimed.takenAsked, [false]);
+});
+
+test("a pool that takes no job, or holds its ceiling of jobs, names no room, and a backend keeping no budget names none at all", async () => {
+  for (const read of [
+    { taken: false },
+    { held: holding("Job", "one", "two") },
+  ]) {
+    const { events, pooled } = claimingRoom({ reads: [read] });
+    await workerPoolClientPass(pooled);
+    assert.deepEqual(events[1], {
+      poll: [0, 1],
+      terms: { memory: { roomMib: 0, ceilingMib: 12288 } },
+    });
+  }
+  const { events, pooled } = claimingRoom();
+  await workerPoolClientPass({
+    ...pooled,
+    backend: { ...pooled.backend, memoryRoom: undefined },
+  });
+  assert.deepEqual(events[1], { poll: [0, 1], terms: {} });
 });
 
 test("a pool that names no session ceiling asks for none and places none it is offered", async () => {

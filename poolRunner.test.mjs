@@ -8,6 +8,7 @@ import {
   workerRunnerOf,
 } from "@chuggy/worker-contract/workerPool";
 
+import { workerPoolClaimWaitMs } from "./poolLoop.mjs";
 import { poolRunnerClient, poolRunnerLoop } from "./poolRunner.mjs";
 
 /**
@@ -125,6 +126,34 @@ test("a pass that ended a job is logged with how many, and one that ended none n
     "placed 0, stopped 0, refused 0, ended 1",
     "the plane denied this pool: the pool was revoked",
   ]);
+});
+
+test("a pass that found its engine's claim held is followed by a wait before the next poll", async () => {
+  const told = () => ({
+    polled: "Reconciled",
+    assignments: [],
+    sessions: [],
+    stop: [],
+    jobsWaiting: true,
+  });
+  const { client } = scriptedClient([
+    () => ({ polled: "Reconciled", assignments: [], sessions: [], stop: [] }),
+    told,
+    told,
+    () => ({ polled: "Denied", evidence: "the pool was revoked" }),
+  ]);
+  const claimed = /** @type {any} */ (client);
+  claimed.plane.claimsByRoom = () => true;
+  claimed.backend.claimed = async () => undefined;
+  /** @type {number[]} */
+  const slept = [];
+  await poolRunnerLoop(claimed, {
+    sleep: async (ms) => {
+      slept.push(ms);
+    },
+    log: () => undefined,
+  });
+  assert.deepEqual(slept, [5000, workerPoolClaimWaitMs, workerPoolClaimWaitMs]);
 });
 
 /** A registration's credentials, as the pool file holds them. */

@@ -11,9 +11,13 @@ import {
   memoryBudget,
   memoryBudgetHeld,
   memoryBudgetState,
+  memoryBudgetTakes,
+  memoryClaimHeldMsMax,
+  memoryClaimTaken,
   memoryCounted,
   memoryJobsTaken,
   memoryLocked,
+  memoryRoom,
   memoryRoomBytes,
   memoryRoomMibMin,
   memorySizeBytes,
@@ -88,6 +92,7 @@ function counted(engine, what = {}) {
 const count = (count = {}) => ({
   engineBytes: 16 * gib,
   cappedBytes: 0,
+  sessionBytes: 0,
   usedBytes: 0,
   holds: [],
   started: [],
@@ -106,7 +111,7 @@ test("a size is read in docker's binary units and podman's decimal ones, and not
   assert.equal(memorySizeBytes("1.5 GiB"), undefined);
 });
 
-test("every pool's workloads are counted at their caps, and everything else at its use", async () => {
+test("every pool's workloads are counted at their caps, its sessions' caps apart too, and everything else at its use", async () => {
   const { engine, state } = fakeEngine();
   running(state, "chuggy-shame-job", {
     labels: { "io.chuggy.pool": "vteng/chuggy/shame", "io.chuggy.kind": "Job" },
@@ -147,6 +152,7 @@ test("every pool's workloads are counted at their caps, and everything else at i
   assert.deepEqual(found, {
     engineBytes: 16 * gib,
     cappedBytes: 12 * gib,
+    sessionBytes: 2 * gib,
     usedBytes: 656 * mib,
     holds: [],
     started: [],
@@ -270,6 +276,7 @@ test("where the engine refuses its stats, what no runner capped is counted at no
   assert.deepEqual(refused, {
     engineBytes: 16 * gib,
     cappedBytes: 4 * gib,
+    sessionBytes: 0,
     usedBytes: 0,
     unmeasured:
       "podman could not say what its containers use: Error: stats is not supported in rootless mode without cgroups v2",
@@ -390,7 +397,7 @@ test("no stats are asked while every running container is a capped workload", as
   assert.ok(!state.calls.some((call) => call.argv[0] === "stats"));
 });
 
-test("a job is claimed only while the room left is at least the least a job asks and nothing is held", () => {
+test("a job is claimed only while the room left is at least the least a job asks and nothing is held for room", () => {
   const floor = memoryRoomMibMin * mib;
   const free = 2 * gib;
   const full = count({ cappedBytes: 14 * gib - floor });
@@ -429,6 +436,22 @@ test("a job is claimed only while the room left is at least the least a job asks
           },
         ],
       }),
+      0,
+    ),
+    false,
+  );
+  assert.equal(
+    memoryJobsTaken(
+      free,
+      count({ holds: [{ ...hold("a", 1, 14 * 1024 - 512), starting: true }] }),
+      0,
+    ),
+    true,
+  );
+  assert.equal(
+    memoryJobsTaken(
+      free,
+      count({ holds: [{ ...hold("a", 1, 14 * 1024 - 511), starting: true }] }),
       0,
     ),
     false,
@@ -528,7 +551,7 @@ test("a job whose start could not be given its least time, or half its hold's li
   });
 });
 
-test("a job waits behind every hold older than its own, oldest first, however it fits", () => {
+test("a job waits behind every hold held for room older than its own, oldest first, however it fits, and never behind one starting", () => {
   const free = 2 * gib;
   const own = hold("b", 50, 512);
   const holds = [hold("c", 50), hold("z", 40), hold("a", 50), own];
@@ -569,6 +592,75 @@ test("a job waits behind every hold older than its own, oldest first, however it
     ),
     { decided: "Hold", why: "behind a, held before it" },
   );
+  assert.deepEqual(
+    memoryStartDecided(
+      free,
+      count({ holds: [{ ...hold("a", 10), starting: true }, own] }),
+      own,
+      nowMs,
+    ),
+    { decided: "Start" },
+  );
+});
+
+test("a poll is told the room less what is placing with no hold, and the budget less what is reserved, each in whole MiB and none under none", () => {
+  const budget = memoryBudget(2 * gib, "/unused", {
+    bytesReserved: 4 * gib,
+  });
+  assert.ok(budget !== undefined);
+  assert.deepEqual(memoryRoom(budget), { roomMib: 0 });
+  memoryBudgetHeld(
+    budget,
+    count({ cappedBytes: 4 * gib, usedBytes: mib + 1 }),
+    gib,
+    () => undefined,
+  );
+  assert.deepEqual(memoryRoom(budget), {
+    roomMib: 9 * 1024 - 2,
+    ceilingMib: 10 * 1024,
+  });
+  memoryBudgetHeld(
+    budget,
+    count({ cappedBytes: 14 * gib, holds: [hold("a", 1)] }),
+    0,
+    () => undefined,
+  );
+  assert.deepEqual(memoryRoom(budget), { roomMib: 0, ceilingMib: 10 * 1024 });
+  memoryBudgetHeld(budget, { unknown: "no answer" }, 0, () => undefined);
+  assert.deepEqual(memoryRoom(budget), { roomMib: 0 });
+
+  const reservedPast = memoryBudget(2 * gib, "/unused", {
+    bytesReserved: 20 * gib,
+  });
+  assert.ok(reservedPast !== undefined);
+  memoryBudgetHeld(reservedPast, count(), 0, () => undefined);
+  assert.deepEqual(memoryRoom(reservedPast), {
+    roomMib: 14 * 1024,
+    ceilingMib: 0,
+  });
+  const unreserved = memoryBudget(2 * gib, "/unused");
+  assert.ok(unreserved !== undefined);
+  memoryBudgetHeld(unreserved, count(), 0, () => undefined);
+  assert.equal(memoryRoom(unreserved).ceilingMib, 14 * 1024);
+});
+
+test("jobs are asked of a plane that claims by room wherever the count was made, held or full, and of one that does not only while taking", () => {
+  const budget = memoryBudget(2 * gib, "/unused");
+  assert.ok(budget !== undefined);
+  assert.equal(memoryBudgetTakes(budget, true), false);
+  for (const [counted, taken] of /** @type {const} */ ([
+    [count({ holds: [hold("a", 1)] }), false],
+    [count({ holds: [{ ...hold("a", 1), starting: true }] }), true],
+    [count({ cappedBytes: 14 * gib }), false],
+    [count(), true],
+  ])) {
+    memoryBudgetHeld(budget, counted, 0, () => undefined);
+    assert.equal(memoryBudgetTakes(budget, true), true);
+    assert.equal(memoryBudgetTakes(budget, false), taken);
+  }
+  memoryBudgetHeld(budget, { unknown: "no answer" }, 0, () => undefined);
+  assert.equal(memoryBudgetTakes(budget, true), false);
+  assert.equal(memoryBudgetTakes(budget, false), false);
 });
 
 test("a pass's count says what changed once, and takes no job while held, full or unknown", () => {
@@ -637,19 +729,17 @@ test("a pass's count says what changed once, and takes no job while held, full o
       count({ holds: [hold("a", 1), { ...hold("b", 1), starting: true }] }),
       { unknown: "no answer" },
     ].map((each) => memoryBudgetState(2 * gib, each, 0)),
-    ["Taking", "Full", "Held", "Starting", "Held", "Unknown"],
+    ["Taking", "Full", "Held", "Taking", "Held", "Unknown"],
   );
 });
 
-test("a job starting takes no job and logs nothing, from whatever was last logged", () => {
+test("a job starting is counted at its cap and stops no job by being there", () => {
   const budget = memoryBudget(2 * gib, "/unused");
   assert.ok(budget !== undefined);
   /** @type {string[]} */
   const log = [];
   const starting = count({ holds: [{ ...hold("a", 1), starting: true }] });
   memoryBudgetHeld(budget, starting, 0, log.push.bind(log));
-  assert.equal(budget.jobsTaken, false);
-  memoryBudgetHeld(budget, count(), 0, log.push.bind(log));
   assert.equal(budget.jobsTaken, true);
   memoryBudgetHeld(
     budget,
@@ -657,18 +747,56 @@ test("a job starting takes no job and logs nothing, from whatever was last logge
     0,
     log.push.bind(log),
   );
+  assert.equal(budget.jobsTaken, false);
   memoryBudgetHeld(budget, starting, 0, log.push.bind(log));
-  memoryBudgetHeld(budget, count(), 0, log.push.bind(log));
+  assert.equal(budget.jobsTaken, true);
   assert.deepEqual(log, [
     "this engine has 10 GiB of room in its 14 GiB memory budget, and a job on it is held for room: this runner takes no job until it starts",
-    "this engine has 14 GiB of room in its 14 GiB memory budget: this runner takes jobs again",
+    "this engine has 10 GiB of room in its 14 GiB memory budget: this runner takes jobs again",
   ]);
 });
 
-test("no budget is kept without what it keeps free or a lock", () => {
+test("no budget is kept without what it keeps free or a lock, and one reserves nothing and claims by no lock unless told to", () => {
   assert.equal(memoryBudget(undefined, "/lock"), undefined);
   assert.equal(memoryBudget(0, undefined), undefined);
-  assert.ok(memoryBudget(0, "/lock") !== undefined);
+  const kept = memoryBudget(0, "/lock");
+  assert.equal(kept?.bytesReserved, 0);
+  assert.equal(kept?.claimLockFile, undefined);
+  const claiming = memoryBudget(0, "/lock", {
+    bytesReserved: gib,
+    claimLockFile: "/claim",
+  });
+  assert.equal(claiming?.bytesReserved, gib);
+  assert.equal(claiming?.claimLockFile, "/claim");
+});
+
+test("the claim lock is taken without waiting, by one runner at a time, and again once let go or once its holder is gone or it outlived any claim", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-memory-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lockFile = join(directory, "locks", "docker.claim");
+  const release = await memoryClaimTaken(lockFile);
+  assert.ok(release !== undefined);
+  assert.equal(await memoryClaimTaken(lockFile), undefined);
+  await release();
+  const again = await memoryClaimTaken(lockFile);
+  assert.ok(again !== undefined);
+
+  assert.ok(
+    (await memoryClaimTaken(lockFile, { holderAlive: () => false })) !==
+      undefined,
+  );
+  const startedMs = Date.now();
+  assert.equal(
+    await memoryClaimTaken(lockFile, {
+      nowMs: () => startedMs + memoryClaimHeldMsMax - 1000,
+    }),
+    undefined,
+  );
+  assert.ok(
+    (await memoryClaimTaken(lockFile, {
+      nowMs: () => startedMs + memoryClaimHeldMsMax + 1000,
+    })) !== undefined,
+  );
 });
 
 test("two holds of the memory lock never overlap", async (t) => {
