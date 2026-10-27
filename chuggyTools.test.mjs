@@ -1689,7 +1689,7 @@ test("a dependent is filed with its parent among the draft's dependencies", asyn
   });
 });
 
-test("a prerequisite is refused, and the refusal names dependency immutability", async () => {
+test("a prerequisite is refused, and the refusal names the update that would carry it", async () => {
   const { api, call } = toolsOf();
 
   const answer = await call("file_dependent", {
@@ -1698,8 +1698,12 @@ test("a prerequisite is refused, and the refusal names dependency immutability",
   });
 
   assert.equal(answer.isError, true);
-  assert.match(textOf(answer), /dependencies are immutable/);
+  assert.match(
+    textOf(answer),
+    /file_dependent changes no ticket but the draft it files/,
+  );
   assert.match(textOf(answer), /FollowUp/);
+  assert.match(textOf(answer), /update_ticket releases/);
   assert.equal(api.calls.length, 0);
 });
 
@@ -1837,8 +1841,8 @@ test("a revocation the machine refuses is relayed unaltered and never asked agai
 /**
  * A session learns what revoking does from the description alone, and the two
  * things it cannot learn anywhere else are that a revocation is final and that
- * it settles one ticket: the dependents of a revoked ticket wait for ever
- * unless they are revoked too.
+ * it settles one ticket: the dependents of a revoked ticket wait until an
+ * update drops it or they are revoked too.
  */
 test("the revocation tool says it is final, whose word it takes and what is left behind it", () => {
   const { description } = chuggyProjectTools.find(
@@ -1851,7 +1855,8 @@ test("the revocation tool says it is final, whose word it takes and what is left
     /undoes nothing that already landed/,
     /revokes no other ticket/,
     /`revokedDependencies`/,
-    /its only exit is to be revoked too/,
+    /an update that drops them \(revise_draft, then update_ticket\) lets it start/,
+    /otherwise it can only be revoked too/,
     /read_operation/,
   ])
     assert.match(description, said);
@@ -2032,6 +2037,9 @@ test("updating a ticket says whose word it takes and what refuses it, and a revi
     /`expectedRevision` is the ticket's `revision` as read_ticket answers it/,
     /\(TicketNotPending\)/,
     /\(TicketRevisionStale\)/,
+    /dropping one is never refused/,
+    /\(DependenciesRevoked\)/,
+    /\(DependencyCycle\)/,
     /same turn is the same operation/,
   ])
     assert.match(described("update_ticket"), claim);
