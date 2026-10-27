@@ -797,27 +797,30 @@ async function workerPoolClientCounted(client, token) {
 }
 
 /**
- * What a pass asks after its first poll: a claim where the plane claims by
- * room and said a job the pool takes waits, and jobs by count where that poll
- * was the one to find out the plane does not.
+ * What a pass that takes a job asks after its first poll: a claim where the
+ * plane claims by room and said a job waits, and jobs by count where that poll
+ * was the one to find out the plane does not. A pass taking no job asks
+ * nothing more, so it reads what it holds no more, which may reclaim the disk.
  *
  * @param {WorkerPoolClient} client
  * @param {string} token
  * @param {boolean | undefined} byRoom whether the plane claimed by room before that poll
- * @param {{jobs: boolean, sessions: boolean}} taking what that poll could take
+ * @param {boolean} jobsTaken whether the pass takes a job
  * @param {Extract<WorkerPoolPolled, {polled: "Reconciled"}>} polled
  */
-async function workerPoolClientFollowed(client, token, byRoom, taking, polled) {
+async function workerPoolClientFollowed(
+  client,
+  token,
+  byRoom,
+  jobsTaken,
+  polled,
+) {
   const { claimed } = client.backend;
   const found = workerPoolClientByRoom(client);
-  if (
-    claimed !== undefined &&
-    found === true &&
-    taking.jobs &&
-    polled.jobsWaiting === true
-  )
+  if (!jobsTaken) return { tally: workerPoolTallyNone };
+  if (claimed !== undefined && found === true && polled.jobsWaiting === true)
     return workerPoolClientClaimed(client, token, claimed);
-  if (byRoom === undefined && found === false && taking.sessions)
+  if (byRoom === undefined && found === false)
     return workerPoolClientCounted(client, token);
   return { tally: workerPoolTallyNone };
 }
@@ -865,7 +868,7 @@ export async function workerPoolClientPass(client, updating) {
     client,
     minted.token,
     byRoom,
-    { jobs: jobsTaken, sessions: sessionsTaken },
+    jobsTaken,
     polled.polled,
   );
   if ("passed" in claim) return claim;

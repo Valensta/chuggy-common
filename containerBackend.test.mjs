@@ -3642,7 +3642,7 @@ test("a disk under its floor has a reclaim remove what it may, oldest first, unt
   ]);
 });
 
-test("a disk a reclaim leaves under its floor takes no job, with no line more, until a pass finds it over", async (t) => {
+test("a disk a reclaim leaves under its floor takes no job, whether the plane claims by room or not, with no line more, until a pass finds it over", async (t) => {
   const context = await floorHarness(t);
   const { backend, state, log, disk, clock } = context;
   const references = [
@@ -3654,6 +3654,7 @@ test("a disk a reclaim leaves under its floor takes no job, with no line more, u
   removalsFree(context, gib);
   await backend.held();
   assert.equal(backend.jobsTaken(), false);
+  assert.equal(backend.jobsTaken(true), false);
   assert.deepEqual([...state.images], [references[2]]);
   clock.nowMs += 1000;
   await backend.held();
@@ -3661,6 +3662,7 @@ test("a disk a reclaim leaves under its floor takes no job, with no line more, u
   disk.set(25 * gib);
   await backend.held();
   assert.equal(backend.jobsTaken(), true);
+  assert.equal(backend.jobsTaken(true), true);
   assert.deepEqual(floorLines(log), [
     "this runner's disk has 12 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
     "this runner's disk has 25 GiB free at /var/lib/docker, over its floor of 20 GiB: it takes jobs again",
@@ -4445,7 +4447,7 @@ test("a poll is told the room less what this runner places with no hold, and the
   assert.equal(none.backend.memoryRoom(), undefined);
 });
 
-test("a job asking past the budget less what this runner reserves is refused, naming both, and a session asking within the budget is placed", async (t) => {
+test("a job asking past the budget less what this runner reserves is refused, naming both, its ceiling none where the reserve passes the budget, and a session asking within the budget is placed", async (t) => {
   const { backend } = await memoryHarness(t, {
     memoryReservedBytes: 4 * memoryGib,
   });
@@ -4477,6 +4479,63 @@ test("a job asking past the budget less what this runner reserves is refused, na
     },
   );
   await backend.settled();
+
+  const reservedPast = await memoryHarness(t, {
+    memoryReservedBytes: 15 * memoryGib,
+  });
+  await reservedPast.backend.held();
+  assert.deepEqual(
+    await reservedPast.backend.place(assignment({ memoryMib: 1 }), "Job"),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment asks for 1 MiB and this runner's ceiling for a job is 0 MiB: its memory budget of 14336 MiB less the 15360 MiB it reserves",
+    },
+  );
+});
+
+test("a job whose hold could not be made at its claim is counted as placing", async (t) => {
+  const { backend, state } = await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  state.intercept = (call) =>
+    call.argv[1] === "create" && call.argv.at(-1) === `${name}-held`
+      ? { code: 1, stdout: "", stderr: "Error: no space left on device\n" }
+      : undefined;
+  const pull = deferred();
+  state.pull = () => pull.promise;
+  state.images.delete(image);
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 4096 }), "Job");
+  await backend.held();
+  assert.deepEqual(holdNames(state), []);
+  assert.deepEqual(backend.memoryRoom(), {
+    roomMib: 10 * 1024,
+    ceilingMib: 14 * 1024,
+  });
+  backend.stop("asg-1");
+  pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
+  await backend.settled();
+});
+
+test("a job too late to start at its claim makes no hold, and fails without running", async (t) => {
+  const { backend, state, clock, log } = await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  await backend.held();
+  state.intercept = (call) => {
+    if (call.argv[0] === "info")
+      clock.nowMs = startMs + 3600 * 1000 - memoryStartCutMs;
+    return undefined;
+  };
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.ok(!state.calls.some((call) => call.argv.at(-1) === `${name}-held`));
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+  assert.ok(
+    log.includes(
+      `${name} was not started: it could not start before the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
 });
 
 test("a backend takes the claim only where it keeps a budget and is given the claim lock, one backend at a time", async (t) => {

@@ -8,6 +8,7 @@ import {
 import {
   assignmentOutcomeSchema,
   workerPoolEvidenceCharsMax,
+  workerRunnerMemoryRoomHeader,
   workerRunnerPollWaitHeader,
 } from "@chuggy/worker-contract/workerPool";
 
@@ -676,8 +677,9 @@ function answerBody(reconciliation) {
 /**
  * A plane client as a runner builds one, answered by a plane naming
  * `release`: each poll with the next of `answers`, nothing waiting once they
- * run out, and each settlement as taken. Each poll's `wanted` and the wait it
- * names are recorded.
+ * run out, a job said to wait only where the room the poll named fits one,
+ * and each settlement as taken. Each poll's `wanted`, and the wait and the
+ * room it names, are recorded.
  *
  * @param {string} release
  * @param {object[]} answers
@@ -694,12 +696,16 @@ function planeNaming(release, answers) {
       const headers = { [workerContractHeader]: release };
       if (init.method !== "GET")
         return new globalThis.Response(null, { status: 204, headers });
+      const room = init.headers[workerRunnerMemoryRoomHeader];
       polls.push([
         new globalThis.URL(String(url)).searchParams.get("wanted"),
         init.headers[workerRunnerPollWaitHeader],
+        room,
       ]);
-      const answer = answers.shift() ?? reconciled();
-      return new globalThis.Response(JSON.stringify(answerBody(answer)), {
+      const body = answerBody(answers.shift() ?? reconciled());
+      if (body.jobsWaiting === true)
+        body.jobsWaiting = Number(room) >= assignment("waiting").memoryMib;
+      return new globalThis.Response(JSON.stringify(body), {
         status: 200,
         headers,
       });
@@ -718,9 +724,9 @@ test("a pool keeping a claim asks a plane that has not yet said whether it claim
   assert.equal((await workerPoolClientPass(fresh)).placed, 1);
   await workerPoolClientPass(fresh);
   assert.deepEqual(polls, [
-    ["0", "0"],
-    ["2", "0"],
-    ["0", undefined],
+    ["0", "0", "4096"],
+    ["2", "0", "4096"],
+    ["0", undefined, "4096"],
   ]);
   assert.deepEqual(events, [
     "held",
@@ -742,9 +748,9 @@ test("a pool keeping a claim whose first answer shows the plane does not claim b
   assert.equal((await workerPoolClientPass(fresh)).placed, 1);
   await workerPoolClientPass(fresh);
   assert.deepEqual(polls, [
-    ["0", "0"],
-    ["2", undefined],
-    ["2", undefined],
+    ["0", "0", "4096"],
+    ["2", undefined, "4096"],
+    ["2", undefined, "4096"],
   ]);
   assert.deepEqual(events, ["held", "held", "place job", "held"]);
   assert.deepEqual(takenAsked, [true, false, false]);
@@ -752,7 +758,17 @@ test("a pool keeping a claim whose first answer shows the plane does not claim b
   const gated = claimingRoom({ reads: [{}, { taken: false }] });
   const old = planeNaming("1.20.0", []);
   await workerPoolClientPass({ ...gated.pooled, plane: old.plane });
-  assert.deepEqual(old.polls, [["0", "0"]]);
+  assert.deepEqual(old.polls, [["0", "0", "4096"]]);
+});
+
+test("a pool whose first read takes no job reads what it holds no more that pass, whatever the plane turns out to be", async () => {
+  for (const release of [workerContractRelease, "1.20.0"]) {
+    const { events, pooled } = claimingRoom({ reads: [{ taken: false }] });
+    const { plane, polls } = planeNaming(release, [waiting(true)]);
+    await workerPoolClientPass({ ...pooled, plane });
+    assert.deepEqual(events, ["held"]);
+    assert.deepEqual(polls, [["0", "0", "0"]]);
+  }
 });
 
 test("a draining pool told a job waits takes no claim, and one finding the plane does not claim by room asks it for no job", async () => {
@@ -771,7 +787,7 @@ test("a draining pool told a job waits takes no claim, and one finding the plane
   const unknown = claimingRoom();
   const old = planeNaming("1.20.0", []);
   await workerPoolClientPass({ ...unknown.pooled, plane: old.plane }, draining);
-  assert.deepEqual(old.polls, [["0", "0"]]);
+  assert.deepEqual(old.polls, [["0", "0", "0"]]);
 });
 
 test("a pool that takes no job, or holds its ceiling of jobs, names an empty room beside its ceiling, and a backend keeping no budget names neither", async () => {
