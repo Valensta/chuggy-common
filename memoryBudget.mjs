@@ -32,16 +32,18 @@
  * listed before what is running, so a job whose container starts and whose
  * hold goes while the engine is counted is counted by the one or the other.
  *
- * A JOB STARTS ONLY INTO ROOM. Its runner counts, decides and makes its hold
- * in one hold of a lock that every runner using the engine as this user
- * shares, and starts the job only after, so the next count counts the job at
- * its cap until its container runs and its hold goes. A job starts where it
- * fits the room its own hold leaves and no other hold is older, so held jobs
- * start in the order they were held. Runners of another user share no lock,
- * and can start into the same room. Two runners that judge the same abandoned
- * lock at once can both hold one, as `fileLock.mjs` says, which takes a runner
- * that died holding it, and costs at most one start into room another start
- * took.
+ * A JOB IS HELD FROM ITS CLAIM, AND STARTS ONLY INTO ROOM. Its runner counts,
+ * decides and makes its hold in one hold of a lock that every runner using the
+ * engine as this user shares, as the job is placed and before its images are
+ * pulled, so every count after counts the job at its cap until its container
+ * runs and its hold goes. A job decided to start then starts once its images
+ * are here; one held for room is checked again once they are. A job starts
+ * where it fits the room its own hold leaves and no job held for room is older,
+ * so held jobs start in the order they were held. Runners of another user share
+ * no lock, and can start into the same room. Two runners that judge the same
+ * abandoned lock at once can both hold one, as `fileLock.mjs` says, which takes
+ * a runner that died holding it, and costs at most one start into room another
+ * start took.
  *
  * A START ENDS BEFORE ITS HOLD'S DEADLINE. A job is decided to start only
  * where its run can be given `memoryStartMsMin`, or half its hold's life where
@@ -49,10 +51,22 @@
  * count judges a hold past its deadline while its job can still start. A job
  * left less time fails as too late to start.
  *
- * NO JOB IS CLAIMED while the room is under `memoryRoomMibMin`, or while any
- * job on the engine has a hold, held for room or starting. A count that
- * failed claims none and starts none, since a full engine is the one slowest
- * to answer.
+ * THE CEILING IS THE BUDGET LESS WHAT THE RUNNER RESERVES, which no job it
+ * takes may ask past, so a job that would fit only once what is always running
+ * has ended goes to another runner instead. A session is bound by the whole
+ * budget.
+ *
+ * A PLANE THAT CLAIMS BY ROOM is told the room, less what the runner is placing
+ * that has no hold yet, and the ceiling, and gives only jobs that fit both.
+ * Each runner asking it for jobs first takes the claim lock, beside the memory
+ * lock, without waiting, and lets it go once each job it was given has its
+ * hold, so no two runners on the engine are given the same room; until the
+ * plane has said whether it claims by room, a runner asks it for no job. The
+ * claim is abandoned as the memory lock is, and one held past its age bound
+ * costs at most a job held for room another runner was given. Against a plane
+ * that does not, no job is claimed while the room is under `memoryRoomMibMin`,
+ * or while any job on the engine is held for room. A count that failed claims
+ * none and starts none, since a full engine is the one slowest to answer.
  */
 
 import { mkdir } from "node:fs/promises";
@@ -73,6 +87,7 @@ import {
   heldStartingLabel,
   heldUntilLabel,
   inspectArgv,
+  kindLabel,
   memoryStatsArgv,
   poolLabel,
   runningListArgv,
@@ -80,7 +95,7 @@ import {
   volumeRemoveArgv,
 } from "./engineArgv.mjs";
 import { engineFailure, engineFailureLine } from "./engineErrors.mjs";
-import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
+import { fileLocked, fileLockHolderAlive, fileLockTaken } from "./fileLock.mjs";
 
 /**
  * @typedef {import("./engine.mjs").Engine} Engine
@@ -90,6 +105,7 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @typedef {object} MemoryCount
  * @property {number} engineBytes the engine's memory
  * @property {number} cappedBytes every running container a runner ran, at its cap
+ * @property {number} sessionBytes the sessions among those, at their caps
  * @property {number} usedBytes every other running container, at its use
  * @property {string} [unmeasured] why `usedBytes` counts none: the engine refused to say what its containers use
  * @property {readonly MemoryHold[]} holds every hold not abandoned whose assignment no running container counted at its cap carries
@@ -104,17 +120,24 @@ import { fileLocked, fileLockHolderAlive } from "./fileLock.mjs";
  * @property {() => number} nowMs
  * @property {AbortSignal} signal which every call of the count is made under
  *
- * @typedef {"Taking" | "Full" | "Held" | "Starting" | "Unknown"} MemoryBudgetState whether a count takes jobs, and why not
+ * @typedef {"Taking" | "Full" | "Held" | "Unknown"} MemoryBudgetState whether a count takes jobs, and why not
  *
  * @typedef {object} MemoryBudget
  * @property {number} bytesFree what its runner keeps free of the engine's memory
+ * @property {number} bytesReserved what its runner reserves of the budget, which no job may ask
  * @property {string} lockFile the memory lock's
+ * @property {string | undefined} claimLockFile the claim lock's; none, and the runner claims no job by room
  * @property {MemoryCounted | undefined} counted what the last `held` found, none before the first
- * @property {boolean} jobsTaken
- * @property {Exclude<MemoryBudgetState, "Starting">} said what was last logged of it, `Taking` before anything was
+ * @property {number} placingBytes the caps of what the runner was placing and had made no hold for, as the last `held` found
+ * @property {boolean} jobsTaken whether a plane that does not claim by room is asked for jobs
+ * @property {MemoryBudgetState} said what was last logged of it, `Taking` before anything was
  * @property {boolean} saidUnmeasured whether the use was last logged as counted at none
  *
  * @typedef {{decided: "Start"} | {decided: "Running"} | {decided: "Hold", why: string} | {decided: "Late"}} MemoryDecision
+ *
+ * @typedef {object} MemoryRoom what a poll tells a plane of the engine's memory, in MiB
+ * @property {number} roomMib
+ * @property {number} [ceilingMib] none where the count failed
  */
 
 const mibBytes = 2 ** 20;
@@ -138,6 +161,9 @@ export const memoryLockHeldMsMax = memoryLockCallsMsMax + 60_000;
 
 /** How long a check waits for another's hold of the lock: longer than any live hold lasts, so it waits one out. */
 export const memoryLockWaitMsMax = memoryLockHeldMsMax + 60_000;
+
+/** How old the claim lock may be before it is abandoned whoever it names, which frees one whose holder died under a process number since taken. */
+export const memoryClaimHeldMsMax = 10 * 60_000;
 
 /** Between two checks of a held job's room, each a count under the lock. */
 export const memoryHeldCheckMs = 15_000;
@@ -247,8 +273,9 @@ const memoryInspectedSchema = z.array(
 );
 
 /**
- * Every running container, by name, with its assignment and its cap, which is
- * 0 where it has none. One removed since the listing is left out.
+ * Every running container, by name, with its assignment, its cap, which is 0
+ * where it has none, and whether it is a session. One removed since the
+ * listing is left out.
  *
  * @param {MemoryCountPorts} ports
  */
@@ -275,6 +302,7 @@ async function memoryRunning(ports) {
       inspected.Config.Labels?.[poolLabel] !== undefined &&
       (inspected.HostConfig?.Memory ?? 0) > 0,
     memoryBytes: inspected.HostConfig?.Memory ?? 0,
+    session: inspected.Config.Labels?.[kindLabel] === "Session",
   }));
 }
 
@@ -409,6 +437,9 @@ export async function memoryCounted(ports) {
     const { holds, abandoned } = await memoryHoldsListed(ports);
     const running = await memoryRunning(ports);
     const capped = running.filter((container) => container.capped);
+    /** @param {readonly {memoryBytes: number}[]} containers */
+    const capsOf = (containers) =>
+      containers.reduce((sum, { memoryBytes }) => sum + memoryBytes, 0);
     const started = capped.flatMap(({ assignment }) =>
       assignment === undefined ? [] : [assignment],
     );
@@ -422,10 +453,8 @@ export async function memoryCounted(ports) {
     return {
       counted: {
         engineBytes,
-        cappedBytes: capped.reduce(
-          (sum, { memoryBytes }) => sum + memoryBytes,
-          0,
-        ),
+        cappedBytes: capsOf(capped),
+        sessionBytes: capsOf(capped.filter(({ session }) => session)),
         ...used,
         holds: holds.filter(({ assignment }) => !started.includes(assignment)),
         started,
@@ -495,8 +524,8 @@ export function memoryRoomBytes(bytesFree, count, except) {
 
 /**
  * Whether a job is claimed: only where the count is known, no job on the
- * engine is held, and the room left once `placingBytes` is taken is at least
- * `memoryRoomMibMin`.
+ * engine is held for room, and the room left once `placingBytes` is taken is
+ * at least `memoryRoomMibMin`.
  *
  * @param {number} bytesFree
  * @param {MemoryCounted} counted
@@ -505,10 +534,48 @@ export function memoryRoomBytes(bytesFree, count, except) {
 export function memoryJobsTaken(bytesFree, counted, placingBytes) {
   if ("unknown" in counted) return false;
   return (
-    counted.holds.length === 0 &&
+    !counted.holds.some(({ starting }) => !starting) &&
     memoryRoomBytes(bytesFree, counted) - placingBytes >=
       memoryRoomMibMin * mibBytes
   );
+}
+
+/** @param {number} bytes */
+const memoryMibOf = (bytes) => Math.max(0, Math.floor(bytes / mibBytes));
+
+/**
+ * The room and the ceiling the last count found, in whole MiB and never under
+ * none: the room less what the runner was placing with no hold yet, and the
+ * budget less what it reserves. Before a count, or where it failed, there is
+ * no room and no ceiling is known.
+ *
+ * @param {MemoryBudget} budget
+ * @returns {MemoryRoom}
+ */
+export function memoryRoom(budget) {
+  const { counted } = budget;
+  if (counted === undefined || "unknown" in counted) return { roomMib: 0 };
+  return {
+    roomMib: memoryMibOf(
+      memoryRoomBytes(budget.bytesFree, counted) - budget.placingBytes,
+    ),
+    ceilingMib: memoryMibOf(
+      memoryBudgetBytes(budget.bytesFree, counted) - budget.bytesReserved,
+    ),
+  };
+}
+
+/**
+ * Whether the runner asks for jobs, as the last count found: from a plane that
+ * claims by room wherever that count was made, and from one that does not
+ * where it takes jobs.
+ *
+ * @param {MemoryBudget} budget
+ * @param {boolean} byRoom whether the plane claims by room
+ */
+export function memoryBudgetTakes(budget, byRoom) {
+  if (!byRoom) return budget.jobsTaken;
+  return budget.counted !== undefined && !("unknown" in budget.counted);
 }
 
 /**
@@ -530,9 +597,9 @@ function memoryHoldOlder(hold, other) {
  * is already running, and so counted, is running, and starts nothing. One
  * whose run could not be given `memoryStartMsMin`, or half its hold's life
  * where that is less, before its hold's deadline less `memoryStartCutMs` is too
- * late. Otherwise it starts where no other
- * hold is older than its own and it fits the room its own hold leaves, and is
- * held where not, why saying what it waits for.
+ * late. Otherwise it starts where no job held for room is older than it and
+ * it fits the room its own hold leaves, and is held where not, why saying what
+ * it waits for.
  *
  * @param {number} bytesFree
  * @param {MemoryCounted} counted
@@ -552,7 +619,10 @@ export function memoryStartDecided(bytesFree, counted, job, nowMs) {
       why: `the engine's memory could not be counted: ${counted.unknown}`,
     };
   const [oldest] = counted.holds
-    .filter((hold) => hold.name !== job.name && memoryHoldOlder(hold, job))
+    .filter(
+      (hold) =>
+        !hold.starting && hold.name !== job.name && memoryHoldOlder(hold, job),
+    )
     .toSorted((a, b) => (memoryHoldOlder(a, b) ? -1 : 1));
   if (oldest !== undefined)
     return { decided: "Hold", why: `behind ${oldest.name}, held before it` };
@@ -566,18 +636,23 @@ export function memoryStartDecided(bytesFree, counted, job, nowMs) {
 
 /**
  * A budget keeping `bytesFree` free under the lock at `lockFile`, or none
- * where either is absent.
+ * where either is absent, reserving `bytesReserved` of it from jobs and
+ * claiming by room under the lock at `claimLockFile` where there is one.
  *
  * @param {number | undefined} bytesFree
  * @param {string | undefined} lockFile
+ * @param {{bytesReserved?: number, claimLockFile?: string}} [claims]
  * @returns {MemoryBudget | undefined}
  */
-export function memoryBudget(bytesFree, lockFile) {
+export function memoryBudget(bytesFree, lockFile, claims = {}) {
   if (bytesFree === undefined || lockFile === undefined) return undefined;
   return {
     bytesFree,
+    bytesReserved: claims.bytesReserved ?? 0,
     lockFile,
+    claimLockFile: claims.claimLockFile,
     counted: undefined,
+    placingBytes: 0,
     jobsTaken: true,
     said: "Taking",
     saidUnmeasured: false,
@@ -586,8 +661,7 @@ export function memoryBudget(bytesFree, lockFile) {
 
 /**
  * Whether a count takes jobs, and why not: it is unknown, a job on the engine
- * is held for room, one is starting, or the room left once `placingBytes` is
- * taken is short.
+ * is held for room, or the room left once `placingBytes` is taken is short.
  *
  * @param {number} bytesFree
  * @param {MemoryCounted} counted
@@ -597,7 +671,6 @@ export function memoryBudget(bytesFree, lockFile) {
 export function memoryBudgetState(bytesFree, counted, placingBytes) {
   if ("unknown" in counted) return "Unknown";
   if (counted.holds.some(({ starting }) => !starting)) return "Held";
-  if (counted.holds.length > 0) return "Starting";
   return memoryJobsTaken(bytesFree, counted, placingBytes) ? "Taking" : "Full";
 }
 
@@ -622,8 +695,7 @@ function memoryBudgetSaidUse(budget, counted, log) {
 }
 
 /**
- * What a pass found, logged where it differs from what was last logged. A job
- * starting is not logged, since its hold goes once it has started.
+ * What a pass found, logged where it differs from what was last logged.
  *
  * @param {MemoryBudget} budget
  * @param {MemoryCounted} counted
@@ -632,7 +704,7 @@ function memoryBudgetSaidUse(budget, counted, log) {
  */
 function memoryBudgetSaid(budget, counted, now, log) {
   memoryBudgetSaidUse(budget, counted, log);
-  if (now === "Starting" || now === budget.said) return;
+  if (now === budget.said) return;
   budget.said = now;
   if ("unknown" in counted) {
     log(
@@ -640,7 +712,7 @@ function memoryBudgetSaid(budget, counted, now, log) {
     );
     return;
   }
-  const room = `this engine has ${diskGib(Math.max(0, memoryRoomBytes(budget.bytesFree, counted)))} GiB of room in its ${diskGib(memoryBudgetBytes(budget.bytesFree, counted))} GiB memory budget`;
+  const room = `this engine has ${diskGib(Math.max(0, memoryRoomBytes(budget.bytesFree, counted) - budget.placingBytes))} GiB of room in its ${diskGib(memoryBudgetBytes(budget.bytesFree, counted))} GiB memory budget`;
   if (now === "Held")
     log(
       `${room}, and a job on it is held for room: this runner takes no job until it starts`,
@@ -664,6 +736,7 @@ function memoryBudgetSaid(budget, counted, now, log) {
 export function memoryBudgetHeld(budget, counted, placingBytes, log) {
   const now = memoryBudgetState(budget.bytesFree, counted, placingBytes);
   budget.counted = counted;
+  budget.placingBytes = placingBytes;
   budget.jobsTaken = now === "Taking";
   memoryBudgetSaid(budget, counted, now, log);
 }
@@ -675,6 +748,23 @@ const memoryLockPorts = {
   wait,
   holderAlive: fileLockHolderAlive,
 };
+
+/**
+ * The claim lock at `lockFile`, whose directory is made where it is not
+ * there, taken without waiting: what lets it go, or nothing where another
+ * runner holds it.
+ *
+ * @param {string} lockFile
+ * @param {Partial<import("./fileLock.mjs").FileLockPorts>} [ports]
+ */
+export async function memoryClaimTaken(lockFile, ports = {}) {
+  await mkdir(dirname(lockFile), { recursive: true, mode: 0o700 });
+  return fileLockTaken(
+    lockFile,
+    { heldMsMax: memoryClaimHeldMsMax },
+    { ...memoryLockPorts, ...ports },
+  );
+}
 
 /**
  * `hold` run under the memory lock at `lockFile`, whose directory is made

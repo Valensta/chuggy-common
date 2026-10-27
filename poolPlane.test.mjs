@@ -8,9 +8,13 @@ import {
 } from "@chuggy/worker-contract/workerContract";
 import {
   workerPoolCapabilitiesMax,
+  workerRunnerPollWaitHeader,
   workerRunnerCapabilitiesHeader,
   workerRunnerCapabilitiesOf,
   workerRunnerHeader,
+  workerRunnerMemoryCeilingHeader,
+  workerRunnerCountOf,
+  workerRunnerMemoryRoomHeader,
   workerRunnerOf,
 } from "@chuggy/worker-contract/workerPool";
 
@@ -425,6 +429,98 @@ test("capabilities the contract cannot read are refused at once, a set past its 
     );
   const [named] = await capabilitiesNamed([...bounded, bounded[0]]);
   assert.deepEqual(named.named, { named: "Set", capabilities: bounded });
+});
+
+/**
+ * Catches a room or a ceiling the plane would refuse reaching a poll, whose
+ * 400 ends the pool, and a wait sent where none was asked.
+ */
+test("a poll names the room its pool offers jobs and its ceiling, each only where the contract reads it, and the wait only where one is given", async () => {
+  /** @type {Record<string, string>[]} */
+  const seen = [];
+  const plane = poolPlaneClient(planeSettings, async (_input, init) => {
+    seen.push(init.headers);
+    return answered(
+      200,
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+    );
+  });
+  await plane.poll("pool-token", [], 1, 0, {
+    memory: { roomMib: 4096, ceilingMib: 12288 },
+  });
+  await plane.poll("pool-token", [], 1, 0, {
+    memory: { roomMib: 0 },
+    waitSecs: 0,
+  });
+  await plane.poll("pool-token", [], 1, 0, {
+    memory: { roomMib: -1, ceilingMib: 1.5 },
+  });
+  await plane.poll("pool-token", [], 1);
+  assert.deepEqual(
+    seen.map((headers) => [
+      headers[workerRunnerMemoryRoomHeader],
+      headers[workerRunnerMemoryCeilingHeader],
+      headers[workerRunnerPollWaitHeader],
+    ]),
+    [
+      ["4096", "12288", undefined],
+      ["0", undefined, "0"],
+      [undefined, undefined, undefined],
+      [undefined, undefined, undefined],
+    ],
+  );
+  for (const sent of ["4096", "12288", "0"])
+    assert.equal(workerRunnerCountOf(sent).named, "Count");
+});
+
+/**
+ * Catches a pool claiming by room from a plane that does not claim so, or
+ * that did not say whether a job waits, which would never ask it for one.
+ */
+test("an answer says whether a job waits only from a plane that claims by room and said, and the client keeps whether its last reconciled answer did, knowing nothing before one", async () => {
+  let release = workerContractRelease;
+  /** @type {Record<string, unknown>} */
+  let body = { assignments: [], sessions: [], stop: [], jobsWaiting: true };
+  let status = 200;
+  const plane = poolPlaneClient(
+    planeSettings,
+    async () =>
+      new globalThis.Response(JSON.stringify(body), {
+        status,
+        headers: { [workerContractHeader]: release },
+      }),
+  );
+  assert.equal(plane.claimsByRoom(), undefined);
+  status = 503;
+  await plane.poll("pool-token", [], 0);
+  assert.equal(plane.claimsByRoom(), undefined);
+  status = 200;
+  const waiting = await plane.poll("pool-token", [], 0);
+  assert.equal(waiting.polled === "Reconciled" && waiting.jobsWaiting, true);
+  assert.equal(plane.claimsByRoom(), true);
+  body = { ...body, jobsWaiting: false };
+  const none = await plane.poll("pool-token", [], 0);
+  assert.equal(none.polled === "Reconciled" && none.jobsWaiting, false);
+  assert.equal(plane.claimsByRoom(), true);
+  status = 503;
+  await plane.poll("pool-token", [], 0);
+  assert.equal(plane.claimsByRoom(), true);
+  status = 200;
+  release = "1.20.0";
+  body = { ...body, jobsWaiting: true };
+  assert.deepEqual(await plane.poll("pool-token", [], 0), {
+    polled: "Reconciled",
+    assignments: [],
+    sessions: [],
+    stop: [],
+  });
+  assert.equal(plane.claimsByRoom(), false);
+  release = workerContractRelease;
+  await plane.poll("pool-token", [], 0);
+  assert.equal(plane.claimsByRoom(), true);
+  body = { assignments: [], sessions: [], stop: [] };
+  await plane.poll("pool-token", [], 0);
+  assert.equal(plane.claimsByRoom(), false);
 });
 
 test("a poll and every settlement name the release this client was built with", async () => {

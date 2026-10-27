@@ -3642,7 +3642,7 @@ test("a disk under its floor has a reclaim remove what it may, oldest first, unt
   ]);
 });
 
-test("a disk a reclaim leaves under its floor takes no job, with no line more, until a pass finds it over", async (t) => {
+test("a disk a reclaim leaves under its floor takes no job, whether the plane claims by room or not, with no line more, until a pass finds it over", async (t) => {
   const context = await floorHarness(t);
   const { backend, state, log, disk, clock } = context;
   const references = [
@@ -3654,6 +3654,7 @@ test("a disk a reclaim leaves under its floor takes no job, with no line more, u
   removalsFree(context, gib);
   await backend.held();
   assert.equal(backend.jobsTaken(), false);
+  assert.equal(backend.jobsTaken(true), false);
   assert.deepEqual([...state.images], [references[2]]);
   clock.nowMs += 1000;
   await backend.held();
@@ -3661,6 +3662,7 @@ test("a disk a reclaim leaves under its floor takes no job, with no line more, u
   disk.set(25 * gib);
   await backend.held();
   assert.equal(backend.jobsTaken(), true);
+  assert.equal(backend.jobsTaken(true), true);
   assert.deepEqual(floorLines(log), [
     "this runner's disk has 12 GiB free at /var/lib/docker, under its floor of 20 GiB: it takes no job until it is over",
     "this runner's disk has 25 GiB free at /var/lib/docker, over its floor of 20 GiB: it takes jobs again",
@@ -4209,14 +4211,14 @@ test("a pass's room is what its own placements will take less, and no job is tak
   assert.deepEqual(
     log.filter((line) => line.startsWith("this engine")),
     [
-      "this engine has 5 GiB of room in its 14 GiB memory budget, under the 0.5 GiB a job needs: this runner takes no job until it has more",
+      "this engine has 0 GiB of room in its 14 GiB memory budget, under the 0.5 GiB a job needs: this runner takes no job until it has more",
     ],
   );
   pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
   await backend.settled();
 });
 
-test("a job that does not fit the room is held, and is started once a later check finds room, its deadline counted from its start", async (t) => {
+test("a job that does not fit the room is held from its placement, and is started once a later check finds room, its deadline counted from its start", async (t) => {
   const { backend, state, clock, log, checked, waiting } =
     await memoryHarness(t);
   occupied(state, "chuggy-jobs-postgres", { usedBytes: 8 * memoryGib });
@@ -4248,7 +4250,7 @@ test("a job that does not fit the room is held, and is started once a later chec
     "io.chuggy.held": "vteng/chuggy/shame",
     "io.chuggy.assignment": "asg-1",
     "io.chuggy.held.memory-mib": "8192",
-    "io.chuggy.held.since-ms": String(startMs + 10_000),
+    "io.chuggy.held.since-ms": String(startMs),
     "io.chuggy.held.pid": String(process.pid),
     "io.chuggy.held.until-ms": String(startMs + 3600 * 1000),
     "io.chuggy.held.starting": "false",
@@ -4378,6 +4380,188 @@ test("a job asking more than the memory budget is refused, naming it, and one wi
     { placed: "Placed" },
   );
   await backend.settled();
+});
+
+test("a job is held from its placement, before its image is pulled: as starting where it fits the room, and as held for room behind it where it does not", async (t) => {
+  const { backend, state } = await memoryHarness(t);
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 6 * memoryGib });
+  state.images.delete(image);
+  const pull = deferred();
+  /** @type {Record<string, string | undefined>[]} */
+  const heldAtPull = [];
+  state.pull = () => {
+    heldAtPull.push(
+      Object.fromEntries(
+        holdNames(state).map((name) => [
+          name,
+          state.volumes.get(name)?.labels["io.chuggy.held.starting"],
+        ]),
+      ),
+    );
+    return pull.promise;
+  };
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 4096 }), "Job");
+  const first = `${containerName(pool, "asg-1")}-held`;
+  assert.deepEqual(holdNames(state), [first]);
+  await backend.place(
+    assignment({ assignment: "asg-2", memoryMib: 6144 }),
+    "Job",
+  );
+  const second = `${containerName(pool, "asg-2")}-held`;
+  await until(() => heldAtPull.length === 2);
+  assert.deepEqual(heldAtPull, [
+    { [first]: "true" },
+    { [first]: "true", [second]: "false" },
+  ]);
+  await backend.held();
+  assert.equal(backend.jobsTaken(), false);
+  assert.equal(backend.jobsTaken(true), true);
+  assert.deepEqual(backend.memoryRoom(), { roomMib: 0, ceilingMib: 14 * 1024 });
+  for (const placement of ["asg-1", "asg-2"]) backend.stop(placement);
+  pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
+  await backend.settled();
+  assert.deepEqual(holdNames(state), []);
+});
+
+test("a poll is told the room less what this runner places with no hold, and the budget less what it reserves from jobs", async (t) => {
+  const { backend, state } = await memoryHarness(t, {
+    memoryReservedBytes: 4 * memoryGib,
+  });
+  assert.deepEqual(backend.memoryRoom(), { roomMib: 0 });
+  occupied(state, "chuggy-jobs-postgres", { usedBytes: 3 * memoryGib });
+  const pull = deferred();
+  state.pull = () => pull.promise;
+  state.images.delete(image);
+  await backend.place(assignment({ memoryMib: 1024 }), "Session");
+  await backend.held();
+  assert.deepEqual(backend.memoryRoom(), {
+    roomMib: 10 * 1024,
+    ceilingMib: 10 * 1024,
+  });
+  backend.stop("asg-1");
+  pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
+  await backend.settled();
+
+  const none = await harness(t);
+  assert.equal(none.backend.memoryRoom(), undefined);
+});
+
+test("a job asking past the budget less what this runner reserves is refused, naming both, its ceiling none where the reserve passes the budget, and a session asking within the budget is placed", async (t) => {
+  const { backend } = await memoryHarness(t, {
+    memoryReservedBytes: 4 * memoryGib,
+  });
+  await backend.held();
+  assert.deepEqual(
+    await backend.place(assignment({ memoryMib: 10241 }), "Job"),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment asks for 10241 MiB and this runner's ceiling for a job is 10240 MiB: its memory budget of 14336 MiB less the 4096 MiB it reserves",
+    },
+  );
+  assert.deepEqual(
+    await backend.place(
+      assignment({ assignment: "asg-2", memoryMib: 14336 }),
+      "Session",
+    ),
+    { placed: "Placed" },
+  );
+  assert.deepEqual(
+    await backend.place(
+      assignment({ assignment: "asg-3", memoryMib: 14337 }),
+      "Session",
+    ),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment asks for 14337 MiB and this runner's memory budget is 14336 MiB: the engine's 16384 MiB less the 2048 MiB this runner keeps free",
+    },
+  );
+  await backend.settled();
+
+  const reservedPast = await memoryHarness(t, {
+    memoryReservedBytes: 15 * memoryGib,
+  });
+  await reservedPast.backend.held();
+  assert.deepEqual(
+    await reservedPast.backend.place(assignment({ memoryMib: 1 }), "Job"),
+    {
+      placed: "Refused",
+      evidence:
+        "the assignment asks for 1 MiB and this runner's ceiling for a job is 0 MiB: its memory budget of 14336 MiB less the 15360 MiB it reserves",
+    },
+  );
+});
+
+test("a job whose hold could not be made at its claim is counted as placing", async (t) => {
+  const { backend, state } = await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  state.intercept = (call) =>
+    call.argv[1] === "create" && call.argv.at(-1) === `${name}-held`
+      ? { code: 1, stdout: "", stderr: "Error: no space left on device\n" }
+      : undefined;
+  const pull = deferred();
+  state.pull = () => pull.promise;
+  state.images.delete(image);
+  await backend.held();
+  await backend.place(assignment({ memoryMib: 4096 }), "Job");
+  await backend.held();
+  assert.deepEqual(holdNames(state), []);
+  assert.deepEqual(backend.memoryRoom(), {
+    roomMib: 10 * 1024,
+    ceilingMib: 14 * 1024,
+  });
+  backend.stop("asg-1");
+  pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
+  await backend.settled();
+});
+
+test("a job too late to start at its claim makes no hold, and fails without running", async (t) => {
+  const { backend, state, clock, log } = await memoryHarness(t);
+  const name = containerName(pool, "asg-1");
+  await backend.held();
+  state.intercept = (call) => {
+    if (call.argv[0] === "info")
+      clock.nowMs = startMs + 3600 * 1000 - memoryStartCutMs;
+    return undefined;
+  };
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  assert.ok(!state.calls.some((call) => call.argv.at(-1) === `${name}-held`));
+  assert.ok(!state.calls.some((call) => call.argv[0] === "run"));
+  assert.ok(
+    log.includes(
+      `${name} was not started: it could not start before the assignment's deadline`,
+    ),
+    log.join("\n"),
+  );
+});
+
+test("a backend takes the claim only where it keeps a budget and is given the claim lock, one backend at a time", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-claim-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const memoryClaimLock = join(directory, "claim", "podman.claim");
+  const first = await memoryHarness(t, { memoryClaimLock });
+  const second = await memoryHarness(
+    t,
+    { pool: otherPool, memoryClaimLock },
+    { engine: first.engine },
+    first.memoryLock,
+  );
+  const release = await first.backend.claimed?.();
+  assert.ok(release !== undefined);
+  assert.equal(await second.backend.claimed?.(), undefined);
+  await release();
+  const again = await second.backend.claimed?.();
+  assert.ok(again !== undefined);
+  await again();
+
+  assert.equal((await memoryHarness(t)).backend.claimed, undefined);
+  assert.equal(
+    (await harness(t, { memoryClaimLock })).backend.claimed,
+    undefined,
+  );
 });
 
 test("a held job stopped, or too near its deadline to start, leaves no hold", async (t) => {
@@ -4533,19 +4717,19 @@ test("a job placed again once its container runs is counted by that container, m
   assert.deepEqual(holdNames(state), []);
 });
 
-test("a job is counted by its hold until its container has started, however long the start takes, and a pass meanwhile takes no job and says nothing", async (t) => {
+test("a job is counted by its hold until its container has started, however long the start takes, and a pass meanwhile counts it at its cap and says nothing", async (t) => {
   const { backend, engine, state, log } = await memoryHarness(t);
   const name = containerName(pool, "asg-1");
   /** @type {string[][]} */
   const heldAtRun = [];
-  /** @type {boolean[]} */
+  /** @type {[boolean, number | undefined][]} */
   const takenAtRun = [];
   state.intercept = (call) => {
     if (call.argv[0] !== "run" || heldAtRun.length > 0) return undefined;
     heldAtRun.push(holdNames(state));
     return (async () => {
       await backend.held();
-      takenAtRun.push(backend.jobsTaken());
+      takenAtRun.push([backend.jobsTaken(), backend.memoryRoom()?.roomMib]);
       return engine.exec(call.argv);
     })();
   };
@@ -4553,7 +4737,7 @@ test("a job is counted by its hold until its container has started, however long
   await backend.place(assignment({ memoryMib: 4096 }), "Job");
   await backend.settled();
   assert.deepEqual(heldAtRun, [[`${name}-held`]]);
-  assert.deepEqual(takenAtRun, [false]);
+  assert.deepEqual(takenAtRun, [[true, 10 * 1024]]);
   assert.deepEqual(runningWorkloads(state), [name]);
   assert.deepEqual(holdNames(state), []);
   await backend.held();
@@ -4775,7 +4959,10 @@ test("a session is started however full the engine is, and a backend with no bud
   for (const [key, value] of /** @type {const} */ ([
     ["memoryFreeBytesMin", -1],
     ["memoryFreeBytesMin", 0.5],
+    ["memoryReservedBytes", -1],
+    ["memoryReservedBytes", 0.5],
     ["memoryLock", ""],
+    ["memoryClaimLock", ""],
   ]))
     assert.throws(
       () => checkedContainerBackendSettings({ ...none.settings, [key]: value }),

@@ -6,7 +6,7 @@
  * TypeScript, and a change to one is a change to both, but for a runner's
  * update of itself, which that cluster client never makes, and a backend
  * that takes no job while its disk is low or its engine's memory has no
- * room, which a cluster leaves to its kubelet.
+ * room, and claims jobs by that room, which a cluster leaves to its kubelet.
  *
  * A JOB AND A SESSION ARE COUNTED APART. Each kind has its own ceiling, its
  * own room on the poll and its own offers, so a session never takes a job's
@@ -19,6 +19,18 @@
  * assignment is then settled `Refused` on the pool's plane, naming the image's
  * fault, so the attempt's execution is blocked rather than its run failed and
  * retried.
+ *
+ * A POOL SHARING ITS ENGINE CLAIMS JOBS BY ITS ROOM, ONE POOL AT A TIME,
+ * where the plane's last answer said it claims by room and the backend keeps
+ * a claim lock. Each poll then asks for no job, naming the memory room the
+ * pool offers jobs, and an answer saying a job that fits waits has the pass
+ * take the claim, without waiting. Holding it, the pass reads the backend
+ * again and asks for the jobs that read has room for in a poll the plane
+ * answers at once, places each, which holds its memory, and lets the claim
+ * go. A pass that found it held, or placed no job under it, ends there, and
+ * the next polls after `workerPoolClaimWaitMs`, since the plane answers it at
+ * once while that job waits. Otherwise a poll asks for jobs as it always has,
+ * naming the room too.
  *
  * Nothing is held between passes. What is running is read from the backend,
  * so a restarted loop reconciles the work its predecessor placed, and a
@@ -83,16 +95,29 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(assignment: string) => Promise<WorkerPoolStopped>} stop idempotent, whichever kind it is
  * @property {() => Promise<readonly WorkerPoolHeld[]>} held every workload of either kind, each with the kind it was placed as
  * @property {() => Promise<readonly WorkerPoolEnded[]>} ended each one once, after `held` stopped naming it; never one this pool stopped
- * @property {() => boolean} [jobsTaken] whether it takes a job now, as its last `held` found; false while its machine's disk is low or its engine's memory has no room, and true for a backend that keeps neither
+ * @property {(byRoom: boolean) => boolean} [jobsTaken] whether it takes a job now, as its last `held` found, from a plane that claims by room or one that does not; false while its machine's disk is low or its engine's memory has no room for it, and true for a backend that keeps neither
+ * @property {() => WorkerPoolMemoryRoom | undefined} [memoryRoom] its engine's memory as its last `held` found; none for a backend that keeps no budget
+ * @property {() => Promise<(() => Promise<void>) | undefined>} [claimed] takes its engine's claim without waiting: what lets it go, or nothing while another pool holds it; none for a backend that keeps no claim lock
+ *
+ * @typedef {object} WorkerPoolMemoryRoom in MiB
+ * @property {number} roomMib what jobs may take now, none where the count failed
+ * @property {number} [ceilingMib] what any one job may ask, unknown where the count failed
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
- *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease}
- *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled
+ *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease,
+ *   jobsWaiting?: boolean}
+ *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named
+ *
+ * @typedef {object} WorkerPoolPollTerms what a poll names beside its query
+ * @property {WorkerPoolMemoryRoom} [memory] the room it offers jobs, and its ceiling
+ * @property {number} [waitSecs] the longest the plane may wait before it answers; none, and the plane's own
+ *
  * @typedef {"Settled" | "Lost" | "Stale" | "Denied" | "Unavailable"} WorkerPoolSettled
  *
  * @typedef {object} WorkerPoolPlane `Stale` is a token to replace; `Denied` a pool the plane will not serve
- * @property {(token: string, held: readonly string[], wanted: number, wantedSessions: number) => Promise<WorkerPoolPolled>} poll
+ * @property {(token: string, held: readonly string[], wanted: number, wantedSessions: number, terms?: WorkerPoolPollTerms) => Promise<WorkerPoolPolled>} poll
  * @property {(token: string, assignment: string, outcome: AssignmentOutcome) => Promise<WorkerPoolSettled>} settle
+ * @property {() => boolean | undefined} [claimsByRoom] whether its last reconciled answer said whether a job waits, undefined before it has one; none, and it never does
  *
  * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolEndAnswer
  *
@@ -116,9 +141,13 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {number} outageBackoffMs the wait after a pass that met an outage
  * @property {number} passesMax the passes one run makes
  *
- * @typedef {{passed: "Reconciled", placed: number, stopped: number, refused: number, ended: number}
+ * @typedef {{placed: number, stopped: number, refused: number}} WorkerPoolTally
+ *
+ * @typedef {{passed: "Reconciled", placed: number, stopped: number, refused: number, ended: number, claim?: WorkerPoolClaimSpent}
  *   | {passed: "Denied", evidence: string} | {passed: "Unavailable", evidence: string}
- *   | {passed: "Updated", version: string}} WorkerPoolPass `Updated` is a runner installed at `version`, to restart on
+ *   | {passed: "Updated", version: string}} WorkerPoolPass `Updated` is a runner installed at `version`, to restart on; `claim` where the pass asked for jobs under its engine's claim and placed none, and the next waits `workerPoolClaimWaitMs`
+ *
+ * @typedef {"Busy" | "Empty"} WorkerPoolClaimSpent `Busy` where another pool held the claim, `Empty` where this one took it and placed no job
  *
  * @typedef {object} WorkerPoolUpdates what a run is told of its runner's update of itself
  * @property {boolean} on whether it updates, or only says a release is out
@@ -609,11 +638,204 @@ export function workerPoolUpdating(updates, seams) {
   };
 }
 
+/** How long a pool that placed no job under its engine's claim waits before it polls again. */
+export const workerPoolClaimWaitMs = 1_000;
+
+/**
+ * The memory a poll names: the backend's room where the pool takes a job and
+ * has room under its job ceiling, and an empty room where it does not, so a
+ * plane that claims by room never says a job waits that the pool would not
+ * ask for.
+ *
+ * @param {WorkerPoolClient} client
+ * @param {readonly WorkerPoolHeld[]} held
+ * @param {boolean} jobsTaken
+ * @returns {WorkerPoolPollTerms}
+ */
+function workerPoolClientTerms(client, held, jobsTaken) {
+  const memory = client.backend.memoryRoom?.();
+  if (memory === undefined) return {};
+  const offered =
+    jobsTaken && workerPoolClientRoom(client.settings, held, "Job") > 0;
+  return { memory: { ...memory, roomMib: offered ? memory.roomMib : 0 } };
+}
+
+/**
+ * One poll and what it is answered with: what it asks for of each kind
+ * measured from `held`, every stop delivered, and what was offered placed or
+ * settled. A poll that was not reconciled, or a stop that failed, ends the
+ * pass.
+ *
+ * @param {WorkerPoolClient} client
+ * @param {string} token
+ * @param {readonly WorkerPoolHeld[]} held
+ * @param {{jobs: boolean, sessions: boolean}} taking whether it asks for each kind
+ * @param {WorkerPoolPollTerms} terms
+ * @returns {Promise<{tally: WorkerPoolTally, polled: Extract<WorkerPoolPolled, {polled: "Reconciled"}>}
+ *   | Extract<WorkerPoolPass, {passed: "Denied" | "Unavailable"}>>}
+ */
+async function workerPoolClientReconciled(client, token, held, taking, terms) {
+  const polled = await client.plane.poll(
+    token,
+    held.map(({ assignment }) => assignment),
+    taking.jobs ? workerPoolClientRoom(client.settings, held, "Job") : 0,
+    taking.sessions
+      ? workerPoolClientRoom(client.settings, held, "Session")
+      : 0,
+    terms,
+  );
+  if (polled.polled === "Stale") {
+    client.tokens.invalidate(token);
+    return { passed: "Unavailable", evidence: "the pool token was rejected" };
+  }
+  if (polled.polled !== "Reconciled")
+    return { passed: polled.polled, evidence: polled.evidence };
+  const stopped = await workerPoolClientStopped(client, polled.stop);
+  if ("passed" in stopped) return stopped;
+  const jobs = await workerPoolClientPlaced(
+    client,
+    token,
+    polled.assignments,
+    "Job",
+    {
+      running: workerPoolClientRunning(held, "Job", polled.stop),
+      taking: taking.jobs,
+    },
+  );
+  const sessions = await workerPoolClientPlaced(
+    client,
+    token,
+    polled.sessions,
+    "Session",
+    {
+      running: workerPoolClientRunning(held, "Session", polled.stop),
+      taking: taking.sessions,
+    },
+  );
+  return {
+    tally: {
+      placed: jobs.placed + sessions.placed,
+      stopped: stopped.stopped,
+      refused: jobs.refused + sessions.refused,
+    },
+    polled,
+  };
+}
+
+/** What a poll that placed, stopped and refused nothing did. */
+const workerPoolTallyNone = { placed: 0, stopped: 0, refused: 0 };
+
+/**
+ * Asks for jobs under the engine's claim, taken without waiting: what the
+ * backend holds is read again, then a poll the plane answers at once asks for
+ * what that read has room for and places it, each job holding its memory as
+ * it is placed, and the claim goes once they all have. A claim another pool
+ * holds is busy, and one that placed no job is empty.
+ *
+ * @param {WorkerPoolClient} client
+ * @param {string} token
+ * @param {() => Promise<(() => Promise<void>) | undefined>} claimed
+ * @returns {Promise<{tally: WorkerPoolTally, polled?: Extract<WorkerPoolPolled, {polled: "Reconciled"}>, claim?: WorkerPoolClaimSpent}
+ *   | Extract<WorkerPoolPass, {passed: "Denied" | "Unavailable"}>>}
+ */
+async function workerPoolClientClaimed(client, token, claimed) {
+  const release = await claimed();
+  if (release === undefined)
+    return { tally: workerPoolTallyNone, claim: "Busy" };
+  try {
+    const held = await workerPoolClientHeld(client);
+    const jobsTaken = client.backend.jobsTaken?.(true) ?? true;
+    if (!jobsTaken || workerPoolClientRoom(client.settings, held, "Job") === 0)
+      return { tally: workerPoolTallyNone, claim: "Empty" };
+    const reconciled = await workerPoolClientReconciled(
+      client,
+      token,
+      held,
+      { jobs: true, sessions: false },
+      { ...workerPoolClientTerms(client, held, true), waitSecs: 0 },
+    );
+    if ("passed" in reconciled || reconciled.tally.placed > 0)
+      return reconciled;
+    return { ...reconciled, claim: "Empty" };
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * Whether the plane claims by room, for a pool whose backend keeps a claim:
+ * undefined until an answer of the plane's has said.
+ *
+ * @param {WorkerPoolClient} client
+ * @returns {boolean | undefined}
+ */
+function workerPoolClientByRoom(client) {
+  const { claimsByRoom } = client.plane;
+  return client.backend.claimed === undefined || claimsByRoom === undefined
+    ? false
+    : claimsByRoom();
+}
+
+/**
+ * Asks for jobs by count, as a pool of a plane that does not claim by room
+ * does, once a poll asking none has found the plane is one.
+ *
+ * @param {WorkerPoolClient} client
+ * @param {string} token
+ */
+async function workerPoolClientCounted(client, token) {
+  const held = await workerPoolClientHeld(client);
+  const jobsTaken = client.backend.jobsTaken?.(false) ?? true;
+  if (!jobsTaken) return { tally: workerPoolTallyNone };
+  return workerPoolClientReconciled(
+    client,
+    token,
+    held,
+    { jobs: true, sessions: false },
+    workerPoolClientTerms(client, held, true),
+  );
+}
+
+/**
+ * What a pass that takes a job asks after its first poll: a claim where the
+ * plane claims by room and said a job waits, and jobs by count where that poll
+ * was the one to find out the plane does not. A pass taking no job asks
+ * nothing more, so it reads what it holds no more, which may reclaim the disk.
+ *
+ * @param {WorkerPoolClient} client
+ * @param {string} token
+ * @param {boolean | undefined} byRoom whether the plane claimed by room before that poll
+ * @param {boolean} jobsTaken whether the pass takes a job
+ * @param {Extract<WorkerPoolPolled, {polled: "Reconciled"}>} polled
+ */
+async function workerPoolClientFollowed(
+  client,
+  token,
+  byRoom,
+  jobsTaken,
+  polled,
+) {
+  const { claimed } = client.backend;
+  const found = workerPoolClientByRoom(client);
+  if (!jobsTaken) return { tally: workerPoolTallyNone };
+  if (claimed !== undefined && found === true && polled.jobsWaiting === true)
+    return workerPoolClientClaimed(client, token, claimed);
+  if (byRoom === undefined && found === false)
+    return workerPoolClientCounted(client, token);
+  return { tally: workerPoolTallyNone };
+}
+
 /**
  * One reconciliation pass. The room is asked before the stops are known, so a
  * stop this pass delivers frees room the next pass asks for. The ended are
  * ended before the poll, which may wait on the plane for work to offer, and
  * before a pass ends the run for its runner's restart.
+ *
+ * A pool keeping a claim asks a plane that has not yet said whether it claims
+ * by room for no job, and to answer at once, since it would otherwise claim
+ * by room without the claim. A plane that does not reads no wait, so that
+ * poll costs its whole wait once, and the jobs it would have given are asked
+ * for after it.
  *
  * @param {WorkerPoolClient} client
  * @param {WorkerPoolUpdating} [updating] the run's update of its runner, where it makes one
@@ -628,48 +850,36 @@ export async function workerPoolClientPass(client, updating) {
   const restart = updating?.restart(held);
   if (restart !== undefined) return { passed: "Updated", version: restart };
   const sessionsTaken = !(updating?.draining() ?? false);
-  const jobsTaken = sessionsTaken && (client.backend.jobsTaken?.() ?? true);
-  const polled = await client.plane.poll(
-    minted.token,
-    held.map(({ assignment }) => assignment),
-    jobsTaken ? workerPoolClientRoom(client.settings, held, "Job") : 0,
-    sessionsTaken ? workerPoolClientRoom(client.settings, held, "Session") : 0,
-  );
-  if (polled.polled === "Stale") {
-    client.tokens.invalidate(minted.token);
-    return { passed: "Unavailable", evidence: "the pool token was rejected" };
-  }
-  if (polled.polled !== "Reconciled")
-    return { passed: polled.polled, evidence: polled.evidence };
-  const stopped = await workerPoolClientStopped(client, polled.stop);
-  if ("passed" in stopped) return stopped;
-  const jobs = await workerPoolClientPlaced(
+  const byRoom = workerPoolClientByRoom(client);
+  const jobsTaken =
+    sessionsTaken && (client.backend.jobsTaken?.(byRoom !== false) ?? true);
+  const polled = await workerPoolClientReconciled(
     client,
     minted.token,
-    polled.assignments,
-    "Job",
+    held,
+    { jobs: jobsTaken && byRoom === false, sessions: sessionsTaken },
     {
-      running: workerPoolClientRunning(held, "Job", polled.stop),
-      taking: jobsTaken,
+      ...workerPoolClientTerms(client, held, jobsTaken),
+      ...(byRoom === undefined ? { waitSecs: 0 } : {}),
     },
   );
-  const sessions = await workerPoolClientPlaced(
+  if ("passed" in polled) return polled;
+  const claim = await workerPoolClientFollowed(
     client,
     minted.token,
-    polled.sessions,
-    "Session",
-    {
-      running: workerPoolClientRunning(held, "Session", polled.stop),
-      taking: sessionsTaken,
-    },
+    byRoom,
+    jobsTaken,
+    polled.polled,
   );
-  await updating?.named(polled.release);
+  if ("passed" in claim) return claim;
+  await updating?.named((claim.polled ?? polled.polled).release);
   return {
     passed: "Reconciled",
-    placed: jobs.placed + sessions.placed,
-    stopped: stopped.stopped,
-    refused: jobs.refused + sessions.refused,
+    placed: polled.tally.placed + claim.tally.placed,
+    stopped: polled.tally.stopped + claim.tally.stopped,
+    refused: polled.tally.refused + claim.tally.refused,
     ended,
+    ...("claim" in claim ? { claim: claim.claim } : {}),
   };
 }
 
@@ -696,6 +906,8 @@ export async function workerPoolClientRun(client, sleep) {
     if (last.passed === "Denied") return last;
     if (last.passed === "Unavailable")
       await sleep(client.settings.outageBackoffMs);
+    else if (last.passed === "Reconciled" && last.claim !== undefined)
+      await sleep(workerPoolClaimWaitMs);
   }
   return last;
 }
