@@ -60,12 +60,13 @@
  * that has no hold yet, and the ceiling, and gives only jobs that fit both.
  * Each runner asking it for jobs first takes the claim lock, beside the memory
  * lock, without waiting, and lets it go once each job it was given has its
- * hold, so no two runners on the engine are given the same room. It is
- * abandoned as the memory lock is, and a claim held past its age bound costs at
- * most a job held for room another runner was given. Against a plane that does
- * not, no job is claimed while the room is under `memoryRoomMibMin`, or while
- * any job on the engine is held for room. A count that failed claims none and
- * starts none, since a full engine is the one slowest to answer.
+ * hold, so no two runners on the engine are given the same room; until the
+ * plane has said whether it claims by room, a runner asks it for no job. The
+ * claim is abandoned as the memory lock is, and one held past its age bound
+ * costs at most a job held for room another runner was given. Against a plane
+ * that does not, no job is claimed while the room is under `memoryRoomMibMin`,
+ * or while any job on the engine is held for room. A count that failed claims
+ * none and starts none, since a full engine is the one slowest to answer.
  */
 
 import { mkdir } from "node:fs/promises";
@@ -711,7 +712,7 @@ function memoryBudgetSaid(budget, counted, now, log) {
     );
     return;
   }
-  const room = `this engine has ${diskGib(Math.max(0, memoryRoomBytes(budget.bytesFree, counted)))} GiB of room in its ${diskGib(memoryBudgetBytes(budget.bytesFree, counted))} GiB memory budget`;
+  const room = `this engine has ${diskGib(Math.max(0, memoryRoomBytes(budget.bytesFree, counted) - budget.placingBytes))} GiB of room in its ${diskGib(memoryBudgetBytes(budget.bytesFree, counted))} GiB memory budget`;
   if (now === "Held")
     log(
       `${room}, and a job on it is held for room: this runner takes no job until it starts`,

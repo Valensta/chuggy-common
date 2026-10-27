@@ -477,7 +477,7 @@ test("a poll names the room its pool offers jobs and its ceiling, each only wher
  * Catches a pool claiming by room from a plane that does not claim so, or
  * that did not say whether a job waits, which would never ask it for one.
  */
-test("an answer says whether a job waits only from a plane that claims by room and said, and the client keeps whether its last reconciled answer did", async () => {
+test("an answer says whether a job waits only from a plane that claims by room and said, and the client keeps whether its last reconciled answer did, knowing nothing before one", async () => {
   let release = workerContractRelease;
   /** @type {Record<string, unknown>} */
   let body = { assignments: [], sessions: [], stop: [], jobsWaiting: true };
@@ -490,7 +490,11 @@ test("an answer says whether a job waits only from a plane that claims by room a
         headers: { [workerContractHeader]: release },
       }),
   );
-  assert.equal(plane.claimsByRoom(), false);
+  assert.equal(plane.claimsByRoom(), undefined);
+  status = 503;
+  await plane.poll("pool-token", [], 0);
+  assert.equal(plane.claimsByRoom(), undefined);
+  status = 200;
   const waiting = await plane.poll("pool-token", [], 0);
   assert.equal(waiting.polled === "Reconciled" && waiting.jobsWaiting, true);
   assert.equal(plane.claimsByRoom(), true);

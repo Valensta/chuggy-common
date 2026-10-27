@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  workerContractHeader,
+  workerContractRelease,
+} from "@chuggy/worker-contract/workerContract";
+import {
   assignmentOutcomeSchema,
   workerPoolEvidenceCharsMax,
+  workerRunnerPollWaitHeader,
 } from "@chuggy/worker-contract/workerPool";
 
 import {
@@ -13,6 +18,7 @@ import {
   workerPoolUpdateBackoffMs,
   workerPoolUpdating,
 } from "./poolLoop.mjs";
+import { poolPlaneClient } from "./poolPlane.mjs";
 
 const settings = { concurrencyMax: 1, outageBackoffMs: 1, passesMax: 1 };
 
@@ -660,7 +666,115 @@ test("against a plane that does not claim by room, or with a backend keeping no 
   assert.deepEqual(unclaimed.takenAsked, [false]);
 });
 
-test("a pool that takes no job, or holds its ceiling of jobs, names no room, and a backend keeping no budget names none at all", async () => {
+/** What a plane sends for `reconciliation`: every field but `polled`. */
+function answerBody(reconciliation) {
+  const body = { ...reconciliation };
+  delete body.polled;
+  return body;
+}
+
+/**
+ * A plane client as a runner builds one, answered by a plane naming
+ * `release`: each poll with the next of `answers`, nothing waiting once they
+ * run out, and each settlement as taken. Each poll's `wanted` and the wait it
+ * names are recorded.
+ *
+ * @param {string} release
+ * @param {object[]} answers
+ */
+function planeNaming(release, answers) {
+  const polls = [];
+  const plane = poolPlaneClient(
+    {
+      baseUrl: "https://pool-plane.invalid",
+      pollTimeoutMs: 1_000,
+      settleTimeoutMs: 1_000,
+    },
+    async (url, init) => {
+      const headers = { [workerContractHeader]: release };
+      if (init.method !== "GET")
+        return new globalThis.Response(null, { status: 204, headers });
+      polls.push([
+        new globalThis.URL(String(url)).searchParams.get("wanted"),
+        init.headers[workerRunnerPollWaitHeader],
+      ]);
+      const answer = answers.shift() ?? reconciled();
+      return new globalThis.Response(JSON.stringify(answerBody(answer)), {
+        status: 200,
+        headers,
+      });
+    },
+  );
+  return { plane, polls };
+}
+
+test("a pool keeping a claim asks a plane that has not yet said whether it claims by room for no job, to be answered at once, and claims under the claim what it then says waits", async () => {
+  const { events, pooled } = claimingRoom();
+  const { plane, polls } = planeNaming(workerContractRelease, [
+    waiting(true),
+    { ...reconciled([assignment("job")]), jobsWaiting: false },
+  ]);
+  const fresh = { ...pooled, plane };
+  assert.equal((await workerPoolClientPass(fresh)).placed, 1);
+  await workerPoolClientPass(fresh);
+  assert.deepEqual(polls, [
+    ["0", "0"],
+    ["2", "0"],
+    ["0", undefined],
+  ]);
+  assert.deepEqual(events, [
+    "held",
+    "claim",
+    "held",
+    "place job",
+    "release",
+    "held",
+  ]);
+});
+
+test("a pool keeping a claim whose first answer shows the plane does not claim by room asks it for jobs by count in the same pass, as such a plane's gate allows, and takes no claim", async () => {
+  const { events, takenAsked, pooled } = claimingRoom();
+  const { plane, polls } = planeNaming("1.20.0", [
+    reconciled(),
+    reconciled([assignment("job")]),
+  ]);
+  const fresh = { ...pooled, plane };
+  assert.equal((await workerPoolClientPass(fresh)).placed, 1);
+  await workerPoolClientPass(fresh);
+  assert.deepEqual(polls, [
+    ["0", "0"],
+    ["2", undefined],
+    ["2", undefined],
+  ]);
+  assert.deepEqual(events, ["held", "held", "place job", "held"]);
+  assert.deepEqual(takenAsked, [true, false, false]);
+
+  const gated = claimingRoom({ reads: [{}, { taken: false }] });
+  const old = planeNaming("1.20.0", []);
+  await workerPoolClientPass({ ...gated.pooled, plane: old.plane });
+  assert.deepEqual(old.polls, [["0", "0"]]);
+});
+
+test("a draining pool told a job waits takes no claim, and one finding the plane does not claim by room asks it for no job", async () => {
+  const draining = {
+    draining: () => true,
+    restart: () => undefined,
+    named: async () => {},
+  };
+  const { events, pooled } = claimingRoom({ answers: [waiting(true)] });
+  await workerPoolClientPass(pooled, draining);
+  assert.deepEqual(events, [
+    "held",
+    { poll: [0, 0], terms: { memory: { roomMib: 0, ceilingMib: 12288 } } },
+  ]);
+
+  const unknown = claimingRoom();
+  const old = planeNaming("1.20.0", []);
+  await workerPoolClientPass({ ...unknown.pooled, plane: old.plane }, draining);
+  assert.deepEqual(old.polls, [["0", "0"]]);
+});
+
+test("a pool that takes no job, or holds its ceiling of jobs, names an empty room beside its ceiling, and a backend keeping no budget names neither", async () => {
   for (const read of [
     { taken: false },
     { held: holding("Job", "one", "two") },

@@ -429,7 +429,8 @@ async function poolPlaneSettled(settings, fetcher, token, assignment, outcome) {
  */
 export function poolPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolPlaneClientSettings(input);
-  let byRoom = false;
+  /** @type {boolean | undefined} */
+  let byRoom;
   return {
     poll: async (token, held, wanted, wantedSessions = 0, terms = {}) => {
       const polled = await poolPlanePolled(

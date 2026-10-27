@@ -4209,7 +4209,7 @@ test("a pass's room is what its own placements will take less, and no job is tak
   assert.deepEqual(
     log.filter((line) => line.startsWith("this engine")),
     [
-      "this engine has 1 GiB of room in its 14 GiB memory budget, under the 0.5 GiB a job needs: this runner takes no job until it has more",
+      "this engine has 0 GiB of room in its 14 GiB memory budget, under the 0.5 GiB a job needs: this runner takes no job until it has more",
     ],
   );
   pull.resolve({ code: 1, stdout: "", stderr: "Error: no such image\n" });
