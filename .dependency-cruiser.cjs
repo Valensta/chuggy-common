@@ -31,7 +31,7 @@ module.exports = {
       to: {
         path: "^(?![^/]+\\.mjs$)",
         pathNot:
-          "(^|/)node_modules/(@chuggy/worker-contract|zod|@anthropic-ai/claude-agent-sdk|@anthropic-ai/claude-code|@openai/codex)/",
+          "(^|/)node_modules/(@chuggy/worker-contract|zod|@anthropic-ai/claude-agent-sdk|@modelcontextprotocol/sdk|@anthropic-ai/claude-code|@openai/codex)/",
         dependencyTypesNot: ["core"],
       },
     },

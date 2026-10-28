@@ -193,8 +193,18 @@ const decisionTools = [
     description:
       "Stages one ticket this decision dispatches, fenced on the version the observation showed. Writes nothing: the selector runtime delivers it, and a project's own budget may allow fewer than the ceiling.",
     shape: (z) => ({
-      ticket: z.number().int().min(1),
-      expectedTicketVersion: z.number().int().min(0),
+      ticket: z
+        .number()
+        .int()
+        .min(1)
+        .describe("One of the observation's candidates, by its `ticket`."),
+      expectedTicketVersion: z
+        .number()
+        .int()
+        .min(0)
+        .describe(
+          "The candidate's `ticketVersion`, as the observation showed it.",
+        ),
     }),
     call: (state, { ticket, expectedTicketVersion }, standingAttention) => {
       const candidate = offeredCandidate(state, ticket, "dispatch");
@@ -229,9 +239,23 @@ const decisionTools = [
     description:
       "Stages a stated reason for not dispatching one observed ticket, against the version observed. The reason enters the project's refusal ledger.",
     shape: (z) => ({
-      ticket: z.number().int().min(1),
-      ticketVersion: z.number().int().min(0),
-      reason: z.string().min(1).max(agenticRefusalReasonCharsMax),
+      ticket: z
+        .number()
+        .int()
+        .min(1)
+        .describe("One of the observation's candidates, by its `ticket`."),
+      ticketVersion: z
+        .number()
+        .int()
+        .min(0)
+        .describe(
+          "The candidate's `ticketVersion`, as the observation showed it.",
+        ),
+      reason: z
+        .string()
+        .min(1)
+        .max(agenticRefusalReasonCharsMax)
+        .describe("Why the ticket is not dispatched, as a person reads it."),
     }),
     call: (state, { ticket, ticketVersion, reason }, standingAttention) => {
       const candidate = offeredCandidate(state, ticket, "refuse");
@@ -262,7 +286,13 @@ const decisionTools = [
     name: "lift",
     description:
       "Stages the clearing of a standing refusal on one ticket, which returns it to the candidates a later decision sees.",
-    shape: (z) => ({ ticket: z.number().int().min(1) }),
+    shape: (z) => ({
+      ticket: z
+        .number()
+        .int()
+        .min(1)
+        .describe("A ticket the observation shows a standing refusal on."),
+    }),
     call: (state, { ticket }, standingAttention) => {
       if (!state.standing.includes(ticket))
         throw new RangeError(
@@ -281,7 +311,11 @@ const decisionTools = [
     name: "set_attention",
     description:
       "Sets what this project's state says to a human: monitoring, wanting attention, or stopped. Last call wins.",
-    shape: (z) => ({ attention: z.enum(selectorAttentions) }),
+    shape: (z) => ({
+      attention: z
+        .enum(selectorAttentions)
+        .describe("What the project's state says to a human."),
+    }),
     call: (state, { attention }, standingAttention) => {
       stage(state, { attention }, standingAttention);
       return `attention set to ${attention}`;
@@ -291,7 +325,11 @@ const decisionTools = [
     name: "set_handoff_note",
     description:
       "Sets the note a successor lead with no transcript reads. Last call wins; omitting it keeps the note this turn was shown.",
-    shape: (z) => ({ note: z.looseObject({}) }),
+    shape: (z) => ({
+      note: z
+        .looseObject({})
+        .describe("The whole note, replacing the one this turn was shown."),
+    }),
     call: (state, { note }, standingAttention) => {
       stage(state, { handoffNote: note }, standingAttention);
       return "handoff note set";
@@ -301,7 +339,11 @@ const decisionTools = [
     name: "set_planning_intent",
     description:
       "Sets this project's standing planning intent, which outlives one decision. Last call wins.",
-    shape: (z) => ({ intent: z.looseObject({}) }),
+    shape: (z) => ({
+      intent: z
+        .looseObject({})
+        .describe("The whole intent, replacing the standing one."),
+    }),
     call: (state, { intent }, standingAttention) => {
       stage(state, { planningIntent: intent }, standingAttention);
       return "planning intent set";

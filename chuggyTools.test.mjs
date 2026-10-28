@@ -2312,6 +2312,14 @@ const programShortClaims = [
   /`defaults\.program`/,
 ];
 
+/** What one parameter of a project tool is described as, where an agent fills it in. */
+function parameterDescribed(tool, parameter) {
+  const field = chuggyProjectTools.find(({ name }) => name === tool).shape(z)[
+    parameter
+  ];
+  return field.description ?? field.unwrap().description ?? "";
+}
+
 /**
  * What the server does that no answer shows until it is too late to act on:
  * that the refusal ledgers hold none of a command's refusals, that a
@@ -2383,7 +2391,6 @@ test("the descriptions say what the server does where a session reads it", () =>
       /A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap\. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`/,
     ],
     fetch_image: [
-      /by the identity a message's images section or a brief names it by/,
       /written to a new file/,
       /that file's path, its media type and its size in bytes/,
       /open the file with Read/,
@@ -2394,11 +2401,16 @@ test("the descriptions say what the server does where a session reads it", () =>
     for (const claim of claims) assert.match(described(tool), claim, tool);
 });
 
-/** The phase filter takes exact phase names, so the description names them. */
-test("list_tickets says which values its phase filter takes", () => {
-  const { description } = chuggyProjectTools.find(
-    ({ name }) => name === "list_tickets",
+test("fetch_image says on its parameter which identity it takes", () => {
+  assert.match(
+    parameterDescribed("fetch_image", "artifact"),
+    /by the identity a message's images section or a brief names it by/,
   );
+});
+
+/** The phase filter takes exact phase names, so its parameter names them. */
+test("list_tickets says which values its phase filter takes", () => {
+  const description = parameterDescribed("list_tickets", "phase");
   for (const said of [
     /`phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly/,
     /or `NonTerminal` alone/,
@@ -2430,9 +2442,12 @@ test("list_tickets lists by recent activity on the server's own cursor, and by n
   for (const said of [
     /`order: "RecentActivity"` lists them newest activity first/,
     /answering `nextCursor` for the next page, which `cursor` resumes from/,
-    /A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more/,
   ])
-    assert.match(description, said);
+    assert.match(parameterDescribed("list_tickets", "order"), said);
+  assert.match(
+    description,
+    /A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more/,
+  );
 });
 
 /** A first ticket is filed from these descriptions alone, so they open with what one needs. */
@@ -2495,7 +2510,6 @@ test("updating a ticket says whose word it takes and what refuses it, and a revi
 
   for (const claim of [
     /on your owner's word only/,
-    /`expectedRevision` is the ticket's `revision` as read_ticket answers it/,
     /\(TicketNotPending\)/,
     /\(TicketRevisionStale\)/,
     /dropping one is never refused/,
@@ -2504,6 +2518,10 @@ test("updating a ticket says whose word it takes and what refuses it, and a revi
     /same turn is the same operation/,
   ])
     assert.match(described("update_ticket"), claim);
+  assert.match(
+    parameterDescribed("update_ticket", "expectedRevision"),
+    /`expectedRevision` is the ticket's `revision` as read_ticket answers it/,
+  );
   assert.match(
     described("revise_draft"),
     /A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it/,

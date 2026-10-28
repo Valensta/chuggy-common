@@ -43,7 +43,7 @@ fixture() {
 	printf '%s\n' '{ "name": "@chuggy/worker-contract", "type": "module", "exports": { "./wire": "./wire.js" } }' \
 		> "$R/node_modules/@chuggy/worker-contract/package.json"
 	printf '%s\n' 'export const wire = 1' > "$R/node_modules/@chuggy/worker-contract/wire.js"
-	for installed in @anthropic-ai/claude-agent-sdk @anthropic-ai/claude-code @openai/codex; do
+	for installed in @anthropic-ai/claude-agent-sdk @modelcontextprotocol/sdk @anthropic-ai/claude-code @openai/codex; do
 		mkdir -p "$R/node_modules/$installed"
 		printf '{ "name": "%s", "type": "module", "exports": "./index.js" }\n' "$installed" > "$R/node_modules/$installed/package.json"
 		printf '%s\n' 'export const x = 1' > "$R/node_modules/$installed/index.js"
@@ -99,7 +99,7 @@ check "the clean line counts the modules cruised" 0 "$RC" "across 2 module(s)"
 # Every exit the harness has. A red here would mean a rule below over-fires on
 # the imports a pod is built from.
 fixture
-printf '%s\n' 'import { wire } from "@chuggy/worker-contract/wire"' 'import { join } from "node:path"' 'import { z } from "zod"' 'import { x as sdk } from "@anthropic-ai/claude-agent-sdk"' 'import { x as code } from "@anthropic-ai/claude-code"' 'import { x as codex } from "@openai/codex"' 'export const run = () => join(String(wire), String(z), String(sdk + code + codex))' > "$R/run.mjs"
+printf '%s\n' 'import { wire } from "@chuggy/worker-contract/wire"' 'import { join } from "node:path"' 'import { z } from "zod"' 'import { x as sdk } from "@anthropic-ai/claude-agent-sdk"' 'import { x as mcp } from "@modelcontextprotocol/sdk"' 'import { x as code } from "@anthropic-ai/claude-code"' 'import { x as codex } from "@openai/codex"' 'export const run = () => join(String(wire), String(z), String(sdk + mcp + code + codex))' > "$R/run.mjs"
 seal
 check "the harness may name the contract, a platform module and every package an image installs" 0 "$RC" "graph clean"
 

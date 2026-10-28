@@ -194,6 +194,14 @@ const chuggyProgramShortDescription = `A draft whose program runs less than its 
 /** What a new draft is fenced on, which is the project's head and not any one ticket's. */
 const chuggyExpectedProjectSequenceDescription = `The \`fence.projectSequence\` initialize_draft answered: the project's journal head, which every command anywhere in the project moves. A stale one is refused (DraftInitializationStale) with the head it is at now as \`currentProjectSequence\`, which the same write may be sent again with; a project that is not active refuses the write at any head (ProjectNotActive), naming its \`lifecycle\`.`;
 
+/** The configuration a new draft is filed against, which initialize_draft answered. */
+const chuggyNewDraftConfigurationDescription = {
+  configurationRevision:
+    "The configuration revision initialize_draft was called on.",
+  configurationDigest:
+    "The `fence.configurationDigest` initialize_draft answered.",
+};
+
 /** What a draft write is fenced on, which is a field of the draft and not of its ticket. */
 const chuggyExpectedVersionDescription = `The draft's \`authoringVersion\`, as read_draft answers it or as the write that last changed the draft did; a new draft is at 1. A stale one is refused with the draft's \`currentVersion\`.`;
 
@@ -894,12 +902,70 @@ function submit(context, mutation) {
   );
 }
 
-const ticket = (z) => z.number().int().min(1);
-const limit = (z, max) => z.number().int().min(1).max(max).optional();
+/**
+ * The parameters several tools share, each describing itself, so every tool
+ * that takes one publishes the sentence; a tool where one means something
+ * else describes it again over this.
+ */
+const ticket = (z) =>
+  z
+    .number()
+    .int()
+    .min(1)
+    .describe("A ticket's number, as list_tickets answers it.");
+const limit = (z, max) =>
+  z
+    .number()
+    .int()
+    .min(1)
+    .max(max)
+    .describe(
+      `The most items this page answers, at most ${String(max)}; left out, the route's own default.`,
+    )
+    .optional();
 const count = (z) => z.number().int().min(0);
 /** A draft's authoring version, which a new draft starts at. */
 const authoringVersion = (z) => z.number().int().min(1);
 const identity = (z) => z.string().min(1).max(256);
+const cursor = (z) =>
+  identity(z)
+    .describe(
+      "The `nextCursor` the previous page answered, for the page after it; left out, the first page.",
+    )
+    .optional();
+const revision = (z) =>
+  identity(z).describe(
+    "A configuration revision, as list_configurations answers it.",
+  );
+const execution = (z) =>
+  identity(z).describe(
+    "An execution's id, as list_executions or read_ticket's `escalation.failed` answers it.",
+  );
+const attempt = (z) =>
+  identity(z).describe(
+    "One of the execution's attempts by its id, as read_execution or read_ticket's `escalation.failed` answers it.",
+  );
+const thread = (z) =>
+  identity(z).describe("A thread's session, as list_threads answers it.");
+/** A transcript read's place, which its answer's `next` carries back. */
+const transcriptPlace = (z) => ({
+  after: count(z)
+    .describe(
+      "The `after` of the previous answer's `next`; left out, the first page.",
+    )
+    .optional(),
+  entry: count(z)
+    .describe(
+      "The `entry` of the previous answer's `next`, how many entries of that page were answered; left out, 0.",
+    )
+    .optional(),
+});
+const transcriptStream = (z, read) =>
+  identity(z)
+    .describe(
+      `One of the \`streams\` ${read} answers, by its \`stream\`; left out, the session's own agent's stream.`,
+    )
+    .optional();
 /** A position in a mailbox, which is counted from one and never from zero. */
 const ordinal = (z) => z.number().int().min(1);
 /**
@@ -923,13 +989,32 @@ export const chuggyProjectTools = [
   {
     name: "list_tickets",
     description:
-      'One page of this project\'s tickets, ascending by number. Answers `nextAfter` for the next page; `after` resumes from it. `order: "RecentActivity"` lists them newest activity first instead, answering `nextCursor` for the next page, which `cursor` resumes from in that order and `after` does not. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more. `phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly, and lists a ticket in any of them, or `NonTerminal` alone; left out, it lists every phase.',
+      "One page of this project's tickets, ascending by number or by recent activity. Call it to find a ticket and its phase. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more.",
     shape: (z) => ({
-      after: ticket(z).optional(),
+      after: ticket(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it, ascending by number; left out, the first page.",
+        )
+        .optional(),
       limit: limit(z, nativeHttpPageItemsMax),
-      phase: z.array(z.string().min(1)).max(16).optional(),
-      order: z.enum(["RecentActivity"]).optional(),
-      cursor: identity(z).optional(),
+      phase: z
+        .array(z.string().min(1))
+        .max(16)
+        .describe(
+          "`phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly, and lists a ticket in any of them, or `NonTerminal` alone; left out, it lists every phase.",
+        )
+        .optional(),
+      order: z
+        .enum(["RecentActivity"])
+        .describe(
+          '`order: "RecentActivity"` lists them newest activity first instead, answering `nextCursor` for the next page, which `cursor` resumes from in that order and `after` does not. Left out, they are listed ascending by number, answering `nextAfter`.',
+        )
+        .optional(),
+      cursor: identity(z)
+        .describe(
+          'The `nextCursor` the previous page answered under `order: "RecentActivity"`, for the page after it; left out, the first page.',
+        )
+        .optional(),
     }),
     // An activity cursor is the server's own, so none names a ticket to move past.
     cursorOf: ({ order }) => (order === undefined ? "after" : undefined),
@@ -942,7 +1027,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket",
     description:
-      "One ticket: its phase, its version, its authoring and its brief, and `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing or waits to land, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on.",
+      "One ticket: its phase, its version, its authoring, its brief and what its runs cost. Call it for where a ticket stands. It carries `runTotals`, what every run of its executions reported, summed: turns, durations, tokens by kind, permission denials and `costUsdMicros`, millionths of a dollar at the runtime's list price, with tokens and cost per model in `models`. A ticket no run has reported for carries none. A ticket waiting because its run stopped at its clone, setup, commit, push or deadline, or because its runner's disk ran low, names that step's label, the execution and the attempt in `escalation.failed`, which read_run_error takes to read the attempt's error text. Where its work is landing or waits to land, read_ticket_landings says how: its hold, its approval, or its pull request and what its merge waits on.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(context, projectPath(context, "ticket", { ticket: args.ticket })),
@@ -950,18 +1035,22 @@ export const chuggyProjectTools = [
   {
     name: "read_draft",
     description:
-      "One draft still open on this project, by the ticket number it holds.",
-    shape: (z) => ({ ticket: ticket(z) }),
+      "One draft still open on this project. Call it before revise_draft, whose fence and whole brief it answers.",
+    shape: (z) => ({
+      ticket: ticket(z).describe(
+        "The ticket number the draft holds, as create_draft, file_dependent or list_drafts answers it.",
+      ),
+    }),
     call: (context, args) =>
       read(context, projectPath(context, "draft", { ticket: args.ticket })),
   },
   {
     name: "list_drafts",
     description:
-      "One page of the drafts this project still holds open, ascending by ticket.",
+      "One page of the drafts this project still holds open, ascending by ticket. Call it to find a draft to revise or release.",
     shape: (z) => ({
       limit: limit(z, nativeHttpPageItemsMax),
-      cursor: identity(z).optional(),
+      cursor: cursor(z),
     }),
     call: (context, { cursor, limit: pageLimit }) =>
       read(
@@ -972,9 +1061,9 @@ export const chuggyProjectTools = [
   {
     name: "list_configurations",
     description:
-      "One page of this project's configuration revisions, newest first, with the cursor for the next. One imported from a repository carries its configuration's name in `provenance.name`; who does the work under it is read_configuration's to answer.",
+      "One page of this project's configuration revisions, newest first. Call it for the revision a draft is filed against. One imported from a repository carries its configuration's name in `provenance.name`; who does the work under it is read_configuration's to answer.",
     shape: (z) => ({
-      cursor: identity(z).optional(),
+      cursor: cursor(z),
       limit: limit(z, nativeHttpPageItemsMax),
     }),
     call: (context, { cursor, limit: pageLimit }) =>
@@ -986,17 +1075,24 @@ export const chuggyProjectTools = [
   {
     name: "read_configuration",
     description:
-      "One configuration revision, canonical, as a draft is authored against it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage.",
-    shape: (z) => ({ revision: identity(z) }),
-    call: (context, { revision }) =>
-      read(context, projectPath(context, "configuration", { revision })),
+      "One configuration revision's canonical document, as a draft is authored against it. Call it for who does a ticket's work and what evaluates it. `canonical` is the stored document as JSON text, and its `worker.mode` is who does the work of a ticket released against it: the agent, and what that agent is started with, a model where the configuration names one. Its evaluation stages run in the order listed and a failed stage ends evaluation, while the evaluators of one stage run in parallel; in a catalog each evaluator of a plan stage names its own workload, so review lenses that should run side by side belong in one stage.",
+    shape: (z) => ({ revision: revision(z) }),
+    call: (context, args) =>
+      read(
+        context,
+        projectPath(context, "configuration", { revision: args.revision }),
+      ),
   },
   {
     name: "read_decision_log",
     description:
-      "One page of this project's past selector decisions, oldest first: what each chose and under which settings. Answers `nextAfter` for the next page; `after` resumes from it.",
+      "One page of this project's past selector decisions, oldest first: what each chose and under which settings. Call it for why a ticket was or was not dispatched.",
     shape: (z) => ({
-      after: count(z).optional(),
+      after: count(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
+        )
+        .optional(),
       limit: limit(z, selectorHistoryLimitMax),
     }),
     call: (context, { after, limit: pageLimit }) =>
@@ -1007,7 +1103,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_refusals",
-    description: `The refusals standing across this project, each a ticket whose latest ledger entry is a refusal, with the ticket version each names. ${chuggyRefusalLedgerDescription}`,
+    description: `The refusals standing across this project, each a ticket whose latest ledger entry is a refusal, with the ticket version each names. Call it for which released tickets the lead will not dispatch. ${chuggyRefusalLedgerDescription}`,
     shape: (z) => ({ limit: limit(z, agenticRefusalsAnsweredMax) }),
     call: (context, { limit: pageLimit }) =>
       read(
@@ -1017,7 +1113,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "read_ticket_refusals",
-    description: `One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. \`more\` says the ledger holds further entries than one answer carries. ${chuggyRefusalLedgerDescription}`,
+    description: `One ticket's refusal ledger, oldest first: the refusals recorded on it and their lifts. Call it for why the lead has not dispatched it. \`more\` says the ledger holds further entries than one answer carries. ${chuggyRefusalLedgerDescription}`,
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       read(
@@ -1028,7 +1124,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket_landings",
     description:
-      "One ticket's landings, each a finalization of its work into its repository: the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out. A ticket whose work has not reached landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed or Landed, its `cycle`, its `attempts`, and its newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, and the `targetRef` it lands on. A Held landing carries `hold`: its `kind`, what holds it, and `since`, when a hold of that kind began. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on, and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status`, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
+      "One ticket's landings, each a finalization of its work into its repository. Call it for how a ticket's work lands and what its merge waits on. It answers the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out. A ticket whose work has not reached landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed or Landed, its `cycle`, its `attempts`, and its newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, and the `targetRef` it lands on. A Held landing carries `hold`: its `kind`, what holds it, and `since`, when a hold of that kind began. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on, and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status`, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       readTicketLandings(
@@ -1039,7 +1135,7 @@ export const chuggyProjectTools = [
   {
     name: "read_lead",
     description:
-      "This project's lead session: its state, its mailbox tail and its transcript streams. A project with no lead answers None, and `absence.reason` says why. `Paused`: the project's selector is paused, for the project or the whole installation, so no ticket is picked up automatically; it must be resumed by someone who may, and this reason is answered ahead of the others. `NotNeeded`: no refusal stands, which is expected before anything is released, because the selector opens a lead only when a released ticket waits on a dispatch decision; release a ticket. Otherwise the last decision that needed a lead was refused it, and `absence.since` is when that refusal began. `RunnerOffline`: the project runs its lead on its runners and none is live, so the project's runner must be running. `HostedRunsNotGranted`: the project runs its lead hosted and its tenant has not granted the lead hosted runs, so an admin must grant them.",
+      "This project's lead session: its state, its mailbox tail and its transcript streams. Call it for why released tickets are or are not being dispatched. A project with no lead answers None, and `absence.reason` says why. `Paused`: the project's selector is paused, for the project or the whole installation, so no ticket is picked up automatically; it must be resumed by someone who may, and this reason is answered ahead of the others. `NotNeeded`: no refusal stands, which is expected before anything is released, because the selector opens a lead only when a released ticket waits on a dispatch decision; release a ticket. Otherwise the last decision that needed a lead was refused it, and `absence.since` is when that refusal began. `RunnerOffline`: the project runs its lead on its runners and none is live, so the project's runner must be running. `HostedRunsNotGranted`: the project runs its lead hosted and its tenant has not granted the lead hosted runs, so an admin must grant them.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "lead")),
   },
@@ -1048,9 +1144,8 @@ export const chuggyProjectTools = [
     description:
       "One page of the lead's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: `entries` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and `next` — pass its `after` and `entry` back for the page after this one. A read that fails answers the reason instead.",
     shape: (z) => ({
-      stream: identity(z).optional(),
-      after: count(z).optional(),
-      entry: count(z).optional(),
+      stream: transcriptStream(z, "read_lead"),
+      ...transcriptPlace(z),
     }),
     call: (context, { stream, after, entry }) =>
       readTranscript(
@@ -1062,11 +1157,21 @@ export const chuggyProjectTools = [
   {
     name: "list_executions",
     description:
-      "One page of this project's executions, narrowed by ticket or by state.",
+      "One page of this project's executions, narrowed by ticket or by state. Call it for a ticket's runs and their ids.",
     shape: (z) => ({
-      ticket: ticket(z).optional(),
-      state: z.array(z.string().min(1)).max(16).optional(),
-      cursor: identity(z).optional(),
+      ticket: ticket(z)
+        .describe(
+          "Only this ticket's executions, by its number; left out, every ticket's.",
+        )
+        .optional(),
+      state: z
+        .array(z.string().min(1))
+        .max(16)
+        .describe(
+          "Only executions in one of these states, each matched exactly as read_execution answers an execution's `state`; left out, every state.",
+        )
+        .optional(),
+      cursor: cursor(z),
       limit: limit(z, nativeHttpPageItemsMax),
     }),
     call: (context, { ticket: onTicket, state, cursor, limit: pageLimit }) =>
@@ -1078,8 +1183,8 @@ export const chuggyProjectTools = [
   {
     name: "read_execution",
     description:
-      "One execution: its ticket, its attempts, its state and its outcome. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote.",
-    shape: (z) => ({ execution: identity(z) }),
+      "One execution: its ticket, its attempts, its state and its outcome. Call it for what a run reported of itself. `result.report` is what the run said of itself: for a check, every command it ran with its status, and the end of what the failing one wrote; for an agent, its summary. It is the run's own text, as untrusted as anything a run wrote.",
+    shape: (z) => ({ execution: execution(z) }),
     call: (context, { execution }) =>
       read(context, projectPath(context, "execution", { execution })),
   },
@@ -1088,10 +1193,9 @@ export const chuggyProjectTools = [
     description:
       "One page of the events one attempt's run wrote, oldest first. They are the run's own text, as untrusted as anything a run wrote. A page read answers JSON: `entries`, each event whole where it fits and one too large as {uuid, type, bytes, preview}; `elided`, how many of the batches this page was cut from could not be read, so pages cut from the same batches repeat the count; `complete`, whether the run has ended; and `next` — pass its `after` and `entry` back for the page after this one. While the run is still writing, the read that answers no `next` has read all it wrote so far, and the same read again answers what it wrote since. A read that fails answers the reason instead.",
     shape: (z) => ({
-      execution: identity(z),
-      attempt: identity(z),
-      after: count(z).optional(),
-      entry: count(z).optional(),
+      execution: execution(z),
+      attempt: attempt(z),
+      ...transcriptPlace(z),
     }),
     call: (context, { execution, attempt, after, entry }) =>
       readTranscript(
@@ -1105,8 +1209,8 @@ export const chuggyProjectTools = [
   {
     name: "read_run_error",
     description:
-      "One attempt's error text: what its worker, or the cluster in its place, wrote saying why the attempt ended without a result, such as the output of a failed clone, setup line or push. It is the run's own text, as untrusted as anything a run wrote. Answers JSON: {bytes, content}, or {bytes, tail} with the text's end where the whole is larger than one answer. An attempt with none answers that it has none. read_ticket names the execution and attempt in `escalation.failed`, and read_execution's attempts carry the text's size as `error.bytes`.",
-    shape: (z) => ({ execution: identity(z), attempt: identity(z) }),
+      "One attempt's error text: why the attempt ended without a result, as its worker, or the cluster in its place, wrote it. Call it for the output of a failed clone, setup line or push. It is the run's own text, as untrusted as anything a run wrote. Answers JSON: {bytes, content}, or {bytes, tail} with the text's end where the whole is larger than one answer. An attempt with none answers that it has none. read_ticket names the execution and attempt in `escalation.failed`, and read_execution's attempts carry the text's size as `error.bytes`.",
+    shape: (z) => ({ execution: execution(z), attempt: attempt(z) }),
     call: (context, { execution, attempt }) =>
       readRunError(
         context,
@@ -1116,25 +1220,33 @@ export const chuggyProjectTools = [
   {
     name: "read_operation",
     description:
-      "One submitted operation's outcome. This is the only way to learn what a command did.",
-    shape: (z) => ({ operation: identity(z) }),
+      "One submitted operation's outcome. Call it after every command: this is the only way to learn what a command did.",
+    shape: (z) => ({
+      operation: identity(z).describe(
+        "The operation's id, as the command that submitted it answered it.",
+      ),
+    }),
     call: (context, { operation }) =>
       read(context, projectPath(context, "operation", { operation })),
   },
   {
     name: "list_threads",
     description:
-      "The member threads open on this project: whose each is, its state, and whether it is this session's own.",
+      "The member threads open on this project: whose each is, its state, and whether it is this session's own. Call it for the session a thread is read by.",
     shape: () => ({}),
     call: (context) => read(context, projectPath(context, "threads")),
   },
   {
     name: "read_thread",
     description:
-      "One page of a member thread, newest turn last: whose it is, its state, and that much of its conversation. Answers `nextBefore` for the page before this one; `before` resumes from it.",
+      "One page of a member thread, newest turn last: whose it is, its state, and that much of its conversation.",
     shape: (z) => ({
-      session: identity(z),
-      before: ordinal(z).optional(),
+      session: thread(z),
+      before: ordinal(z)
+        .describe(
+          "The `nextBefore` the previous page answered, for the page before it; left out, the newest turns.",
+        )
+        .optional(),
       limit: limit(z, threadTurnsAnsweredMax),
     }),
     call: (context, { session, before, limit: pageLimit }) =>
@@ -1148,10 +1260,9 @@ export const chuggyProjectTools = [
     description:
       "One page of a thread's own raw transcript, which is how it reads past its own compaction. A page read answers JSON: `entries` whole where they fit, an entry too large as {uuid, type, bytes, preview}, and `next` — pass its `after` and `entry` back for the page after this one. A read that fails answers the reason instead.",
     shape: (z) => ({
-      session: identity(z),
-      stream: identity(z).optional(),
-      after: count(z).optional(),
-      entry: count(z).optional(),
+      session: thread(z),
+      stream: transcriptStream(z, "read_thread"),
+      ...transcriptPlace(z),
     }),
     call: (context, { session, stream, after, entry }) =>
       readTranscript(
@@ -1163,7 +1274,7 @@ export const chuggyProjectTools = [
   {
     name: "list_repositories",
     description:
-      "Every repository this project binds, oldest first. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. A retired binding carries `retiredAt`, and a draft write naming it is refused. `pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why. A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`, since a ticket in a repository the worker app does not reach stops at its clone.",
+      "Every repository this project binds, oldest first. Call it for the repository a ticket is filed in. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. A retired binding carries `retiredAt`, and a draft write naming it is refused. `pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why. A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`, since a ticket in a repository the worker app does not reach stops at its clone.",
     shape: () => ({}),
     call: (context) =>
       readReshaped(
@@ -1176,8 +1287,12 @@ export const chuggyProjectTools = [
   {
     name: "fetch_image",
     description:
-      "One of this project's images, by the identity a message's images section or a brief names it by, written to a new file. Answers that file's path, its media type and its size in bytes; open the file with Read to see the image.",
-    shape: (z) => ({ artifact: identity(z) }),
+      "One of this project's images, written to a new file. Answers that file's path, its media type and its size in bytes; open the file with Read to see the image.",
+    shape: (z) => ({
+      artifact: identity(z).describe(
+        "The image, by the identity a message's images section or a brief names it by.",
+      ),
+    }),
     call: (context, { artifact }) =>
       readImage(context, projectPath(context, "projectArtifact", { artifact })),
   },
@@ -1186,19 +1301,38 @@ export const chuggyProjectTools = [
     description:
       "chuggy's own documentation, as Markdown, verbatim. Call it first with no `page`: that answers the index, which lists each page by its URL. Then call it with `page`, one of those URLs, for that page. A URL outside the index's own directory is refused.",
     shape: (z) => ({
-      page: z.string().min(1).max(chuggyDocsPageCharsMax).optional(),
+      page: z
+        .string()
+        .min(1)
+        .max(chuggyDocsPageCharsMax)
+        .describe(
+          "One of the URLs the index lists; left out, the index itself.",
+        )
+        .optional(),
     }),
     call: (context, { page }) => readDocs(context, page),
   },
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document.",
+      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document.",
     shape: (z) => ({
-      revision: identity(z),
-      work: identity(z).optional(),
-      evaluation: identity(z).optional(),
-      finalization: identity(z).optional(),
+      revision: revision(z),
+      work: identity(z)
+        .describe(
+          "For a catalog, the `work` the draft will select: the name of one of its `workloads`; left out, the catalog's default.",
+        )
+        .optional(),
+      evaluation: identity(z)
+        .describe(
+          "For a catalog, the `evaluation` the draft will select: the name of one of its `plans`; left out, the catalog's default.",
+        )
+        .optional(),
+      finalization: identity(z)
+        .describe(
+          "For a catalog, the `finalization` the draft will select: the name of one of its `finalizers`; left out, the catalog's default.",
+        )
+        .optional(),
     }),
     call: (context, { revision, work, evaluation, finalization }) =>
       readReshaped(
@@ -1211,16 +1345,26 @@ export const chuggyProjectTools = [
   {
     name: "file_dependent",
     description:
-      "Files a new draft derived from an existing ticket. `relation` admits FollowUp only, and `authoring.dependencies` must carry the parent. The fence comes from initialize_draft.",
+      "Files a new draft derived from an existing ticket. Call it after initialize_draft, for work that follows from a ticket already filed.",
     shape: (z) => ({
-      parent: ticket(z),
-      relation: z.enum(allDependentRelations),
-      configurationRevision: identity(z),
-      configurationDigest: identity(z),
+      parent: ticket(z).describe(
+        "The ticket the draft follows from, as list_tickets answers it.",
+      ),
+      relation: z
+        .enum(allDependentRelations)
+        .describe("`relation` admits FollowUp only."),
+      configurationRevision: identity(z).describe(
+        chuggyNewDraftConfigurationDescription.configurationRevision,
+      ),
+      configurationDigest: identity(z).describe(
+        chuggyNewDraftConfigurationDescription.configurationDigest,
+      ),
       expectedProjectSequence: count(z).describe(
         chuggyExpectedProjectSequenceDescription,
       ),
-      authoring: anyObject(z),
+      authoring: anyObject(z).describe(
+        `${chuggyAuthoringDescription} \`authoring.dependencies\` must carry the parent.`,
+      ),
       brief: anyObject(z).describe(chuggyBriefDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
@@ -1251,11 +1395,15 @@ export const chuggyProjectTools = [
     description:
       "Replaces one open draft's authoring, brief and selection, fenced on `expectedVersion`. A Pending ticket's draft takes a revision too, which its ticket runs only once update_ticket releases it.",
     shape: (z) => ({
-      ticket: ticket(z),
+      ticket: ticket(z).describe(
+        "The ticket number the draft holds, as read_draft answers it.",
+      ),
       expectedVersion: authoringVersion(z).describe(
         chuggyExpectedVersionDescription,
       ),
-      configurationRevision: identity(z),
+      configurationRevision: identity(z).describe(
+        "The configuration revision the revised draft is authored against, as read_draft or list_configurations answers it.",
+      ),
       authoring: anyObject(z).describe(chuggyAuthoringDescription),
       brief: anyObject(z).describe(
         `${chuggyDraftBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
@@ -1282,9 +1430,12 @@ export const chuggyProjectTools = [
   },
   {
     name: "delete_draft",
-    description: "Deletes one open draft, fenced on `expectedVersion`.",
+    description:
+      "Deletes one open draft, fenced on `expectedVersion`. Call it for a draft that will not be released.",
     shape: (z) => ({
-      ticket: ticket(z),
+      ticket: ticket(z).describe(
+        "The ticket number the draft holds, as read_draft answers it.",
+      ),
       expectedVersion: authoringVersion(z).describe(
         chuggyExpectedVersionDescription,
       ),
@@ -1300,9 +1451,15 @@ export const chuggyProjectTools = [
     name: "release_draft",
     description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
     shape: (z) => ({
-      ticket: ticket(z),
-      authoringVersion: count(z),
-      configurationRevision: identity(z),
+      ticket: ticket(z).describe(
+        "The ticket number the draft holds, as read_draft answers it.",
+      ),
+      authoringVersion: count(z).describe(
+        "The draft's `authoringVersion` to release, as read_draft or the write that last changed the draft answers it.",
+      ),
+      configurationRevision: identity(z).describe(
+        "The draft's `configurationRevision`, as read_draft or the write that last changed the draft answers it.",
+      ),
     }),
     call: (context, args) =>
       submit(context, {
@@ -1315,10 +1472,14 @@ export const chuggyProjectTools = [
   {
     name: "create_draft",
     description:
-      "Files a new draft for work your owner asked for, derived from nothing. The fence comes from initialize_draft.",
+      "Files a new draft for work your owner asked for, derived from nothing. Call it after initialize_draft, whose answer it is fenced on.",
     shape: (z) => ({
-      configurationRevision: identity(z),
-      configurationDigest: identity(z),
+      configurationRevision: identity(z).describe(
+        chuggyNewDraftConfigurationDescription.configurationRevision,
+      ),
+      configurationDigest: identity(z).describe(
+        chuggyNewDraftConfigurationDescription.configurationDigest,
+      ),
       expectedProjectSequence: count(z).describe(
         chuggyExpectedProjectSequenceDescription,
       ),
@@ -1345,12 +1506,18 @@ export const chuggyProjectTools = [
   },
   {
     name: "update_ticket",
-    description: `Submits the update of one Pending ticket to its draft as revise_draft last left it, on your owner's word only. \`expectedRevision\` is the ticket's \`revision\` as read_ticket answers it, and \`authoringVersion\` and \`configurationRevision\` are the draft's as read_draft or that revision answers them. A ticket no longer Pending is refused (TicketNotPending), and one whose revision moved since it was read is refused (TicketRevisionStale), so read_ticket it again. The draft's dependencies replace the ticket's: dropping one is never refused, and one it adds is refused if it was revoked (DependenciesRevoked) or already waits on this ticket (DependencyCycle). ${chuggySubmissionDescription} ${chuggyProgramShortDescription}`,
+    description: `Submits the update of one Pending ticket to its draft as revise_draft last left it, on your owner's word only. A ticket no longer Pending is refused (TicketNotPending), and one whose revision moved since it was read is refused (TicketRevisionStale), so read_ticket it again. The draft's dependencies replace the ticket's: dropping one is never refused, and one it adds is refused if it was revoked (DependenciesRevoked) or already waits on this ticket (DependencyCycle). ${chuggySubmissionDescription} ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z),
-      expectedRevision: ticket(z),
-      authoringVersion: count(z),
-      configurationRevision: identity(z),
+      expectedRevision: ticket(z).describe(
+        "`expectedRevision` is the ticket's `revision` as read_ticket answers it.",
+      ),
+      authoringVersion: count(z).describe(
+        "The draft's `authoringVersion`, as read_draft or the revise_draft that last changed it answers it.",
+      ),
+      configurationRevision: identity(z).describe(
+        "The draft's `configurationRevision`, as read_draft or the revise_draft that last changed it answers it.",
+      ),
     }),
     call: (context, args) =>
       submit(context, {
