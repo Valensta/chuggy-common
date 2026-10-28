@@ -1116,14 +1116,14 @@ export const chuggyProjectTools = [
   {
     name: "list_configurations",
     description:
-      "One page of this project's configuration revisions, newest first: by default the newest of each configuration, `latest: false` for every revision. Call it for the revision a draft is filed against. Each answers its `revision`, its `name`, the `repository` it was imported from, its `readiness` and, for a catalog, its `catalog`; read_configuration answers the rest.",
+      "One page of this project's configuration revisions, newest first. By default it holds the newest of each configuration imported from a repository and every revision imported from none; `latest: false` holds every revision. Call it for the revision a draft is filed against. Each answers its `revision`, its `name`, the `repository` it was imported from, its `readiness` and, for a catalog, its `catalog`; read_configuration answers the rest.",
     shape: (z) => ({
       cursor: cursor(z),
       limit: limit(z, nativeHttpPageItemsMax),
       latest: z
         .boolean()
         .describe(
-          "false lists every revision; left out, only the newest of each configuration.",
+          "false lists every revision; left out, the newest of each configuration imported from a repository and every revision imported from none.",
         )
         .optional(),
     }),
