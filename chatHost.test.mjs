@@ -452,12 +452,15 @@ test("a host goes on polling while its image is pulled, and a pull the host's en
     release = resolve;
   });
   const named = () => ({ chatImage: one });
+  /** @type {unknown[]} */
+  const pulling = [];
   const run = await hostOf(t, {
     answers: [
       named(),
       named(),
       named(),
-      () => {
+      (_supervisors, _nowMs, status) => {
+        pulling.push(status());
         release();
         return named();
       },
@@ -478,6 +481,17 @@ test("a host goes on polling while its image is pulled, and a pull the host's en
     [`started ${one}`],
   );
   assert.equal(run.seen.polls.at(-1).wantedSessions, "2");
+  assert.deepEqual(pulling, [
+    {
+      named: one,
+      used: undefined,
+      own: undefined,
+      supervisor: "Absent",
+      starting: true,
+      startingIn: one,
+    },
+  ]);
+  assert.equal(run.host.status().startingIn, undefined);
   const cut = await hostOf(t, {
     answers: [named(), named(), named()],
     gate: new Promise(() => undefined),
@@ -1316,6 +1330,7 @@ test("a supervisor's container is asked of the engine: none, its state and wheth
     ],
     [stateOf("exited"), { asked: "State", state: "exited", removable: true }],
     [stateOf("created"), { asked: "State", state: "created", removable: true }],
+    [stateOf("stopped"), { asked: "State", state: "stopped", removable: true }],
     [
       stateOf("running"),
       { asked: "State", state: "running", removable: false },
@@ -1351,13 +1366,46 @@ test("a host's settings and its service's status are said in lines a CLI prints"
       named: two,
       used: one,
       own: { image: one, pull: "missing" },
-      supervisor: "Draining",
-      starting: true,
+      supervisor: "Ready",
+      starting: false,
     }),
     [
       "service: running",
-      `supervisor: draining in ${one}; a start is under way`,
+      `supervisor: ready in ${one}`,
       `image: chuggy names ${two}, and the host runs its own, ${one}`,
     ],
+  );
+});
+
+/**
+ * Catches a status naming the image of a supervisor that has ended, or one
+ * still being started, as the image a supervisor runs.
+ */
+test("a host's status names the image a supervisor is starting in, and the one last ready where none runs", () => {
+  const said = (status) =>
+    chatHostStatusLines({ named: two, used: one, ...status })[1];
+  assert.equal(
+    said({ supervisor: "Draining", starting: false }),
+    `supervisor: draining in ${one}`,
+  );
+  assert.equal(
+    said({ supervisor: "Ended", starting: true, startingIn: two }),
+    `supervisor: ended, last ready in ${one}; a start in ${two} is under way`,
+  );
+  assert.equal(
+    said({ supervisor: "Starting", starting: true, startingIn: two }),
+    `supervisor: starting in ${two}`,
+  );
+  assert.equal(
+    said({ supervisor: "Ended", starting: false }),
+    `supervisor: ended, last ready in ${one}`,
+  );
+  assert.equal(
+    chatHostStatusLines({
+      supervisor: "Absent",
+      starting: true,
+      startingIn: one,
+    })[1],
+    `supervisor: absent; a start in ${one} is under way`,
   );
 });

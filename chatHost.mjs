@@ -254,13 +254,15 @@ export const chatHostConfigSchema = z.strictObject({
 export const chatHostStatusSchema = z.object({
   /** The image the plane last named. */
   named: z.string().optional(),
-  /** The image the supervisor runs, or the last one started ran. */
+  /** The image of the last supervisor to say it was ready, which may since have ended. */
   used: z.string().optional(),
   /** The host's own image, which it runs in place of the plane's. */
   own: chatHostImageSettingSchema.optional(),
   supervisor: z.enum(chatSupervisorPhases),
   /** Whether a supervisor is being started: its image pulled, or its Ready awaited. */
   starting: z.boolean(),
+  /** The image a supervisor is being started in, while one is. */
+  startingIn: z.string().optional(),
 });
 
 /** How long a supervisor started has to say it is ready, which takes it no more than opening its mirrors. */
@@ -456,11 +458,13 @@ export async function chatSupervisorLeftoverRemoved(engine, name) {
 
 /**
  * The states of a container the engine removes without force, as its
- * inspection names them.
+ * inspection names them: podman's `stopped` is one that has exited and is
+ * not yet cleaned up.
  */
 export const chatSupervisorRemovableStates = Object.freeze([
   "created",
   "exited",
+  "stopped",
   "dead",
 ]);
 
@@ -730,11 +734,13 @@ function chatHostFollowed(state, draining, idle) {
     return;
   state.endSeen = false;
   state.drained = false;
+  state.startingIn = wanted;
   state.starting = (async () => {
     await state.backend.closed();
     await chatHostStarted(state, wanted);
   })().finally(() => {
     state.starting = undefined;
+    state.startingIn = undefined;
   });
 }
 
@@ -801,6 +807,27 @@ export function chatHostSettingsLine(settings) {
 }
 
 /**
+ * What a host's service says of its supervisor: the image one starting is
+ * starting in, the one a ready or draining one runs, and the last one ready
+ * where none runs, beside any start under way.
+ *
+ * @param {ChatHostStatus} status
+ */
+function chatHostSupervisorSaid(status) {
+  const { supervisor, used, startingIn } = status;
+  const phase = supervisor.toLowerCase();
+  if (supervisor === "Starting")
+    return startingIn === undefined ? phase : `${phase} in ${startingIn}`;
+  const live = supervisor === "Ready" || supervisor === "Draining";
+  const ran =
+    used === undefined ? "" : live ? ` in ${used}` : `, last ready in ${used}`;
+  const start = status.starting
+    ? `; a start${startingIn === undefined ? "" : ` in ${startingIn}`} is under way`
+    : "";
+  return `${phase}${ran}${start}`;
+}
+
+/**
  * What a host's service says of itself, a line each, as a CLI's `status`
  * says it, or that none answers.
  *
@@ -811,7 +838,7 @@ export function chatHostStatusLines(status) {
   if (status === undefined) return ["service: not running"];
   return [
     "service: running",
-    `supervisor: ${status.supervisor.toLowerCase()}${status.used === undefined ? "" : ` in ${status.used}`}${status.starting ? "; a start is under way" : ""}`,
+    `supervisor: ${chatHostSupervisorSaid(status)}`,
     `image: chuggy names ${status.named ?? "none yet"}${status.own === undefined ? "" : `, and the host runs its own, ${status.own.image}`}`,
   ];
 }
@@ -891,6 +918,7 @@ export function checkedChatHostSettings(settings, engineName) {
  * @property {boolean} endSeen
  * @property {boolean} drained
  * @property {Promise<void> | undefined} starting a supervisor's start, while one runs
+ * @property {string | undefined} startingIn the image that start is in
  * @property {AbortController} cut aborted once the host ends, which cuts a pull short and starts nothing more
  *
  * @typedef {object} ChatHost
@@ -944,6 +972,7 @@ export function chatHost(credentials, settings, seams) {
     endSeen: false,
     drained: false,
     starting: undefined,
+    startingIn: undefined,
     cut: new globalThis.AbortController(),
   };
   client.plane = chatHostPlane(state, client.plane);
@@ -955,6 +984,9 @@ export function chatHost(credentials, settings, seams) {
       own: checked.image,
       supervisor: backend.phase(),
       starting: state.starting !== undefined,
+      ...(state.startingIn === undefined
+        ? {}
+        : { startingIn: state.startingIn }),
     }),
   };
 }
