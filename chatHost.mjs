@@ -36,7 +36,6 @@
  * holds, so a CLI keeps each credential in a directory of its own. Every
  * credential file is the credentials' owner's, since only that user opens
  * where they are.
-
  */
 
 import { posix } from "node:path";

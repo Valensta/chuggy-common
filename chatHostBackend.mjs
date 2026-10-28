@@ -20,7 +20,8 @@
  * answered, stopped or not, since until then it runs; a supervisor that does
  * not answer a stop within its bound is ended and killed. One whose process
  * exited is ended once its output has been read to its end, within a bound,
- * so the frames it wrote before it exited are acted on.
+ * so the frames it wrote before it exited are acted on, and has no room
+ * meanwhile.
 
  *
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
@@ -75,6 +76,7 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @property {ChatSupervisorHandle} handle
  * @property {ChatSupervisorPhase} phase
  * @property {ChatSupervisorReady | undefined} ready
+ * @property {boolean} exited whether its process has exited, after which it has no room while what it wrote is read
  * @property {(answer: {ready: ChatSupervisorReady} | {refused: string}) => void} answered settles what `attached` returned
  * @property {Promise<void>} done settles once it has ended
  * @property {() => void} finished
@@ -304,6 +306,7 @@ function chatHostSupervisorOf(handle) {
     handle,
     phase: "Starting",
     ready: undefined,
+    exited: false,
     answered: () => undefined,
     done: Promise.resolve(),
     finished: () => undefined,
@@ -320,6 +323,7 @@ function chatHostSupervisorOf(handle) {
  * has been read, which the end of its output says, or past the bound on that.
  */
 function chatHostExited(state, supervisor) {
+  supervisor.exited = true;
   if (supervisor.phase === "Ended") return;
   globalThis.clearTimeout(supervisor.timer);
   supervisor.timer = globalThis.setTimeout(
@@ -421,6 +425,7 @@ function chatHostPlaced(state, assignment, kind) {
   const { supervisor } = state;
   if (
     supervisor?.phase !== "Ready" ||
+    supervisor.exited ||
     state.entries.size >= (supervisor.ready?.sessionsMax ?? 0)
   )
     return { placed: "Unavailable" };
@@ -564,7 +569,7 @@ export function chatHostBackend(settings, seams) {
     attached: (handle) => chatHostAttached(state, handle),
     phase: () => state.supervisor?.phase ?? "Absent",
     ceiling: () =>
-      state.supervisor?.phase === "Ready"
+      state.supervisor?.phase === "Ready" && !state.supervisor.exited
         ? (state.supervisor.ready?.sessionsMax ?? 0)
         : 0,
     drain: () => chatHostDrained(state),

@@ -339,13 +339,35 @@ test("a supervisor that does not answer a stop in bound is ended and killed, and
   );
 });
 
-test("a supervisor that exited is ended once its output ends, so what it wrote before it exited is read", async () => {
+test("a stop answered within its bound leaves the supervisor and its other sessions running", async () => {
+  const host = await readyHost({ ...settings, stopWaitMs: 200 });
+  for (const assignment of ["stopping", "running"])
+    await host.backend.place(sessionOf(assignment), "Session");
+  await host.backend.stop("stopping");
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
+  host.say({ frame: "Ended", assignment: "stopping", phase: "Failed" });
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 200));
+  await settled();
+  assert.equal(host.handle.kills, 0);
+  assert.equal(host.backend.phase(), "Ready");
+  assert.deepEqual(
+    (await host.backend.held()).map(({ assignment }) => assignment),
+    ["running"],
+  );
+  assert.deepEqual(await host.backend.ended(), []);
+});
+
+test("a supervisor that exited has no room, and is ended once its output ends, so what it wrote before it exited is read", async () => {
   const host = await readyHost();
   await host.backend.place(sessionOf("a"), "Session");
   host.say({ frame: "Started", assignment: "a" });
   host.exit();
   await settled();
   assert.equal(host.backend.phase(), "Ready");
+  assert.equal(host.backend.ceiling(), 0);
+  assert.deepEqual(await host.backend.place(sessionOf("late"), "Session"), {
+    placed: "Unavailable",
+  });
   host.say(
     { frame: "Ended", assignment: "a", phase: "Succeeded" },
     { frame: "Drained" },
