@@ -160,8 +160,18 @@ async function pushPlaceHolding({ cwd, env }) {
     ),
     hooks: await readdir(join(cwd, "hooks")),
     global: await readFile(env.GIT_CONFIG_GLOBAL, "utf8"),
-    home: await readdir(env.HOME),
+    home: await homeHolding(env.HOME),
   };
+}
+
+/** A home's entries, less a `.cache` holding Rosetta's translation cache alone: an x86-64 git run under Rosetta writes it there, and git reads no configuration from it. */
+async function homeHolding(home) {
+  const entries = await readdir(home);
+  if (!entries.includes(".cache")) return entries;
+  const cached = await readdir(join(home, ".cache"));
+  return cached.length === 1 && cached[0] === "rosetta"
+    ? entries.filter((entry) => entry !== ".cache")
+    : entries;
 }
 
 /**
