@@ -39,7 +39,19 @@
  * old one beside it, reading either shape, for one release window: a host
  * and a supervisor a release apart then agree, and any further apart each
  * refuses the other before a session is claimed. `chatProtocol.test.mjs`
- * holds that shape against the version.
+ * holds that shape against the version; it sees names and mounts, so a
+ * value's form or meaning changing under a name it already holds — the JSON
+ * in `CHUG_WORKER_CLAUDE_CREDENTIAL`, what `CHUG_CHAT_CREDENTIAL_UID` is the
+ * uid of — bumps the version by hand. The version is chuggy's, in
+ * `@chuggy/worker-contract`, so a bump is a contract release and then this
+ * core's lock moved to it.
+ *
+ * THE WINDOW ENDS AT THE PLANE'S FLOOR. N-1 leaves `chatSupervisorProtocols`
+ * only once the plane admits no host that speaks only N-1: once chuggy's
+ * `workerContractChatHost.min`, the contract release below which a chat host
+ * is refused every pool plane route, is at or past the release that brought
+ * N. The release a poll names (`./runnerUpdate.mjs`) moves a host forward and
+ * refuses none, so it ends no window.
  */
 
 import process from "node:process";

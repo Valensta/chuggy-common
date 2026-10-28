@@ -127,7 +127,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {true} interactive its input held open, which is the host's stream to it
  * @property {readonly {volume: string, target: string}[]} volumes
  * @property {readonly {target: string, mode: number, uid: number, gid: number, sizeBytes: number, flags: readonly string[]}[]} tmpfs in the order they are mounted, each beneath the one before it
- * @property {readonly {source: string, target: string}[]} binds each read-only
+ * @property {readonly {source: string, target: string, readonly: true}[]} binds
  * @property {number} memoryBytes the most memory it may take, swap included
  * @property {Readonly<Record<string, string>>} environment
  *
@@ -403,7 +403,7 @@ export function chatSupervisorContainer(image, places, memoryBytes) {
         flags,
       },
     ],
-    binds: [{ source: mount.source, target: mount.target }],
+    binds: [{ source: mount.source, target: mount.target, readonly: true }],
     memoryBytes,
     environment,
   };

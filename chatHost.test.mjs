@@ -710,6 +710,7 @@ test("a supervisor's container is root with the capabilities it needs and none t
       {
         source: "/home/geoff/.chuggy/claude",
         target: "/var/run/chuggy/credentials/provider",
+        readonly: true,
       },
     ],
     memoryBytes: 6 * gib,

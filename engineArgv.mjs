@@ -519,9 +519,12 @@ function chatSupervisorTmpfs(engine, tmpfs) {
 export function chatSupervisorRunArgv(engine, container, naming) {
   if (container.interactive !== true)
     throw new RangeError("a chat supervisor's input is held open");
-  for (const { source } of container.binds)
+  for (const { source, readonly } of container.binds) {
+    if (readonly !== true)
+      throw new RangeError("a chat supervisor's binds are read-only");
     if (!bindMountNameable(source))
       throw new RangeError(`${source} cannot be named in a bind mount`);
+  }
   const [entrypoint, ...command] = container.command;
   const { drop, add } = container.capabilities;
   const memory = `${String(container.memoryBytes)}b`;

@@ -11,6 +11,15 @@
  * own version ends and kills it before claiming a session for it
  * (`./chatHostBackend.test.mjs`), which is what a host a version ahead of
  * its image meets.
+ *
+ * THE SHAPE IS NAMES AND MOUNTS, NOT WHAT A VALUE MEANS. A value's form or
+ * meaning changing under a name it already holds — the JSON in
+ * `CHUG_WORKER_CLAUDE_CREDENTIAL`, or what `CHUG_CHAT_CREDENTIAL_UID` is the
+ * uid of — passes here, and still bumps the version, by hand.
+ *
+ * `chatProtocolVersion` is chuggy's, in `@chuggy/worker-contract`: a bump is a
+ * contract release, then this core's lock moved to it. The window it opens
+ * ends as `./chatSupervisor.mjs` says.
  */
 
 import assert from "node:assert/strict";
@@ -62,25 +71,60 @@ const recorded = {
       "/opt/chuggy/lib/chuggy/chatSupervisor.mjs",
     ],
     user: "0:0",
-    credentialTarget: "/var/run/chuggy/credentials/provider",
-    tmpfsTargets: ["/var/run/chuggy", "/var/run/chuggy/credentials"],
+    capabilities: {
+      drop: ["ALL"],
+      add: [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "SETUID",
+        "SETGID",
+        "SETPCAP",
+      ],
+    },
+    securityOptions: ["no-new-privileges"],
+    interactive: true,
+    tmpfs: [
+      {
+        target: "/var/run/chuggy",
+        mode: "711",
+        owner: "root",
+        flags: ["nosuid", "nodev", "noexec"],
+      },
+      {
+        target: "/var/run/chuggy/credentials",
+        mode: "700",
+        owner: "credentialOwner",
+        flags: ["nosuid", "nodev", "noexec"],
+      },
+    ],
+    binds: [{ target: "/var/run/chuggy/credentials/provider", readonly: true }],
     volumeTargets: ["/sessions", "/var/lib/chuggy/mirrors"],
   },
 };
 
 /** What a host hands this core's supervisor, given all it can be given. */
 function shapeNow() {
+  const credentialOwner = { uid: 501, gid: 20 };
   const container = chatSupervisorContainer(
     "registry.example/chat",
     {
       volumes: { sessions: "s", mirrors: "m" },
       credentialFile: "/home/geoff/.chuggy/claude/claude.json",
-      credentialOwner: { uid: 501, gid: 20 },
+      credentialOwner,
       claudeCredential: { kind: "Subscription" },
       repositories: "{}",
     },
     2 ** 30,
   );
+  /** @param {{uid: number, gid: number}} owner who it is to the supervisor, not which uid */
+  const role = ({ uid, gid }) =>
+    uid === 0 && gid === 0
+      ? "root"
+      : uid === credentialOwner.uid && gid === credentialOwner.gid
+        ? "credentialOwner"
+        : `${String(uid)}:${String(gid)}`;
   return {
     variables: [
       ...new Set([
@@ -91,8 +135,22 @@ function shapeNow() {
     ].sort(),
     command: [...chatSupervisorCommand],
     user: container.user,
-    credentialTarget: container.binds.map(({ target }) => target).join(),
-    tmpfsTargets: container.tmpfs.map(({ target }) => target),
+    capabilities: {
+      drop: [...container.capabilities.drop],
+      add: [...container.capabilities.add],
+    },
+    securityOptions: [...container.securityOptions],
+    interactive: container.interactive,
+    tmpfs: container.tmpfs.map((tmpfs) => ({
+      target: tmpfs.target,
+      mode: tmpfs.mode.toString(8),
+      owner: role(tmpfs),
+      flags: [...tmpfs.flags],
+    })),
+    binds: container.binds.map(({ target, readonly }) => ({
+      target,
+      readonly,
+    })),
     volumeTargets: container.volumes.map(({ target }) => target),
   };
 }

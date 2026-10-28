@@ -772,7 +772,7 @@ test("a chat supervisor is run attached, capped with no swap past it, its enviro
   );
 });
 
-test("a chat supervisor podman would leave another's tmpfs root's, whose bind cannot be named, or whose input is not held open, is refused", () => {
+test("a chat supervisor podman would leave another's tmpfs root's, whose bind cannot be named or is not read-only, or whose input is not held open, is refused", () => {
   assert.throws(
     () =>
       chatSupervisorRunArgv(
@@ -789,11 +789,29 @@ test("a chat supervisor podman would leave another's tmpfs root's, whose bind ca
         "docker",
         {
           ...container,
-          binds: [{ source: "/home/a,b", target: "/var/run/chuggy/x" }],
+          binds: [
+            {
+              source: "/home/a,b",
+              target: "/var/run/chuggy/x",
+              readonly: true,
+            },
+          ],
         },
         chatNaming,
       ),
     /cannot be named in a bind mount/u,
+  );
+  assert.throws(
+    () =>
+      chatSupervisorRunArgv(
+        "docker",
+        /** @type {any} */ ({
+          ...container,
+          binds: [{ source: "/home/a", target: "/var/run/chuggy/x" }],
+        }),
+        chatNaming,
+      ),
+    /binds are read-only/u,
   );
   assert.throws(
     () =>
