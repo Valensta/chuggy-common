@@ -712,10 +712,15 @@ export function chatHostConfigured(config, outputBytesMax) {
 }
 
 /**
+ * `settings`, refused where a supervisor could not be started from them,
+ * on `engineName` too where one is named, so a container that engine
+ * cannot run is refused before any start.
+ *
  * @param {ChatHostSettings} settings
+ * @param {EngineName} [engineName]
  * @returns {ChatHostSettings}
  */
-export function checkedChatHostSettings(settings) {
+export function checkedChatHostSettings(settings, engineName) {
   for (const [name, bound] of /** @type {const} */ ([
     ["sessionsMax", settings.sessionsMax],
     ["sessionMemoryBytes", settings.sessionMemoryBytes],
@@ -732,11 +737,17 @@ export function checkedChatHostSettings(settings) {
     settings.image === undefined
       ? undefined
       : chatHostImageSettingSchema.parse(settings.image);
-  chatSupervisorContainer(
+  const container = chatSupervisorContainer(
     "checked",
     settings.places,
     chatHostMemoryBytes(settings),
   );
+  if (engineName !== undefined)
+    chatSupervisorRunArgv(engineName, container, {
+      name: "checked",
+      label: "checked",
+      network: "checked",
+    });
   return { ...settings, ...(image === undefined ? {} : { image }) };
 }
 
@@ -770,7 +781,7 @@ export function checkedChatHostSettings(settings) {
  * @returns {ChatHost}
  */
 export function chatHost(credentials, settings, seams) {
-  const checked = checkedChatHostSettings(settings);
+  const checked = checkedChatHostSettings(settings, seams.site.engine);
   const backend = chatHostBackend(
     {
       outputBytesMax: checked.outputBytesMax,

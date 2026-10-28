@@ -848,6 +848,27 @@ test("a host's settings refuse too little memory a session, and keys they do not
   );
 });
 
+/** Catches a podman host whose credential's owner is not root, refused only at each start of its supervisor. */
+test("a host's settings are refused before any start where its engine could not run its supervisor", () => {
+  const owned = {
+    ...settings,
+    places: { ...places, credentialOwner: { uid: 1000, gid: 1000 } },
+  };
+  assert.equal(checkedChatHostSettings(owned, "docker").sessionsMax, 2);
+  assert.equal(checkedChatHostSettings(settings, "podman").sessionsMax, 2);
+  assert.throws(
+    () => checkedChatHostSettings(owned, "podman"),
+    /podman leaves a tmpfs root's/u,
+  );
+  assert.throws(
+    () =>
+      chatHost(credentials, owned, {
+        site: { engine: "podman", runtimeDir: "/run/chuggy" },
+      }),
+    /podman leaves a tmpfs root's/u,
+  );
+});
+
 test("the ids a session or a mirror takes lie below what a host's engine must map", () => {
   assert.deepEqual(chatSessionIdsNeeded, { uids: 20_032, gids: 31_024 });
   assert.equal(
