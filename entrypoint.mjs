@@ -567,7 +567,7 @@ async function workSource(context, workspace, verdict) {
       command: context.command ?? command,
       secrets: context.held(),
       git: context.git,
-      emptyDeclared: verdict === "Pass",
+      candidate: verdict === "Pass",
     });
   if (verdict === "Pass") return { source: await pushed() };
   try {

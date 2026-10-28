@@ -36,8 +36,10 @@ import {
 import { workTaskAnswerSchema } from "@chuggy/worker-contract/workerTask";
 
 import {
+  author,
   git,
   handedAsTheImage,
+  headOf,
   inCheckout,
   recordingGit,
   remoteRefs,
@@ -2745,6 +2747,7 @@ async function workPublished(worker, run, pushed) {
             env: { PATH: process.env.PATH ?? "", ...options.env },
           });
         if (pushed !== undefined && args.includes("push")) return pushed();
+        if (args.includes("rev-list")) return { stdout: "" };
         return { stdout: `${workCommit}\n` };
       },
     },
@@ -3018,6 +3021,77 @@ test("a failing work attempt whose commit carries a held secret pushes nothing a
       "u",
     ),
   );
+});
+
+/** The base `checkout` was made with, amended to hold a change, as an attempt rewriting a commit it did not make leaves it. */
+async function baseAmended({ directory }) {
+  await writeFile(join(directory, "change"), "made\n");
+  await git("git", ["add", "change"], { cwd: directory });
+  await git(
+    "git",
+    [...author, "commit", "--quiet", "--amend", "-m", "amended"],
+    {
+      cwd: directory,
+    },
+  );
+  return headOf(directory);
+}
+
+/**
+ * Catches a passing attempt whose history no longer holds its base reported
+ * as a candidate: the run fails, saying what the next attempt does instead,
+ * and neither the remote nor the report hears of it.
+ */
+test("a passing work attempt that rewrote the history below its base fails and pushes nothing", async () => {
+  await inCheckout(async (checkout) => {
+    const amended = await baseAmended(checkout);
+
+    const { refused, calls } = await finishedFrom(checkout, {
+      scrub: (text) => text,
+      held: () => [],
+    });
+
+    assert.equal(
+      refused.message,
+      `commit ${amended} does not descend from ${checkout.base}, the commit this attempt started from: the history below it was rewritten, so the attempt pushes nothing. Add commits on top of ${checkout.base} instead, merging the target in rather than rebasing onto it.`,
+    );
+    assert.equal(await remoteRefs(checkout.remote), "");
+    assert.ok(!calls.some(({ path }) => path === "/v1/report"));
+  });
+});
+
+/**
+ * A failing attempt's branch is never read as a candidate, so what it keeps is
+ * for a person whatever its history. Catches a Fail's changes lost because the
+ * attempt rewrote the history below its base.
+ */
+test("a failing work attempt that rewrote the history below its base keeps its changes", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+  await inCheckout(async (checkout) => {
+    const amended = await baseAmended(checkout);
+
+    const { refused, calls } = await finishedFrom(
+      checkout,
+      { scrub: (text) => text, held: () => [] },
+      "bearer",
+      "Fail",
+    );
+
+    assert.equal(refused.message, "pushed", "the kept work failed the attempt");
+    const kept = `The failed attempt's changes are kept on ${ticketBranch(workAttempt)} at ${amended}.`;
+    assert.deepEqual(logged, [`${kept}\n`]);
+    const reported = JSON.parse(reportedBody(calls));
+    assert.equal(reported.verdict, "Fail");
+    assert.equal(reported.source, undefined);
+    assert.equal(reported.report, `${kept} done`);
+    const { stdout: pushed } = await git(
+      "git",
+      ["rev-parse", ticketBranch(workAttempt)],
+      { cwd: checkout.remote },
+    );
+    assert.equal(pushed.trim(), amended);
+  });
 });
 
 /**
