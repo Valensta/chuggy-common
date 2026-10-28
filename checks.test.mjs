@@ -8,7 +8,9 @@
 
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { EventEmitter } from "node:events";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import {
@@ -281,6 +283,42 @@ test("a command's output at the bound with a code point across the head's limit 
   assert.equal(
     output.checks[0].output,
     `${"a".repeat(limit - 1)}\u{1F600}${"b".repeat(after)}`,
+  );
+});
+
+/** A child that writes each of `chunks` to its stdout as one read, then exits zero. */
+function spawnWriting(chunks) {
+  return () => {
+    const stream = () =>
+      Object.assign(new EventEmitter(), { setEncoding() {} });
+    const child = Object.assign(new EventEmitter(), {
+      stdout: stream(),
+      stderr: stream(),
+    });
+    setImmediate(() => {
+      for (const chunk of chunks) child.stdout.emit("data", chunk);
+      child.emit("close", 0, null);
+    });
+    return child;
+  };
+}
+
+test("a rolling tail cut on a code point keeps nothing from before the cut", async () => {
+  const marker = "\n[capture dropped output here]\n";
+  const headUnits = Math.floor((workerCheckOutputCharsMax - marker.length) / 2);
+  const tailUnits = workerCheckOutputCharsMax - marker.length - headUnits;
+  const chunks = [
+    "a".repeat(workerCheckOutputCharsMax + 1),
+    `b\u{1F600}${"c".repeat(tailUnits - 1)}`,
+  ];
+  const { output } = await ran(["writes"], {
+    spawnProcess: spawnWriting(chunks),
+  });
+
+  assert.equal(output.checks[0].truncated, true);
+  assert.equal(
+    output.checks[0].output,
+    `${"a".repeat(headUnits)}${marker}${"c".repeat(tailUnits - 1)}`,
   );
 });
 

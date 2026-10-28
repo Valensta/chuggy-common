@@ -441,7 +441,8 @@ async function runCheckCommand(command, room, services) {
  * command did. Until output is dropped the tail holds whatever room the head
  * left, and at the first drop the head is cut to its half and the tail to the
  * other. The tail is cut before it is added to, so the two together never hold
- * more than `units`.
+ * more than `units`, and keeps none of itself where what came last was cut, so
+ * what is dropped is one stretch.
  */
 function checkCapture(units) {
   const marker = units >= checkCaptureMarker.length ? checkCaptureMarker : "";
@@ -467,7 +468,10 @@ function checkCapture(units) {
       truncated ||= dropped;
       const room = truncated ? tailUnits : units - head.length;
       const end = checkTail(rest, room);
-      tail = checkTail(tail, room - end.length) + end;
+      tail =
+        end.length < rest.length
+          ? end
+          : checkTail(tail, room - end.length) + end;
     },
     kept: () => ({
       truncated,
