@@ -1777,6 +1777,19 @@ test("a pool whose name cannot name a container is refused, and a personal runne
   assert.equal(containerBackendSettingsChecked(personal).pool, personal);
 });
 
+/** Catches a CLI that runs a job loop on a chat host's credentials, which name no pool a container is named for. */
+test("a chat host's identity runs no container backend", () => {
+  assert.throws(
+    () =>
+      containerBackendSettingsChecked({
+        kind: "ChatHost",
+        tenant: "vteng",
+        owner: "geoff",
+      }),
+    /^RangeError: a chat host runs no job, so its credentials run no container backend$/u,
+  );
+});
+
 /** @param {import("./poolIdentity.mjs").PoolIdentity} identity */
 function containerBackendSettingsChecked(identity) {
   return checkedContainerBackendSettings(

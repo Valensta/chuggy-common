@@ -177,12 +177,18 @@ export function hostEnvironmentRefusal(environment) {
 /**
  * The platforms a pool runs work on its host: those of the host's operating
  * system it declared, where its operator registered it to, and none otherwise.
+ * A chat host's credentials are refused, since a chat host runs no job.
  *
- * @param {Pick<PoolCredentials, "capabilities" | "host">} credentials
+ * @param {Pick<PoolCredentials, "capabilities" | "host"> & {kind?: string}} credentials
  * @param {"Linux" | "MacOS"} operatingSystem the host's
  */
 export function hostPlatformsDeclared(credentials, operatingSystem) {
+  if (credentials.kind === "ChatHost")
+    throw new RangeError(
+      "a chat host runs no job, so its credentials run none on its host",
+    );
   if (credentials.host !== true) return [];
+
   return credentials.capabilities.filter((capability) =>
     capability.startsWith(`Platform:${operatingSystem}:`),
   );
