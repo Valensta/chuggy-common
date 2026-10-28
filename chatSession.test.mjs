@@ -13,14 +13,13 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test, { afterEach } from "node:test";
 
-import { workerCredentialFilesVariable } from "@chuggy/worker-contract/workerEnvironment";
-
 import {
   chatChannelVariable,
   chatCheckoutVariable,
   chatMintedVariable,
 } from "./chatChannel.mjs";
 import {
+  chatSessionAsUser,
   chatSessionIpcCleared,
   chatSessionHome,
   chatSessionLabel,
@@ -54,16 +53,23 @@ const settings = {
   clearWaitMs: 60_000,
   node: "/usr/bin/node",
   entrypoint: "/core/entrypoint.mjs",
+  credentialFile: "/credentials/provider/claude.json",
+  credentialOwner: { uid: 1_000, gid: 1_001 },
   environment: {
     PATH: "/usr/bin:/bin",
-    [workerCredentialFilesVariable]: JSON.stringify({
-      "claude-code": "/credentials/claude-code",
-    }),
+    CHUG_CHAT_CREDENTIAL: "/credentials/provider/claude.json",
     CHUG_SUPERVISOR_ONLY: "the supervisor's own",
     RUSTUP_HOME: "/usr/local/rustup",
     CARGO_HOME: "/usr/local/cargo",
   },
 };
+
+/** The one read of the credential each session's preparation makes. */
+const credentialReadCall = [
+  "credentialRead",
+  settings.credentialFile,
+  settings.credentialOwner,
+];
 
 /** Every child a test started, each ended once it is over so no session's deadline outlives it. */
 const childrenStarted = [];
@@ -120,8 +126,8 @@ function systemOf(overrides = {}) {
     rootMade: recorded("rootMade"),
     made: recorded("made"),
     listed: async () => [],
-    credentialRead: async (path) => {
-      calls.push(["credentialRead", path]);
+    credentialRead: async (path, owner) => {
+      calls.push(["credentialRead", path, owner]);
       return credential;
     },
     credentialWritten: recorded("credentialWritten"),
@@ -228,7 +234,7 @@ test("a session is started as its own user, in its own places, its envelope on i
     ["made", "/sessions/session-20000/tmp", 20_000],
     ["made", "/minted/session-20000", 20_000],
     ["rootMade", "/supervisor/session-20000", 0o700],
-    ["credentialRead", "/credentials/claude-code"],
+    credentialReadCall,
     [
       "credentialWritten",
       "/minted/session-20000/provider-credential",
@@ -241,6 +247,62 @@ test("a session is started as its own user, in its own places, its envelope on i
   assert.equal(checkouts[0].asked.minted, "/supervisor/session-20000");
   assert.equal(checkouts[0].bearer, bearer);
   assert.equal(checkouts[0].task.workerPlane.url, envelope.callbackUrl);
+});
+
+/**
+ * Catches a supervisor that looks the credential up by the slot a session's
+ * task names, which fails every session of a deployment whose slot is not the
+ * one a host mounted it under, or that reads it as whoever a look at the file
+ * reports.
+ */
+test("a session's credential is the one the supervisor is handed, whatever slot its task names, read as the owner it is told", async () => {
+  const system = systemOf();
+  const { sessions } = await sessionsOf(
+    system,
+    {},
+    {
+      task: async () => ({
+        mode: "Session",
+        answer: { ...poolHeldSessionAnswer, credentialSlot: "anthropic-site" },
+      }),
+    },
+  );
+
+  await sessions.prepared(assignment, envelope, live());
+
+  assert.deepEqual(
+    system.calls.filter(([name]) => name === "credentialRead"),
+    [
+      [
+        "credentialRead",
+        "/credentials/provider/claude.json",
+        { uid: 1_000, gid: 1_001 },
+      ],
+    ],
+  );
+  assert.equal(
+    JSON.parse(system.children[0].child.written).providerCredentialFile,
+    "/minted/session-20000/provider-credential",
+  );
+});
+
+test("a command run as an owner runs as its uid and gid, with no other group and no capability", () => {
+  assert.deepEqual(
+    chatSessionAsUser({ uid: 1_000, gid: 1_001 }, [], ["cat", "--", "/x"]),
+    [
+      "setpriv",
+      "--reuid=1000",
+      "--regid=1001",
+      "--clear-groups",
+      "--inh-caps=-all",
+      "--bounding-set=-all",
+      "--no-new-privs",
+      "--",
+      "cat",
+      "--",
+      "/x",
+    ],
+  );
 });
 
 /** Catches a line the checkout says of a session that the host cannot read back to its assignment. */
@@ -549,18 +611,17 @@ test("a session still running at its deadline is stopped, and ends Failed howeve
  * or that says nothing of why.
  */
 test("a preparation that fails is refused with everything it made gone and its user free", async () => {
-  const system = systemOf();
-  const { sessions, logged } = await sessionsOf(system, {
-    environment: {
-      ...settings.environment,
-      [workerCredentialFilesVariable]: "{}",
+  const system = systemOf({
+    credentialRead: async () => {
+      throw new Error("the credential is not there");
     },
   });
+  const { sessions, logged } = await sessionsOf(system);
   const before = system.calls.length;
 
   await assert.rejects(
     sessions.prepared(assignment, envelope, live()),
-    /the session credential claude-code is not mounted/u,
+    /the credential is not there/u,
   );
 
   assert.deepEqual(since(system, before).slice(5), [
@@ -577,11 +638,11 @@ test("a preparation that fails is refused with everything it made gone and its u
   assert.deepEqual(system.children, []);
   await assert.rejects(
     sessions.prepared(assignment, envelope, live()),
-    /not mounted/u,
+    /not there/u,
   );
   await assert.rejects(
     sessions.prepared(assignment, envelope, live()),
-    /not mounted/u,
+    /not there/u,
   );
   assert.equal(
     system.calls.filter(

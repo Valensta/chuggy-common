@@ -39,10 +39,7 @@ import {
   parseChatHostFrame,
 } from "@chuggy/worker-contract/chatHost";
 import { workerContractRelease } from "@chuggy/worker-contract/workerContract";
-import {
-  workerCredentialFilesVariable,
-  workerRepositoriesVariable,
-} from "@chuggy/worker-contract/workerEnvironment";
+import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
 
 import { chatLineReader, chatLineText } from "./chatChannel.mjs";
 import {
@@ -70,7 +67,11 @@ import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
 import { workerRepositories } from "./repository.mjs";
 import { sessionRequest } from "./sessionTransport.mjs";
 
-/** The variables a supervisor's places and bounds are read from, each its constant where it is unset. */
+/**
+ * The variables a supervisor's places and bounds are read from, each its
+ * constant where it is unset, and the provider credential's file and the
+ * owner it is read as, which have none.
+ */
 export const chatSupervisorVariables = {
   uidFirst: "CHUG_CHAT_UID_FIRST",
   uidCount: "CHUG_CHAT_UID_COUNT",
@@ -81,6 +82,9 @@ export const chatSupervisorVariables = {
   mirrorsRoot: "CHUG_CHAT_MIRRORS",
   groupFirst: "CHUG_CHAT_MIRROR_GROUP_FIRST",
   groupCount: "CHUG_CHAT_MIRROR_GROUP_COUNT",
+  credential: "CHUG_CHAT_CREDENTIAL",
+  credentialUid: "CHUG_CHAT_CREDENTIAL_UID",
+  credentialGid: "CHUG_CHAT_CREDENTIAL_GID",
 };
 
 /** A whole number `environment` names under `name`, `fallback` where it names none. */
@@ -96,17 +100,44 @@ function chatSupervisorCount(environment, name, fallback, least) {
 }
 
 /**
- * Where a supervisor makes what it makes and how many sessions it runs, read
- * from `environment`, refused where a session's user could be root or could
- * share a number with a mirror's group, which its own group would then be.
+ * The provider credential's file and the owner it is read as, as
+ * `environment` names them, refused where it names either not at all, or an
+ * owner a session is run as, who could then read it.
+ */
+function chatSupervisorCredential(environment, uidFirst, uidCount) {
+  const names = chatSupervisorVariables;
+  const credentialFile = environment[names.credential] ?? "";
+  if (!credentialFile.startsWith("/"))
+    throw new RangeError(
+      `${names.credential} must name the provider credential's file by its absolute path`,
+    );
+  const uid = chatSupervisorCount(environment, names.credentialUid, -1, 0);
+  const gid = chatSupervisorCount(environment, names.credentialGid, -1, 0);
+  if (uid < 0 || gid < 0)
+    throw new RangeError(
+      `${names.credentialUid} and ${names.credentialGid} must name the owner the provider credential is read as`,
+    );
+  if (uid >= uidFirst && uid < uidFirst + uidCount)
+    throw new RangeError(
+      `the credential's owner ${String(uid)} is among the users a session is run as`,
+    );
+  return { credentialFile, credentialOwner: { uid, gid } };
+}
+
+/**
+ * Where a supervisor makes what it makes, how many sessions it runs, and the
+ * credential it hands them, read from `environment`, refused where a
+ * session's user could be root, could share a number with a mirror's group,
+ * which its own group would then be, or could own the credential.
  */
 export function chatSupervisorSettings(environment) {
   const names = chatSupervisorVariables;
   const count = (name, fallback, least = 1) =>
     chatSupervisorCount(environment, name, fallback, least);
   const uidCount = count(names.uidCount, chatSessionUidCount);
+  const uidFirst = count(names.uidFirst, chatSessionUidFirst);
   const settings = {
-    uidFirst: count(names.uidFirst, chatSessionUidFirst),
+    uidFirst,
     uidCount,
     sessionsMax: Math.min(uidCount, count(names.sessionsMax, uidCount)),
     sessionsRoot: environment[names.sessionsRoot] || chatSessionsDirectory,
@@ -121,6 +152,7 @@ export function chatSupervisorSettings(environment) {
     clearWaitMs: chatSessionClearWaitMs,
     node: process.execPath,
     entrypoint: chatSessionEntrypoint,
+    ...chatSupervisorCredential(environment, uidFirst, uidCount),
     environment,
   };
   const uidLast = settings.uidFirst + settings.uidCount - 1;
@@ -301,15 +333,13 @@ export function chatSupervised({
 
 /**
  * The tree a session reads, checked out by the supervisor as root under a
- * credential the plane mints for the session's own attempt.
+ * credential the plane mints for the session's own attempt; it is handed no
+ * repository's credential file of its own.
  */
 function chatSupervisorCheckout(environment, mirrors) {
   const named = environment[workerRepositoriesVariable];
   const repositories =
     named === undefined || named.length === 0 ? {} : workerRepositories(named);
-  const credentialFiles = JSON.parse(
-    environment[workerCredentialFilesVariable] ?? "{}",
-  );
   return (task, bearer, workspace, { signal, uid, minted, log }) =>
     chatCheckout(task, bearer, workspace, {
       mint: (repository) =>
@@ -323,7 +353,7 @@ function chatSupervisorCheckout(environment, mirrors) {
         }),
       mirrors,
       repositories,
-      credentialFiles,
+      credentialFiles: {},
       environment,
       user: { uid, gid: uid },
       signal,

@@ -6,7 +6,8 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -24,20 +25,40 @@ import {
 } from "@chuggy/worker-contract/workerContract";
 import { workerRunnerPollWaitHeader } from "@chuggy/worker-contract/workerPool";
 
+import { chatMirrorGroupCount, chatMirrorGroupFirst } from "./chatCheckout.mjs";
 import {
+  chatCredentialAloneRefusal,
   chatHost,
+  chatHostConfigSchema,
+  chatHostConfigured,
+  chatHostControl,
+  chatHostIdleSecs,
+  chatHostMemoryBytes,
   chatHostRestartBackoffMs,
+  chatHostSessionsMaxDefault,
+  chatHostStatusAsked,
   chatHostStopWaitMs,
   chatHostUnreadyWaitMs,
   chatHostVolumes,
+  chatSessionIdsNeeded,
+  chatSessionMemoryBytesDefault,
   chatSupervisorContainer,
+  chatSupervisorName,
+  chatSupervisorNaming,
+  chatSupervisorStarted,
+  checkedChatHostSettings,
 } from "./chatHost.mjs";
 import {
   chatSessionClearWaitMs,
   chatSessionStopGraceMs,
   chatSessionSweepPauseMs,
   chatSessionSweepsMax,
+  chatSessionUidCount,
+  chatSessionUidFirst,
 } from "./chatSession.mjs";
+import { chatSupervisorSettings } from "./chatSupervisor.mjs";
+import { controlAsked, controlServer, controlSocketPath } from "./control.mjs";
+import { poolLabelValue } from "./poolIdentity.mjs";
 
 const bearer = "chgs_0123456789abcdef0123456789abcdef";
 
@@ -55,12 +76,15 @@ const credentials = {
 
 const places = {
   volumes: { sessions: "chat-sessions", mirrors: "chat-mirrors" },
-  credentialFiles: { claude: "/home/geoff/.chuggy/claude.json" },
+  credentialFile: "/home/geoff/.chuggy/claude/claude.json",
   credentialOwner: { uid: 0, gid: 0 },
 };
 
+const gib = 2 ** 30;
+
 const settings = {
   sessionsMax: 2,
+  sessionMemoryBytes: 3 * gib,
   idleSecs: 600,
   outputBytesMax: 4_096,
   places,
@@ -578,14 +602,23 @@ test("a host's own image is run whatever the plane names, and pulled as its sett
   );
 });
 
-test("a supervisor's container is root with the capabilities it needs and none to gain, its credentials' directories read-only beneath one only their owner opens", () => {
-  const container = chatSupervisorContainer(one, {
-    ...places,
-    credentialOwner: { uid: 1000, gid: 1000 },
-    claudeCredential: { kind: "Subscription" },
-    repositories: '{"kasofsk/chuggy":{}}',
-    variables: { CHUG_CHAT_SESSIONS_MAX: "4" },
-  });
+/** A supervisor's container given all a host can give it. */
+function supervisorContainerOf() {
+  return chatSupervisorContainer(
+    one,
+    {
+      ...places,
+      credentialOwner: { uid: 1000, gid: 1001 },
+      claudeCredential: { kind: "Subscription" },
+      repositories: '{"kasofsk/chuggy":{}}',
+      variables: { CHUG_CHAT_SESSIONS_MAX: "4" },
+    },
+    6 * gib,
+  );
+}
+
+test("a supervisor's container is root with the capabilities it needs and none to gain, its memory capped, and its credential's directory read-only beneath one only its owner opens", () => {
+  const container = supervisorContainerOf();
   assert.deepEqual(container, {
     image: one,
     command: [
@@ -627,28 +660,50 @@ test("a supervisor's container is root with the capabilities it needs and none t
         target: "/var/run/chuggy/credentials",
         mode: 0o700,
         uid: 1000,
-        gid: 1000,
+        gid: 1001,
         sizeBytes: 1024 * 1024,
         flags: ["nosuid", "nodev", "noexec"],
       },
     ],
     binds: [
       {
-        source: "/home/geoff/.chuggy",
-        target: "/var/run/chuggy/credentials/claude",
+        source: "/home/geoff/.chuggy/claude",
+        target: "/var/run/chuggy/credentials/provider",
       },
     ],
-    environment: {
-      CHUG_CHAT_SESSIONS_MAX: "4",
-      CHUG_WORKER_CREDENTIAL_FILES:
-        '{"claude":"/var/run/chuggy/credentials/claude/claude.json"}',
-      CHUG_WORKER_CLAUDE_CREDENTIAL: '{"kind":"Subscription"}',
-      CHUG_WORKER_REPOSITORIES: '{"kasofsk/chuggy":{}}',
-    },
+    memoryBytes: 6 * gib,
+    environment: container.environment,
   });
 });
 
-test("a container whose credentials a session's user could own or open another way, or whose supervisor would move its places, is refused", () => {
+test("a supervisor's container is told its counts, the credential's file and owner, and the site's", () => {
+  assert.deepEqual(supervisorContainerOf().environment, {
+    CHUG_CHAT_SESSIONS_MAX: "4",
+    CHUG_CHAT_CREDENTIAL: "/var/run/chuggy/credentials/provider/claude.json",
+    CHUG_CHAT_CREDENTIAL_UID: "1000",
+    CHUG_CHAT_CREDENTIAL_GID: "1001",
+    CHUG_WORKER_CLAUDE_CREDENTIAL: '{"kind":"Subscription"}',
+    CHUG_WORKER_REPOSITORIES: '{"kasofsk/chuggy":{}}',
+  });
+});
+
+/** Catches a supervisor's environment the supervisor would refuse, found only once its container has started. */
+test("a container's environment is one its supervisor reads, and is told the credential's file and owner", () => {
+  const container = chatSupervisorContainer(
+    one,
+    { ...places, credentialOwner: { uid: 501, gid: 20 } },
+    gib,
+  );
+  const read = chatSupervisorSettings(container.environment);
+  assert.equal(
+    read.credentialFile,
+    "/var/run/chuggy/credentials/provider/claude.json",
+  );
+  assert.deepEqual(read.credentialOwner, { uid: 501, gid: 20 });
+  assert.ok(!("CHUG_WORKER_CREDENTIAL_FILES" in container.environment));
+});
+
+test("a container whose credential a session's user could own or open another way, or whose supervisor would move its places, is refused", () => {
   for (const [changed, why] of [
     [
       { credentialOwner: { uid: 20_005, gid: 0 } },
@@ -665,18 +720,107 @@ test("a container whose credentials a session's user could own or open another w
       { variables: { CHUG_CHAT_SESSIONS: "/tmp" } },
       /no count of the supervisor's/u,
     ],
+    [
+      { variables: { CHUG_CHAT_CREDENTIAL_UID: "1" } },
+      /no count of the supervisor's/u,
+    ],
     [{ variables: { CHUG_CHAT_UID_FIRST: "30000" } }, /overlap the groups/u],
-    [{ credentialFiles: { "../x": "/a" } }, /no credential slot/u],
-    [{ credentialFiles: { "..": "/a" } }, /no credential slot/u],
-    [{ credentialFiles: { claude: "relative.json" } }, /no absolute path/u],
-    [{ credentialFiles: { claude: "/a/../b.json" } }, /written plainly/u],
-    [{ credentialFiles: { claude: "/a/" } }, /no directory of its own/u],
-    [{ credentialFiles: { claude: "/b.json" } }, /no directory of its own/u],
+    [{ credentialFile: "relative.json" }, /no absolute path/u],
+    [{ credentialFile: "/a/../b.json" }, /written plainly/u],
+    [{ credentialFile: "/a/" }, /no directory of its own/u],
+    [{ credentialFile: "/b.json" }, /no directory of its own/u],
   ])
     assert.throws(
-      () => chatSupervisorContainer(one, { ...places, ...changed }),
+      () => chatSupervisorContainer(one, { ...places, ...changed }, gib),
       why,
     );
+  for (const memoryBytes of [0, -1, 1.5, 2 ** 53])
+    assert.throws(
+      () => chatSupervisorContainer(one, places, memoryBytes),
+      /memory must be a positive integer/u,
+    );
+});
+
+/** Catches a supervisor started with no cap, or one that is not room for each session the host runs. */
+test("a host's supervisor is capped at its memory for each session it runs at once", async (t) => {
+  const { host, seen } = await hostOf(t, { answers: [{ chatImage: one }, {}] });
+  await host.run();
+  assert.equal(seen.started[0].memoryBytes, 2 * 3 * gib);
+  assert.equal(chatHostMemoryBytes(settings), 2 * 3 * gib);
+});
+
+test("a host's settings from a runner's file are its defaults where the file names none", () => {
+  assert.equal(chatHostSessionsMaxDefault, 4);
+  assert.equal(chatSessionMemoryBytesDefault, 2 * gib);
+  assert.deepEqual(chatHostConfigured(undefined, 1_000), {
+    sessionsMax: chatHostSessionsMaxDefault,
+    sessionMemoryBytes: chatSessionMemoryBytesDefault,
+    idleSecs: chatHostIdleSecs,
+    outputBytesMax: 1_000,
+  });
+  const image = { image: one, pull: "never" };
+  assert.deepEqual(
+    chatHostConfigured(
+      chatHostConfigSchema.parse({
+        image,
+        sessionsMax: 3,
+        sessionMemoryMib: 1_024,
+        idleSecs: 60,
+        outputBytesMax: 5,
+      }),
+      1_000,
+    ),
+    {
+      sessionsMax: 3,
+      sessionMemoryBytes: gib,
+      idleSecs: 60,
+      outputBytesMax: 5,
+      image,
+    },
+  );
+  assert.deepEqual(chatHostConfigSchema.parse({ image: { image: one } }), {
+    image: { image: one, pull: "missing" },
+  });
+});
+
+/** Catches a setting that would cap a supervisor below what a session is claimed into, or a key misspelled into silence. */
+test("a host's settings refuse too little memory a session, and keys they do not hold", () => {
+  for (const config of [
+    { sessionMemoryMib: 511 },
+    { sessionsMax: 0 },
+    { sessionMemory: 2048 },
+    { image: { image: one, pull: "sometimes" } },
+  ])
+    assert.equal(chatHostConfigSchema.safeParse(config).success, false);
+  assert.throws(
+    () =>
+      checkedChatHostSettings({
+        ...settings,
+        sessionMemoryBytes: 511 * 2 ** 20,
+      }),
+    /sessionMemoryBytes must be at least/u,
+  );
+  assert.throws(
+    () =>
+      checkedChatHostSettings({
+        ...settings,
+        sessionsMax: 2 ** 40,
+        sessionMemoryBytes: 2 ** 30,
+      }),
+    /memory must be a positive integer/u,
+  );
+});
+
+test("the ids a session or a mirror takes lie below what a host's engine must map", () => {
+  assert.deepEqual(chatSessionIdsNeeded, { uids: 20_032, gids: 31_024 });
+  assert.equal(
+    chatSessionIdsNeeded.uids,
+    chatSessionUidFirst + chatSessionUidCount,
+  );
+  assert.equal(
+    chatSessionIdsNeeded.gids,
+    chatMirrorGroupFirst + chatMirrorGroupCount,
+  );
 });
 
 /** Catches a host that kills a healthy supervisor, and every session it runs, for one stop it is still clearing. */
@@ -697,5 +841,182 @@ test("a host's volumes are its own", () => {
   assert.notEqual(
     chatHostVolumes({ ...geoff, owner: "other" }).sessions,
     volumes.sessions,
+  );
+});
+
+const geoffHost = { kind: "ChatHost", tenant: "vteng", owner: "geoff" };
+
+test("a host's supervisor is named for its host as its volumes are, and carries its host's pool label", () => {
+  const naming = chatSupervisorNaming(geoffHost, "chuggy");
+  assert.equal(naming.name, chatSupervisorName(geoffHost));
+  assert.equal(`${naming.name}-sessions`, chatHostVolumes(geoffHost).sessions);
+  assert.deepEqual(
+    { label: naming.label, network: naming.network },
+    { label: poolLabelValue(geoffHost), network: "chuggy" },
+  );
+});
+
+/** A child process a fake spawn hands back, which exits once killed. */
+function childOf() {
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    killed: /** @type {string[]} */ ([]),
+    kill: (/** @type {string} */ signal) => {
+      child.killed.push(signal);
+      child.emit("exit", null, signal);
+    },
+  });
+  return child;
+}
+
+/** A supervisor's start over an engine whose removal answers `removed`. */
+function startOf(removed) {
+  const seen = { execs: [], spawned: [] };
+  const child = childOf();
+  const started = chatSupervisorStarted({
+    engineName: "docker",
+    engine: {
+      exec: async (argv) => {
+        seen.execs.push([...argv]);
+        return argv[0] === "rm" ? removed : { code: 0, stdout: "", stderr: "" };
+      },
+      execTail: async () => assert.fail("no tail is read"),
+    },
+    naming: chatSupervisorNaming(geoffHost, "chuggy"),
+    spawn: /** @type {any} */ (
+      (command, argv, options) => {
+        seen.spawned.push({ command, argv, env: options.env });
+        return child;
+      }
+    ),
+  });
+  return { started, seen, child };
+}
+
+/**
+ * Catches a start that runs a second supervisor beside one still running,
+ * kills one to make room, or writes a value of its environment into an argv.
+ */
+test("a supervisor is started once a container of its name that has exited is removed, and never beside one still there", async () => {
+  const name = chatSupervisorName(geoffHost);
+  const container = chatSupervisorContainer(one, places, gib);
+  for (const removed of [
+    { code: 0, stdout: name, stderr: "" },
+    { code: 1, stdout: "", stderr: `Error: No such container: ${name}` },
+  ]) {
+    const { started, seen } = startOf(removed);
+    await started(container);
+    assert.deepEqual(seen.execs, [["rm", "-v", name]]);
+    assert.equal(seen.spawned.length, 1);
+    const [{ command, argv, env }] = seen.spawned;
+    assert.equal(command, "docker");
+    assert.equal(argv.at(argv.indexOf("--name") + 1), name);
+    assert.equal(
+      env.CHUG_CHAT_CREDENTIAL,
+      "/var/run/chuggy/credentials/provider/claude.json",
+    );
+    assert.ok(argv.includes("CHUG_CHAT_CREDENTIAL"));
+    assert.ok(!argv.some((arg) => arg.startsWith("CHUG_CHAT_CREDENTIAL=")));
+  }
+
+  const { started, seen } = startOf({
+    code: 1,
+    stdout: "",
+    stderr: `Error response from daemon: cannot remove container "${name}": container is running: stop the container before removing or force remove`,
+  });
+  await assert.rejects(
+    started(container),
+    /is still there, and no supervisor is started beside it/u,
+  );
+  assert.deepEqual(seen.execs, [["rm", "-v", name]]);
+  assert.deepEqual(seen.spawned, []);
+});
+
+test("a started supervisor's kill ends its child and asks the engine to kill its container", async () => {
+  const { started, seen, child } = startOf({ code: 0, stdout: "", stderr: "" });
+  const handle = await started(chatSupervisorContainer(one, places, gib));
+  assert.equal(handle.input, child.stdin);
+  handle.kill();
+  await handle.exited;
+  assert.deepEqual(child.killed, ["SIGKILL"]);
+  assert.deepEqual(seen.execs.at(-1), ["kill", chatSupervisorName(geoffHost)]);
+});
+
+/** Catches a CLI's status that reads a host's state through a runner's answer, which carries none of it. */
+test("a host's status is asked of its service's door, which a runner's service and an absent one do not answer", async (t) => {
+  const directory = await mkdtemp("/tmp/chuggy-chat-control-");
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = controlSocketPath(directory);
+  assert.equal(await chatHostStatusAsked(path), undefined);
+
+  const status = {
+    named: one,
+    used: one,
+    own: undefined,
+    supervisor: /** @type {const} */ ("Ready"),
+    starting: false,
+  };
+  const server = await controlServer(
+    path,
+    chatHostControl({
+      run: async () => assert.fail("not run"),
+      status: () => status,
+    }),
+  );
+  assert.deepEqual(await chatHostStatusAsked(path), {
+    named: one,
+    used: one,
+    supervisor: "Ready",
+    starting: false,
+  });
+  assert.deepEqual(await controlAsked(path, { op: "status" }), {
+    inFlight: [],
+  });
+  assert.deepEqual(
+    await controlAsked(path, { op: "stop", assignment: "asg-1" }),
+    { refused: "a chat host's sessions are stopped in chuggy" },
+  );
+  await new Promise((resolve) => server.close(resolve));
+
+  const runner = await controlServer(path, {
+    inFlight: () => [],
+    stop: async () => ({ stopped: "Stopped" }),
+  });
+  t.after(() => runner.close());
+  await assert.rejects(
+    chatHostStatusAsked(path),
+    /answered no chat host's status/u,
+  );
+});
+
+/** Catches a credential whose directory hands its supervisor more than the credential, or a link that leads nowhere inside its container. */
+test("a credential is handed a supervisor only alone in its directory, and not as a link", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-chat-credential-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const alone = join(root, "alone", "claude.json");
+  await mkdir(join(root, "alone"));
+  await writeFile(alone, "{}");
+  assert.equal(await chatCredentialAloneRefusal(alone), undefined);
+
+  const crowded = join(root, "crowded", "claude.json");
+  await mkdir(join(root, "crowded"));
+  await writeFile(crowded, "{}");
+  for (const other of ["a", "b", "c", "d"])
+    await writeFile(join(root, "crowded", other), "");
+  assert.match(
+    String(await chatCredentialAloneRefusal(crowded)),
+    /holds a, b, c and more beside the credential/u,
+  );
+
+  const linked = join(root, "linked", "claude.json");
+  await mkdir(join(root, "linked"));
+  await symlink(alone, linked);
+  assert.match(String(await chatCredentialAloneRefusal(linked)), /is a link/u);
+
+  assert.match(
+    String(await chatCredentialAloneRefusal(join(root, "absent", "x.json"))),
+    /cannot be read/u,
   );
 });

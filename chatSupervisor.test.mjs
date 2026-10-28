@@ -410,12 +410,26 @@ test("a line that never ends is refused once it passes a frame's bound", async (
   assert.equal(supervisor.logged.length, 1);
 });
 
+/** What every supervisor is told of its credential, which has no constant. */
+const credentialed = {
+  [chatSupervisorVariables.credential]:
+    "/var/run/chuggy/credentials/provider/claude.json",
+  [chatSupervisorVariables.credentialUid]: "1000",
+  [chatSupervisorVariables.credentialGid]: "1001",
+};
+
 test("a supervisor's places and bounds are its constants unless its environment names others", () => {
-  const settings = chatSupervisorSettings({});
+  const settings = chatSupervisorSettings(credentialed);
   assert.equal(settings.sessionsMax, settings.uidCount);
   assert.equal(settings.sessionsRoot, "/sessions");
+  assert.equal(
+    settings.credentialFile,
+    "/var/run/chuggy/credentials/provider/claude.json",
+  );
+  assert.deepEqual(settings.credentialOwner, { uid: 1_000, gid: 1_001 });
 
   const named = chatSupervisorSettings({
+    ...credentialed,
     [chatSupervisorVariables.uidFirst]: "40000",
     [chatSupervisorVariables.uidCount]: "4",
     [chatSupervisorVariables.sessionsMax]: "9",
@@ -425,10 +439,73 @@ test("a supervisor's places and bounds are its constants unless its environment 
   assert.equal(named.sessionsMax, 4);
   assert.equal(named.sessionsRoot, "/elsewhere");
   assert.equal(
-    chatSupervisorSettings({ [chatSupervisorVariables.sessionsMax]: "2" })
-      .sessionsMax,
+    chatSupervisorSettings({
+      ...credentialed,
+      [chatSupervisorVariables.sessionsMax]: "2",
+    }).sessionsMax,
     2,
   );
+});
+
+/**
+ * Catches a supervisor that starts without the owner its credential is read
+ * as, which it would then have to look up on the file, or with an owner a
+ * session is run as, who could read the credential where it is mounted.
+ */
+test("a supervisor is refused without its credential and the owner it is read as, or with an owner a session is run as", () => {
+  for (const [changed, why] of [
+    [
+      { [chatSupervisorVariables.credential]: undefined },
+      /CHUG_CHAT_CREDENTIAL /u,
+    ],
+    [{ [chatSupervisorVariables.credential]: "claude.json" }, /absolute path/u],
+    [
+      { [chatSupervisorVariables.credentialUid]: undefined },
+      /owner the provider credential is read as/u,
+    ],
+    [
+      { [chatSupervisorVariables.credentialGid]: "" },
+      /owner the provider credential is read as/u,
+    ],
+    [
+      { [chatSupervisorVariables.credentialUid]: "-1" },
+      /CHUG_CHAT_CREDENTIAL_UID/u,
+    ],
+    [
+      { [chatSupervisorVariables.credentialUid]: "20000" },
+      /owner 20000 is among the users/u,
+    ],
+    [
+      { [chatSupervisorVariables.credentialUid]: "20031" },
+      /owner 20031 is among the users/u,
+    ],
+    [
+      {
+        [chatSupervisorVariables.uidFirst]: "40000",
+        [chatSupervisorVariables.credentialUid]: "40001",
+      },
+      /owner 40001 is among the users/u,
+    ],
+  ])
+    assert.throws(
+      () =>
+        chatSupervisorSettings(
+          Object.fromEntries(
+            Object.entries({ ...credentialed, ...changed }).filter(
+              ([, value]) => value !== undefined,
+            ),
+          ),
+        ),
+      why,
+    );
+  for (const uid of ["0", "19999", "20032"])
+    assert.equal(
+      chatSupervisorSettings({
+        ...credentialed,
+        [chatSupervisorVariables.credentialUid]: uid,
+      }).credentialOwner.uid,
+      Number(uid),
+    );
 });
 
 /** Catches a session's own group that is a mirror's, which would hand it that repository, or a session run as root. */
@@ -436,6 +513,7 @@ test("a supervisor is refused users that overlap its mirrors' groups, or that ar
   assert.throws(
     () =>
       chatSupervisorSettings({
+        ...credentialed,
         [chatSupervisorVariables.uidFirst]: "30000",
       }),
     /overlap/u,
@@ -443,7 +521,10 @@ test("a supervisor is refused users that overlap its mirrors' groups, or that ar
   for (const value of ["0", "-1", "1.5", "x"])
     assert.throws(
       () =>
-        chatSupervisorSettings({ [chatSupervisorVariables.uidFirst]: value }),
+        chatSupervisorSettings({
+          ...credentialed,
+          [chatSupervisorVariables.uidFirst]: value,
+        }),
       /CHUG_CHAT_UID_FIRST/u,
     );
 });

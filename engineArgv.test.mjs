@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { chatSupervisorContainer } from "./chatHost.mjs";
 import {
+  chatSupervisorRunArgv,
   dockerContextArgv,
   dockerDiskUsageArgv,
   engineInfoArgv,
@@ -644,4 +646,152 @@ test("what is running, what it uses, and a job's hold on the engine's memory are
     "--filter",
     "label=io.chuggy.held",
   ]);
+});
+
+const chatImage = `registry.chuggy.example/chat@sha256:${"c".repeat(64)}`;
+
+/** A supervisor's container as a host states it, its credential `owner`'s. */
+function chatContainerOf(owner) {
+  return chatSupervisorContainer(
+    chatImage,
+    {
+      volumes: { sessions: "chat-sessions", mirrors: "chat-mirrors" },
+      credentialFile: "/home/geoff/.chuggy/claude/claude.json",
+      credentialOwner: owner,
+      claudeCredential: { kind: "Subscription" },
+    },
+    4 * 2 ** 30,
+  );
+}
+
+const chatNaming = {
+  name: "chuggy-chat-0123456789abcdef0123",
+  label: "vteng/@chat/geoff",
+  network: "chuggy",
+};
+
+/** A supervisor's run as `chatContainerOf` states it, mapped as `userns` says, with `tmpfs` its tmpfs mounts' options. */
+function chatRunOf(userns, tmpfs) {
+  return [
+    "run",
+    "-i",
+    "--rm",
+    "--pull=never",
+    "--name",
+    "chuggy-chat-0123456789abcdef0123",
+    "--label",
+    "io.chuggy.pool=vteng/@chat/geoff",
+    "--log-driver",
+    "none",
+    "--user",
+    "0:0",
+    ...userns,
+    "--cap-drop",
+    "ALL",
+    ...["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID"]
+      .concat("SETPCAP")
+      .flatMap((capability) => ["--cap-add", capability]),
+    "--security-opt",
+    "no-new-privileges",
+    "--memory",
+    "4294967296b",
+    "--memory-swap",
+    "4294967296b",
+    "--volume",
+    "chat-sessions:/sessions",
+    "--volume",
+    "chat-mirrors:/var/lib/chuggy/mirrors",
+    "--tmpfs",
+    `/var/run/chuggy:rw,nosuid,nodev,noexec,size=67108864,mode=0711,${tmpfs[0]}`,
+    "--tmpfs",
+    `/var/run/chuggy/credentials:rw,nosuid,nodev,noexec,size=1048576,mode=0700,${tmpfs[1]}`,
+    "--mount",
+    "type=bind,source=/home/geoff/.chuggy/claude,target=/var/run/chuggy/credentials/provider,readonly",
+    ...[
+      "CHUG_CHAT_CREDENTIAL",
+      "CHUG_CHAT_CREDENTIAL_UID",
+      "CHUG_CHAT_CREDENTIAL_GID",
+      "CHUG_WORKER_CLAUDE_CREDENTIAL",
+    ].flatMap((name) => ["--env", name]),
+    "--network",
+    "chuggy",
+    "--entrypoint",
+    "/opt/chuggy/bin/tini",
+    chatImage,
+    "-s",
+    "--",
+    "/opt/chuggy/bin/node",
+    "/opt/chuggy/lib/chuggy/chatSupervisor.mjs",
+  ];
+}
+
+/**
+ * Catches a supervisor's secret-bearing environment written into an argv any
+ * user can list, a run that pulls, keeps an engine log or swaps past its cap,
+ * or a podman run that maps root onto anyone but the user running it.
+ */
+test("a chat supervisor is run attached, capped with no swap past it, its environment named and carried apart, on docker and podman alike", () => {
+  const docker = chatSupervisorRunArgv(
+    "docker",
+    chatContainerOf({ uid: 1000, gid: 1000 }),
+    chatNaming,
+  );
+  assert.deepEqual(
+    docker.argv,
+    chatRunOf([], ["uid=0,gid=0", "uid=1000,gid=1000"]),
+  );
+  assert.deepEqual(docker.environment, {
+    CHUG_CHAT_CREDENTIAL: "/var/run/chuggy/credentials/provider/claude.json",
+    CHUG_CHAT_CREDENTIAL_UID: "1000",
+    CHUG_CHAT_CREDENTIAL_GID: "1000",
+    CHUG_WORKER_CLAUDE_CREDENTIAL: '{"kind":"Subscription"}',
+  });
+  assert.ok(!docker.argv.some((arg) => arg.includes("Subscription")));
+  assert.ok(
+    !docker.argv.some((arg) => arg.startsWith("CHUG_") && arg.includes("=")),
+  );
+
+  const podman = chatSupervisorRunArgv(
+    "podman",
+    chatContainerOf({ uid: 0, gid: 0 }),
+    chatNaming,
+  );
+  assert.deepEqual(
+    podman.argv,
+    chatRunOf(["--userns=host"], ["notmpcopyup", "notmpcopyup"]),
+  );
+});
+
+test("a chat supervisor podman would leave another's tmpfs root's, whose bind cannot be named, or whose input is not held open, is refused", () => {
+  assert.throws(
+    () =>
+      chatSupervisorRunArgv(
+        "podman",
+        chatContainerOf({ uid: 1000, gid: 1000 }),
+        chatNaming,
+      ),
+    /podman leaves a tmpfs root's/u,
+  );
+  const container = chatContainerOf({ uid: 0, gid: 0 });
+  assert.throws(
+    () =>
+      chatSupervisorRunArgv(
+        "docker",
+        {
+          ...container,
+          binds: [{ source: "/home/a,b", target: "/var/run/chuggy/x" }],
+        },
+        chatNaming,
+      ),
+    /cannot be named in a bind mount/u,
+  );
+  assert.throws(
+    () =>
+      chatSupervisorRunArgv(
+        "docker",
+        /** @type {any} */ ({ ...container, interactive: false }),
+        chatNaming,
+      ),
+    /input is held open/u,
+  );
 });
