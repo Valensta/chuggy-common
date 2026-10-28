@@ -272,9 +272,10 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * push is tried again as `gitRemote.mjs` says, under that one credential and
  * from that one repository, with `pause` between tries.
  *
- * EACH HALF IS A STEP. A failure up to and including the secret check fails
- * the commit step, and one making the repository the push is made from,
- * taking the credential or pushing fails the push step.
+ * EACH HALF IS A STEP. A failure up to and including the secret check and,
+ * for a candidate, the descent check fails the commit step, and one making the
+ * repository the push is made from, taking the credential or pushing fails the
+ * push step.
  */
 export async function commitAndPushSource({
   task,
