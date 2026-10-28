@@ -58,13 +58,14 @@ export function localToolInstructions(task) {
   return `This server is bound to the workspace ${task.tenant} and its project ${task.project}.
 The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket:
-1. list_repositories: a repository that is configured and \`fileable\`.
-2. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
-3. initialize_draft on that revision: the fence and the defaults.
-4. create_draft: the minimum brief, and \`authoring\` from the defaults.
-5. read_draft: the draft as filed.
-6. release_draft.
-7. read_operation: every command is submitted, and this is how its outcome is read.
+1. read_abilities: who you act as, which a ticket's \`creator\` names, and what you may do.
+2. list_repositories: a repository that is configured and \`fileable\`.
+3. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
+4. initialize_draft on that revision: the fence and the defaults.
+5. create_draft: the minimum brief, and \`authoring\` from the defaults.
+6. read_draft: the draft as filed.
+7. release_draft.
+8. read_operation: every command is submitted, and this is how its outcome is read.
 Releasing starts nothing: the ticket waits Pending until the project's lead dispatches it, once its dependencies are Done, or a person who may dispatch does.`;
 }
 

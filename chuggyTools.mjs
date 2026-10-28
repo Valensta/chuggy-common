@@ -1376,6 +1376,13 @@ export const chuggyProjectTools = [
     call: (context, { page }) => readDocs(context, page),
   },
   {
+    name: "read_abilities",
+    description:
+      "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal.",
+    shape: () => ({}),
+    call: (context) => read(context, projectPath(context, "abilities")),
+  },
+  {
     name: "initialize_draft",
     description:
       "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document. Dependencies are chosen from list_tickets.",

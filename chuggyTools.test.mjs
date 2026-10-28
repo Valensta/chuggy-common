@@ -1172,67 +1172,70 @@ function routeOf(name, args, api) {
   )(args);
 }
 
+/** Each read, with arguments, and the route under the project it reaches. */
+const readRoutes = [
+  [["read_ticket", { ticket: 7 }], "/tickets/7"],
+  [["read_draft", { ticket: 7 }], "/drafts/7"],
+  [["list_drafts", { limit: 5 }], "/drafts?limit=5"],
+  [
+    ["list_configurations", { limit: 5 }],
+    "/configurations?latest=true&limit=5",
+  ],
+  [
+    ["list_configurations", { limit: 5, latest: false }],
+    "/configurations?latest=false&limit=5",
+  ],
+  [["read_configuration", { revision: "r/1" }], "/configurations/r%2F1"],
+  [
+    ["read_decision_log", { after: 3, limit: 2 }],
+    "/selector-history?after=3&limit=2",
+  ],
+  [["read_refusals", { limit: 4 }], "/agentic-refusals?limit=4"],
+  [["read_ticket_refusals", { ticket: 9 }], "/tickets/9/agentic-refusals"],
+  [["read_ticket_landings", { ticket: 9 }], "/tickets/9/landings"],
+  [["read_lead", {}], "/lead"],
+  [
+    ["read_lead_transcript", { after: 2, entry: 3 }],
+    "/lead/transcript?after=2&limit=1",
+  ],
+  [
+    ["list_executions", { ticket: 3, state: ["Running"] }],
+    "/executions?ticket=3&state=Running",
+  ],
+  [["read_execution", { execution: "e-1" }], "/executions/e-1"],
+  [
+    [
+      "read_run_transcript",
+      { execution: "e-1", attempt: "a-1", after: 2, entry: 3 },
+    ],
+    "/executions/e-1/attempts/a-1/transcript?after=2",
+  ],
+  [
+    ["read_run_error", { execution: "e-1", attempt: "a-1" }],
+    "/executions/e-1/attempts/a-1/error",
+  ],
+  [["read_operation", { operation: "o-1" }], "/operations/o-1"],
+  [["initialize_draft", { revision: "r1" }], "/draft-initializations/r1"],
+  [["list_threads", {}], "/threads"],
+  [["read_thread", { session: "thread-1/a" }], "/threads/thread-1%2Fa"],
+  [
+    ["read_thread", { session: "thread-1", before: 7, limit: 32 }],
+    "/threads/thread-1?before=7&limit=32",
+  ],
+  [
+    ["read_thread_transcript", { session: "thread-1", after: 2, entry: 3 }],
+    "/threads/thread-1/transcript?after=2&limit=1",
+  ],
+  [["list_repositories", {}], "/repositories"],
+  [["read_abilities", {}], "/abilities"],
+  [
+    ["fetch_image", { artifact: "image/png:ce47" }],
+    "/artifacts/image%2Fpng%3Ace47",
+  ],
+];
+
 test("each read reaches the route its roster names, and only it", async () => {
-  const cases = [
-    [["read_ticket", { ticket: 7 }], "/tickets/7"],
-    [["read_draft", { ticket: 7 }], "/drafts/7"],
-    [["list_drafts", { limit: 5 }], "/drafts?limit=5"],
-    [
-      ["list_configurations", { limit: 5 }],
-      "/configurations?latest=true&limit=5",
-    ],
-    [
-      ["list_configurations", { limit: 5, latest: false }],
-      "/configurations?latest=false&limit=5",
-    ],
-    [["read_configuration", { revision: "r/1" }], "/configurations/r%2F1"],
-    [
-      ["read_decision_log", { after: 3, limit: 2 }],
-      "/selector-history?after=3&limit=2",
-    ],
-    [["read_refusals", { limit: 4 }], "/agentic-refusals?limit=4"],
-    [["read_ticket_refusals", { ticket: 9 }], "/tickets/9/agentic-refusals"],
-    [["read_ticket_landings", { ticket: 9 }], "/tickets/9/landings"],
-    [["read_lead", {}], "/lead"],
-    [
-      ["read_lead_transcript", { after: 2, entry: 3 }],
-      "/lead/transcript?after=2&limit=1",
-    ],
-    [
-      ["list_executions", { ticket: 3, state: ["Running"] }],
-      "/executions?ticket=3&state=Running",
-    ],
-    [["read_execution", { execution: "e-1" }], "/executions/e-1"],
-    [
-      [
-        "read_run_transcript",
-        { execution: "e-1", attempt: "a-1", after: 2, entry: 3 },
-      ],
-      "/executions/e-1/attempts/a-1/transcript?after=2",
-    ],
-    [
-      ["read_run_error", { execution: "e-1", attempt: "a-1" }],
-      "/executions/e-1/attempts/a-1/error",
-    ],
-    [["read_operation", { operation: "o-1" }], "/operations/o-1"],
-    [["initialize_draft", { revision: "r1" }], "/draft-initializations/r1"],
-    [["list_threads", {}], "/threads"],
-    [["read_thread", { session: "thread-1/a" }], "/threads/thread-1%2Fa"],
-    [
-      ["read_thread", { session: "thread-1", before: 7, limit: 32 }],
-      "/threads/thread-1?before=7&limit=32",
-    ],
-    [
-      ["read_thread_transcript", { session: "thread-1", after: 2, entry: 3 }],
-      "/threads/thread-1/transcript?after=2&limit=1",
-    ],
-    [["list_repositories", {}], "/repositories"],
-    [
-      ["fetch_image", { artifact: "image/png:ce47" }],
-      "/artifacts/image%2Fpng%3Ace47",
-    ],
-  ];
-  for (const [[name, args], suffix] of cases) {
+  for (const [[name, args], suffix] of readRoutes) {
     const api = apiOf();
 
     await routeOf(name, args, api);
@@ -1243,6 +1246,29 @@ test("each read reaches the route its roster names, and only it", async () => {
       name,
     );
   }
+});
+
+test("read_abilities answers the session's principal and permits as its route answered them, and sends nothing", async () => {
+  const body = JSON.stringify({
+    principal: "session:thread-1",
+    mutate: true,
+    dispatch: false,
+    manageSelector: false,
+    overrideTicketConfig: false,
+    skipPlannedEvaluations: true,
+    administer: false,
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("read_abilities", {});
+
+  assert.deepEqual(
+    api.calls.map(({ path, method }) => [method, path]),
+    [["GET", "/api/v1/tenants/vteng/projects/chuggy/abilities"]],
+  );
+  assert.equal(api.calls[0].init.body, undefined);
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.ok(answer.isError === undefined);
 });
 
 /** A listing of one plain, one retired and one unreached binding, as the route answers it. */
@@ -2607,6 +2633,23 @@ test("the descriptions say where the head after a command, a program's keys, dep
     for (const claim of claims) assert.match(described(tool), claim, tool);
 });
 
+/** What a newcomer filing a first ticket asks before acting. */
+test("read_abilities says who the session is and what it may do", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const said = {
+    read_abilities: [
+      /^Who this session acts as and what it may do on this project, read live\./,
+      /Call it once before acting\./,
+      /`principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours/,
+      /`dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal/,
+    ],
+  };
+
+  for (const [tool, claims] of Object.entries(said))
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+});
+
 test("fetch_image says on its parameter which identity it takes", () => {
   assert.match(
     parameterDescribed("fetch_image", "artifact"),
@@ -3039,6 +3082,7 @@ const projectToolArguments = {
   list_repositories: {},
   fetch_image: { artifact: "image/png:ce47" },
   read_docs: {},
+  read_abilities: {},
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
