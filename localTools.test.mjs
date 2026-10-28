@@ -163,6 +163,7 @@ test("the server's instructions name the filing recipe's tools in order, then wh
     project: "chuggy",
   });
   const recipe = [
+    "read_abilities",
     "list_repositories",
     "list_configurations",
     "initialize_draft",
@@ -178,14 +179,18 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   );
   const tools = new Set(chuggyProjectTools.map(({ name }) => name));
   for (const tool of recipe) assert.ok(tools.has(tool), tool);
-  assert.match(instructions, /^1\. list_repositories: [^\n]*`fileable`/mu);
+  assert.match(
+    instructions,
+    /^1\. read_abilities: who you act as, which a ticket's `creator` names, and what you may do\.$/mu,
+  );
+  assert.match(instructions, /^2\. list_repositories: [^\n]*`fileable`/mu);
   assert.match(
     instructions,
     /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
   );
   assert.match(
     instructions,
-    /^2\. list_configurations: the newest revision for that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
+    /^3\. list_configurations with `latest: true`: the row whose `provenance\.repository` is that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
   );
 });
 

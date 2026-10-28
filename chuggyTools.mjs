@@ -1072,15 +1072,21 @@ export const chuggyProjectTools = [
   {
     name: "list_configurations",
     description:
-      "One page of this project's configuration revisions, newest first. Call it for the revision a draft is filed against. One imported from a repository carries its configuration's name in `provenance.name`; who does the work under it is read_configuration's to answer.",
+      "One page of this project's configuration revisions, newest first. Call it for the revision a draft is filed against. To file a ticket, pass `latest: true` and take the row whose `provenance.repository` is your repository. One imported from a repository carries its configuration's name in `provenance.name`; who does the work under it is read_configuration's to answer.",
     shape: (z) => ({
       cursor: cursor(z),
       limit: limit(z, nativeHttpPageItemsMax),
+      latest: z
+        .boolean()
+        .describe(
+          "true lists only the newest revision of each repository and configuration name, beside each revision imported from no repository; false or left out, every revision.",
+        )
+        .optional(),
     }),
-    call: (context, { cursor, limit: pageLimit }) =>
+    call: (context, { cursor, limit: pageLimit, latest }) =>
       read(
         context,
-        `${projectPath(context, "configurations")}${search({ cursor, limit: pageLimit })}`,
+        `${projectPath(context, "configurations")}${search({ cursor, limit: pageLimit, latest })}`,
       ),
   },
   {
@@ -1322,6 +1328,13 @@ export const chuggyProjectTools = [
         .optional(),
     }),
     call: (context, { page }) => readDocs(context, page),
+  },
+  {
+    name: "read_abilities",
+    description:
+      "Who this session acts as and what it may do on this project, read live. Call it once before acting. `principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours. The rest are the permits it holds, each true or false, `dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal.",
+    shape: () => ({}),
+    call: (context) => read(context, projectPath(context, "abilities")),
   },
   {
     name: "initialize_draft",

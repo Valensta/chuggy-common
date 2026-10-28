@@ -1220,6 +1220,7 @@ test("each read reaches the route its roster names, and only it", async () => {
       "/threads/thread-1/transcript?after=2&limit=1",
     ],
     [["list_repositories", {}], "/repositories"],
+    [["read_abilities", {}], "/abilities"],
     [
       ["fetch_image", { artifact: "image/png:ce47" }],
       "/artifacts/image%2Fpng%3Ace47",
@@ -1236,6 +1237,46 @@ test("each read reaches the route its roster names, and only it", async () => {
       name,
     );
   }
+});
+
+test("read_abilities answers the session's principal and permits as its route answered them, and sends nothing", async () => {
+  const body = JSON.stringify({
+    principal: "session:thread-1",
+    mutate: true,
+    dispatch: false,
+    manageSelector: false,
+    overrideTicketConfig: false,
+    skipPlannedEvaluations: true,
+    administer: false,
+  });
+  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+
+  const answer = await call("read_abilities", {});
+
+  assert.deepEqual(
+    api.calls.map(({ path, method }) => [method, path]),
+    [["GET", "/api/v1/tenants/vteng/projects/chuggy/abilities"]],
+  );
+  assert.equal(api.calls[0].init.body, undefined);
+  assert.equal(textOf(answer), `HTTP 200\n${body}`);
+  assert.ok(answer.isError === undefined);
+});
+
+test("list_configurations passes `latest` through as its query, and leaves it out unless it is given", async () => {
+  const { api, call } = toolsOf();
+
+  await call("list_configurations", {});
+  await call("list_configurations", { latest: true });
+  await call("list_configurations", { latest: false });
+
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    [
+      "/api/v1/tenants/vteng/projects/chuggy/configurations",
+      "/api/v1/tenants/vteng/projects/chuggy/configurations?latest=true",
+      "/api/v1/tenants/vteng/projects/chuggy/configurations?latest=false",
+    ],
+  );
 });
 
 /** A listing of one plain, one retired and one unreached binding, as the route answers it. */
@@ -2499,6 +2540,33 @@ test("the descriptions say where the head after a command, a program's keys, dep
     for (const claim of claims) assert.match(described(tool), claim, tool);
 });
 
+/** What a newcomer filing a first ticket asks before acting, and the one row of configurations it files against. */
+test("read_abilities says who the session is and what it may do, and list_configurations how a filer narrows it", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const said = {
+    read_abilities: [
+      /^Who this session acts as and what it may do on this project, read live\./,
+      /Call it once before acting\./,
+      /`principal` is the session's own principal, encoded as a ticket's `creator` is, so the tickets whose `creator` is it are yours/,
+      /`dispatch` and `skipPlannedEvaluations` among them: read a permit here rather than learning it from a refusal/,
+    ],
+    list_configurations: [
+      /To file a ticket, pass `latest: true` and take the row whose `provenance\.repository` is your repository\./,
+    ],
+  };
+
+  for (const [tool, claims] of Object.entries(said))
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+});
+
+test("list_configurations says on its `latest` parameter what it narrows the page to", () => {
+  assert.match(
+    parameterDescribed("list_configurations", "latest"),
+    /^true lists only the newest revision of each repository and configuration name, beside each revision imported from no repository; false or left out, every revision\.$/,
+  );
+});
+
 test("fetch_image says on its parameter which identity it takes", () => {
   assert.match(
     parameterDescribed("fetch_image", "artifact"),
@@ -2931,6 +2999,7 @@ const projectToolArguments = {
   list_repositories: {},
   fetch_image: { artifact: "image/png:ce47" },
   read_docs: {},
+  read_abilities: {},
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
