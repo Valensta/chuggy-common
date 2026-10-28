@@ -76,6 +76,22 @@ const sourced = {
     // `ErrImageUsedByContainer`, after the `Error: ` podman's CLI prints.
     "Error: image is in use by a container: consider listing external containers and force-removing image",
   ],
+  PlatformAbsent: [
+    // docker 28.1's classic store, moby's daemon/images/image.go:
+    // `ImageService.GetImage`, an image held for another platform than
+    // `--platform` names.
+    "Error response from daemon: image with reference chuggy/worker-runtime:1 was found but its platform (linux/arm64) does not match the specified platform (linux/amd64)",
+    // Its containerd store, daemon/containerd/image.go: `errPlatformNotFound`.
+    "Error response from daemon: image with reference chuggy/worker-runtime:1 was found but does not provide the specified platform (linux/amd64)",
+  ],
+  FlagUnknown: [
+    // docker's CLI before 28.1, whose `image inspect` takes no `--platform`,
+    // in the words of pflag's flag.go: `FlagSet.parseLongArg`.
+    "unknown flag: --platform\nSee 'docker image inspect --help'.",
+    // docker's CLI 28.1 of a daemon before API 1.49, cli's
+    // cmd/docker/docker.go: `areFlagsSupported`.
+    'Error: "--platform" requires API version 1.49, but the Docker daemon API version is 1.47',
+  ],
 };
 
 for (const [said, table] of [
