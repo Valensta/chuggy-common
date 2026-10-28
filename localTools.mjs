@@ -28,10 +28,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { URL } from "node:url";
 
-import {
-  chuggyToolServerName,
-  chuggyToolTimeoutMs,
-} from "@chuggy/worker-contract/sessionTools";
+import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
 
 import { chuggyRequest } from "./chuggyApi.mjs";
 import {
@@ -39,6 +36,7 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyToolSignal,
 } from "./chuggyTools.mjs";
 import { localSignIn } from "./localSignIn.mjs";
 import { localTokenStore } from "./localTokenStore.mjs";
@@ -55,17 +53,20 @@ export const localToolCapabilities = [
 /** What a submitted command made again answers here, where every call is a turn of its own. */
 export const localToolRepeatDescription = `The same call again is a new operation, submitted again: where the first already landed, the API refuses the second for what it names, so read_operation the first's id to learn what it did before calling again.`;
 
-/** What the server tells an agent before it lists the tools. */
-export const localToolInstructions = `The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
+/** What the server tells an agent before it lists the tools, `task` naming the workspace and project it is bound to. */
+export function localToolInstructions(task) {
+  return `This server is bound to the workspace ${task.tenant} and its project ${task.project}.
+The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket:
 1. list_repositories: a repository that is configured and \`fileable\`.
-2. list_configurations: the newest revision for that repository.
+2. list_configurations: the newest revision for that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
 3. initialize_draft on that revision: the fence and the defaults.
 4. create_draft: the minimum brief, and \`authoring\` from the defaults.
 5. read_draft: the draft as filed.
 6. release_draft.
 7. read_operation: every command is submitted, and this is how its outcome is read.
 Releasing starts nothing: the ticket waits Pending until the project's lead dispatches it, once its dependencies are Done, or a person who may dispatch does.`;
+}
 
 const localToolUnauthorizedStatus = 401;
 const localToolAttemptsMax = 2;
@@ -73,7 +74,7 @@ const localToolAttemptsMax = 2;
 /** A request under the person's current token, made again once on a 401. */
 export function localToolRequest(signIn, request = chuggyRequest) {
   return async (task, _bearer, path, init = {}) => {
-    const signal = globalThis.AbortSignal.timeout(chuggyToolTimeoutMs);
+    const signal = chuggyToolSignal();
     for (let attempt = 1; ; attempt += 1) {
       const token = await signIn.token();
       const response = await request(task, token, path, { ...init, signal });
@@ -117,7 +118,7 @@ export function localToolContext({
 export function localToolServer(context, sdk) {
   const server = new sdk.McpServer(
     { name: chuggyToolServerName, version: context.version },
-    { instructions: localToolInstructions },
+    { instructions: localToolInstructions(context.task) },
   );
   for (const definition of chuggyToolDefinitions(context))
     server.registerTool(

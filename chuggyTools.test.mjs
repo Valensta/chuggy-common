@@ -5,6 +5,7 @@ import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 import { URL } from "node:url";
 
 import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
@@ -48,6 +49,7 @@ import {
   chuggyToolHandler,
   chuggyToolImageFiles,
   chuggyToolServer,
+  chuggyToolSignal,
   chuggyTranscriptBodyBytesMax,
   sessionAllowedTools,
   sessionBuiltInTools,
@@ -1339,7 +1341,7 @@ const draftInitialized = {
   commandedCheckStageNote: "stage 1",
 };
 
-test("a draft's initialization is answered without its configuration's canonical document, and otherwise as answered", async () => {
+test("a draft's initialization is answered without its configuration's canonical document or its dependency candidates, and otherwise as answered", async () => {
   const { call } = toolsOf({}, () => ({
     status: 200,
     body: JSON.stringify(draftInitialized),
@@ -1352,11 +1354,83 @@ test("a draft's initialization is answered without its configuration's canonical
   assert.equal(status, "HTTP 200");
   const { canonical, ...identified } = draftInitialized.configuration;
   assert.ok(canonical.length > 0);
-  assert.deepEqual(JSON.parse(body), {
-    ...draftInitialized,
-    configuration: identified,
-  });
+  const expected = { ...draftInitialized, configuration: identified };
+  delete expected.dependencyCandidates;
+  delete expected.dependencyCandidatesTruncated;
+  assert.deepEqual(JSON.parse(body), expected);
   assert.ok(!body.includes("canonical"), "the canonical document was answered");
+  assert.ok(
+    !body.includes("dependencyCandidates"),
+    "the dependency candidates were answered",
+  );
+});
+
+/** A request that hangs until its signal aborts, then rejects with that signal's reason, as fetch does. */
+async function requestHung(_task, _bearer, _path, init) {
+  await new Promise((resolve) => {
+    init.signal.addEventListener("abort", resolve, { once: true });
+  });
+  throw init.signal.reason;
+}
+
+test("a call its tool signal aborts names the tool and the timeout, and says which tools may be called again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { call } = toolsOf({
+    request: (task, bearer, path, init) =>
+      requestHung(task, bearer, path, { ...init, signal: chuggyToolSignal() }),
+  });
+
+  for (const [name, args] of [
+    ["list_repositories", {}],
+    [
+      "release_draft",
+      { ticket: 4, authoringVersion: 2, configurationRevision: "r1" },
+    ],
+  ]) {
+    const answered = call(name, args);
+    await new Promise(setImmediate);
+    t.mock.timers.tick(chuggyToolTimeoutMs);
+    const answer = await answered;
+
+    assert.equal(answer.isError, true, name);
+    assert.equal(
+      textOf(answer),
+      `${name} ended at its ${String(chuggyToolTimeoutMs / 1_000)}-second timeout: a read tool (every list_* and read_*) may simply be called again, while a write tool's outcome is learned through read_operation where it answered an operation id.`,
+    );
+  }
+});
+
+test("a timeout that is not the tool signal's answers the raise itself", async () => {
+  const { call } = toolsOf({
+    request: async () => {
+      throw new globalThis.DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+    },
+  });
+
+  const answer = await call("release_draft", {
+    ticket: 4,
+    authoringVersion: 2,
+    configurationRevision: "r1",
+  });
+
+  assert.equal(answer.isError, true);
+  assert.equal(textOf(answer), "The operation was aborted due to timeout");
+});
+
+test("a call that raises anything but its timeout answers the raise itself", async () => {
+  const { call } = toolsOf({
+    request: async () => {
+      throw new Error("connect ECONNREFUSED");
+    },
+  });
+
+  const answer = await call("list_repositories", {});
+
+  assert.equal(answer.isError, true);
+  assert.equal(textOf(answer), "connect ECONNREFUSED");
 });
 
 test("a refused read of either reshaped tool is relayed as the refusal it is", async () => {
@@ -1885,6 +1959,7 @@ test("a new draft's expected project sequence says it is the project head, and w
       /every command anywhere in the project moves/,
       /\(DraftInitializationStale\) with the head it is at now as `currentProjectSequence`/,
       /the same write may be sent again with/,
+      /Where nothing else has moved it since, the `decidedSequence` of your last Succeeded operation is the head to pass next/,
       /\(ProjectNotActive\), naming its `lifecycle`/,
     ])
       assert.match(described, said, name);
@@ -2401,6 +2476,29 @@ test("the descriptions say what the server does where a session reads it", () =>
     for (const claim of claims) assert.match(described(tool), claim, tool);
 });
 
+/** What a second ticket is filed without asking again, and a failed import read beside the configurations still held. */
+test("the descriptions say where the head after a command, a program's keys, dependencies and a repository's configurations are read", () => {
+  const described = (tool) =>
+    chuggyProjectTools.find(({ name }) => name === tool).description;
+  const said = {
+    read_operation: [
+      /A Succeeded operation carries `decidedSequence`, the project's journal head the command moved it to\./,
+    ],
+    initialize_draft: [
+      /^The defaults and the fence a new draft is filed against/,
+      /each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan/,
+      /Dependencies are chosen from list_tickets\./,
+    ],
+    list_repositories: [
+      /`configurationsHeld` what it holds now/,
+      /`lastImport` is the newest import attempt, and it can fail while earlier imported revisions stay usable/,
+    ],
+  };
+
+  for (const [tool, claims] of Object.entries(said))
+    for (const claim of claims) assert.match(described(tool), claim, tool);
+});
+
 test("fetch_image says on its parameter which identity it takes", () => {
   assert.match(
     parameterDescribed("fetch_image", "artifact"),
@@ -2464,7 +2562,7 @@ test("the draft writes open their brief with the minimum brief and say what auth
     );
     assert.match(
       shape.authoring.description ?? "",
-      /^`authoring` is \{program, dependencies\}: pass initialize_draft's `defaults` unchanged unless you mean otherwise, and `dependencies` are ticket numbers from its `dependencyCandidates`\.$/,
+      /^`authoring` is \{program, dependencies\}: pass initialize_draft's `defaults` unchanged unless you mean otherwise, and `dependencies` are ticket numbers chosen from list_tickets\.$/,
       name,
     );
   }
@@ -2477,6 +2575,10 @@ test("release_draft says releasing starts no work, and who starts it", () => {
   assert.match(
     description,
     /Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does\./,
+  );
+  assert.match(
+    description,
+    /A Pending ticket with no open dependencies waits on the lead's dispatch decision or on a dispatch by someone who may, and read_lead answers whether a lead is active and, where none, why\./,
   );
 });
 

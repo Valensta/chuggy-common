@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 
-import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
+import {
+  chuggyToolServerName,
+  chuggyToolTimeoutMs,
+} from "@chuggy/worker-contract/sessionTools";
 import { z } from "zod";
 
 import {
@@ -130,13 +133,35 @@ test("the server tells the agent the docs are behind read_docs, index first", ()
   });
   const { registered, sdk } = sdkOf();
   const server = localToolServer(context, sdk);
-  assert.deepEqual(server.options, { instructions: localToolInstructions });
-  assert.match(localToolInstructions, /read_docs/u);
-  assert.match(localToolInstructions, /index first/u);
+  assert.deepEqual(server.options, {
+    instructions: localToolInstructions(context.task),
+  });
+  assert.match(server.options.instructions, /read_docs/u);
+  assert.match(server.options.instructions, /index first/u);
   assert.ok(registered.some(({ name }) => name === "read_docs"));
 });
 
+test("the server's instructions open with the workspace and project it is bound to", () => {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  const { sdk } = sdkOf();
+  const { instructions } = localToolServer(context, sdk).options;
+  assert.match(
+    instructions,
+    /^This server is bound to the workspace vteng and its project chuggy\b/u,
+  );
+});
+
 test("the server's instructions name the filing recipe's tools in order, then who starts the work", () => {
+  const instructions = localToolInstructions({
+    tenant: "vteng",
+    project: "chuggy",
+  });
   const recipe = [
     "list_repositories",
     "list_configurations",
@@ -146,20 +171,21 @@ test("the server's instructions name the filing recipe's tools in order, then wh
     "release_draft",
     "read_operation",
   ];
-  const steps = [...localToolInstructions.matchAll(/^(\d+)\. (\w+)/gmu)];
+  const steps = [...instructions.matchAll(/^(\d+)\. (\w+)/gmu)];
   assert.deepEqual(
     steps.map(([, number, tool]) => [Number(number), tool]),
     recipe.map((tool, index) => [index + 1, tool]),
   );
   const tools = new Set(chuggyProjectTools.map(({ name }) => name));
   for (const tool of recipe) assert.ok(tools.has(tool), tool);
+  assert.match(instructions, /^1\. list_repositories: [^\n]*`fileable`/mu);
   assert.match(
-    localToolInstructions,
-    /^1\. list_repositories: [^\n]*`fileable`/mu,
+    instructions,
+    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
   );
   assert.match(
-    localToolInstructions,
-    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
+    instructions,
+    /^2\. list_configurations: the newest revision for that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
   );
 });
 
@@ -184,6 +210,72 @@ test("a registered tool reaches its project's route under the person's token", a
     api.calls[0].path,
     /\/tenants\/vteng\/projects\/chuggy\/tickets\/7$/,
   );
+});
+
+/** `release_draft` as a person's agent is given it, under `signIn` and `request`. */
+function releaseDraftOf(signIn, request) {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn,
+    request,
+  });
+  const { registered, sdk } = sdkOf();
+  localToolServer(context, sdk);
+  const { handler } = registered.find(({ name }) => name === "release_draft");
+  return () =>
+    handler({ ticket: 4, authoringVersion: 2, configurationRevision: "r1" });
+}
+
+test("a call cut off at the tool timeout answers the retry sentence", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const release = releaseDraftOf(
+    signInOf(["token"]),
+    async (_task, _bearer, _path, init) => {
+      await new Promise((resolve) => {
+        init.signal.addEventListener("abort", resolve, { once: true });
+      });
+      throw init.signal.reason;
+    },
+  );
+
+  const answered = release();
+  await new Promise(setImmediate);
+  t.mock.timers.tick(chuggyToolTimeoutMs);
+  const answer = await answered;
+
+  assert.equal(answer.isError, true);
+  assert.match(
+    answer.content[0].text,
+    /^release_draft ended at its \d+-second timeout: /u,
+  );
+});
+
+test("a sign-in that times out is answered as itself, not as the tool timeout", async () => {
+  const api = apiOf([200]);
+  const release = releaseDraftOf(
+    {
+      token: async () => {
+        throw new globalThis.DOMException(
+          "The operation was aborted due to timeout",
+          "TimeoutError",
+        );
+      },
+      invalidate: () => undefined,
+    },
+    api.request,
+  );
+
+  const answer = await release();
+
+  assert.equal(answer.isError, true);
+  assert.equal(
+    answer.content[0].text,
+    "The operation was aborted due to timeout",
+  );
+  assert.equal(api.calls.length, 0);
 });
 
 test("a submitted command is described as a new operation each call, and every other description is the pod's", () => {
