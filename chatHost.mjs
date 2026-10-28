@@ -16,10 +16,12 @@
  *
  * UNTIL A SUPERVISOR IS READY THE HOST HAS NO ROOM, and its polls name none
  * and ask for an answer at once, a short wait apart: a plane takes a host
- * with no room and nothing held as one that is not live. Its room is then
- * the least of its own ceiling and the supervisor's. A supervisor that could
- * not be started, or ended of itself, is started again no sooner than a
- * backoff after.
+ * with no room and nothing held as one that is not live. A start never holds
+ * them up: an image is pulled and a supervisor readied beside them, and none
+ * is started before the sessions of the one before are named. Its room is
+ * then the least of its own ceiling and the supervisor's. A supervisor that
+ * could not be started, or ended of itself, is started again no sooner than
+ * a backoff after.
  *
  * THE SUPERVISOR'S CONTAINER IS ROOT WITH THE FEW CAPABILITIES IT NEEDS to
  * make each session's user, directories and mirrors and to drop to that
@@ -35,7 +37,10 @@ import { z } from "zod";
 
 import { chatHostBackend } from "./chatHostBackend.mjs";
 import { chatMirrorsDirectory } from "./chatCheckout.mjs";
-import { chatSessionsDirectory } from "./chatSession.mjs";
+import {
+  chatSessionStopGraceMs,
+  chatSessionsDirectory,
+} from "./chatSession.mjs";
 import {
   chatSupervisorSettings,
   chatSupervisorVariables,
@@ -113,6 +118,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {string | undefined} used the image the supervisor runs, or the last one started ran
  * @property {ChatHostImageSetting | undefined} own the host's own image, which it runs in place of the plane's
  * @property {import("./chatHostBackend.mjs").ChatSupervisorPhase} supervisor
+ * @property {boolean} starting whether a supervisor is being started: its image pulled, or its Ready awaited
  */
 
 /** How long a session a host claims may sit idle, where its setting names nothing; the plane caps it. */
@@ -174,6 +180,9 @@ const chatHostReadyWaitMs = 5 * 60 * 1000;
 
 /** How long a supervisor whose input ended has to exit, above the grace each session it stops is given. */
 const chatHostExitWaitMs = 60 * 1000;
+
+/** How long a supervisor has to end a session it was told to stop: the session's grace, and the time to sweep its user after. */
+const chatHostStopWaitMs = chatSessionStopGraceMs + 20_000;
 
 /** The wait between polls of a host with no room, which ask for an answer at once. */
 export const chatHostUnreadyWaitMs = 5_000;
@@ -288,8 +297,16 @@ export function chatSupervisorContainer(image, places) {
 
 /** Whether the engine holds `image` now. */
 async function chatHostImageHere(state, image) {
-  const answer = await state.seams.engine.exec(imageInspectArgv(image));
+  const answer = await state.seams.engine.exec(imageInspectArgv(image), {
+    cut: state.cut.signal,
+  });
   return answer.code === 0;
+}
+
+/** Runs one engine call of a pull, cut short once the host ends. */
+function chatHostPullRun(state) {
+  return (argv, environment) =>
+    state.seams.engine.exec(argv, { environment, cut: state.cut.signal });
 }
 
 /**
@@ -312,7 +329,7 @@ async function chatHostNamedPulled(state, image) {
       image,
       undefined,
       { host, token: acquired.token },
-      (argv, environment) => seams.engine.exec(argv, { environment }),
+      chatHostPullRun(state),
     );
     if (answer.code === 0) return undefined;
     if (engineFailure(answer) !== "Unauthorized" || attempt > 0)
@@ -331,7 +348,7 @@ async function chatHostPullMade(state, image) {
     image,
     undefined,
     undefined,
-    (argv, environment) => state.seams.engine.exec(argv, { environment }),
+    chatHostPullRun(state),
   );
   if (answer.code !== 0)
     throw new Error(
@@ -360,14 +377,23 @@ function chatHostWanted(state) {
   return state.settings.image?.image ?? state.named;
 }
 
-/** A supervisor started in `image` and spoken to, or why it was not, the next start put off. */
+/**
+ * A supervisor started in `image` and spoken to, or why it was not, the next
+ * start put off; none is started once the host ends.
+ */
 async function chatHostStarted(state, image) {
   const { seams } = state;
   try {
     await chatHostPulled(state, image);
+    if (state.cut.signal.aborted) return;
     const handle = await seams.started(
       chatSupervisorContainer(image, state.settings.places),
     );
+    if (state.cut.signal.aborted) {
+      handle.input.end();
+      handle.kill();
+      return;
+    }
     const answer = await state.backend.attached(handle);
     if ("refused" in answer)
       throw new Error(`its supervisor was not ready: ${answer.refused}`);
@@ -383,10 +409,14 @@ async function chatHostStarted(state, image) {
 
 /**
  * The supervisor brought to the image wanted: one running another drained,
- * and one started where none runs, an image is wanted, and the backoff is
- * past. One that ended of itself puts the next start off by the backoff.
+ * and one started where none ran as the pass began, so the sessions of the
+ * one before are named first, none is starting, an image is wanted, and the
+ * backoff is past. One that ended of itself puts the next start off by the
+ * backoff. A start runs beside the passes, which go on polling while an
+ * image is pulled and a supervisor readies.
  */
-async function chatHostFollowed(state, draining) {
+function chatHostFollowed(state, draining, idle) {
+  if (state.starting !== undefined) return;
   const wanted = chatHostWanted(state);
   const phase = state.backend.phase();
   if (phase === "Ready" && wanted !== undefined && wanted !== state.used) {
@@ -404,15 +434,21 @@ async function chatHostFollowed(state, draining) {
   }
   if (
     (phase !== "Absent" && phase !== "Ended") ||
+    !idle ||
     wanted === undefined ||
     draining ||
+    state.cut.signal.aborted ||
     state.seams.nowMs() < state.startableMs
   )
     return;
-  await state.backend.closed();
   state.endSeen = false;
   state.drained = false;
-  await chatHostStarted(state, wanted);
+  state.starting = (async () => {
+    await state.backend.closed();
+    await chatHostStarted(state, wanted);
+  })().finally(() => {
+    state.starting = undefined;
+  });
 }
 
 /**
@@ -478,6 +514,8 @@ export function checkedChatHostSettings(settings) {
  * @property {number} startableMs
  * @property {boolean} endSeen
  * @property {boolean} drained
+ * @property {Promise<void> | undefined} starting a supervisor's start, while one runs
+ * @property {AbortController} cut aborted once the host ends, which cuts a pull short and starts nothing more
  *
  * @typedef {object} ChatHost
  * @property {() => Promise<Extract<WorkerPoolPass, {passed: "Denied" | "Updated"}>>} run passes until the plane denies the host or its runner has updated itself, its supervisor ended after
@@ -500,6 +538,7 @@ export function chatHost(credentials, settings, seams) {
       outputBytesMax: checked.outputBytesMax,
       readyWaitMs: chatHostReadyWaitMs,
       exitWaitMs: chatHostExitWaitMs,
+      stopWaitMs: chatHostStopWaitMs,
     },
     { log: seams.log, logFor: seams.logFor },
   );
@@ -528,6 +567,8 @@ export function chatHost(credentials, settings, seams) {
     startableMs: 0,
     endSeen: false,
     drained: false,
+    starting: undefined,
+    cut: new globalThis.AbortController(),
   };
   client.plane = chatHostPlane(state, client.plane);
   return {
@@ -537,6 +578,7 @@ export function chatHost(credentials, settings, seams) {
       used: state.used,
       own: checked.image,
       supervisor: backend.phase(),
+      starting: state.starting !== undefined,
     }),
   };
 }
@@ -544,26 +586,27 @@ export function chatHost(credentials, settings, seams) {
 /**
  * One pass, with the room the supervisor has now: none until it is ready,
  * and then the least of the host's ceiling and the supervisor's; and
- * whether the next is to wait, which one with no room does unless it starts
- * a supervisor.
+ * whether the next is to wait, which one with no room does. The sessions
+ * that ended are named and the plane polled before the supervisor is
+ * followed to the image the poll names, so neither waits on a start.
  *
  * @param {ChatHostState} state
  * @param {import("./poolLoop.mjs").WorkerPoolUpdating | undefined} updating
  */
 async function chatHostPass(state, updating) {
-  await chatHostFollowed(state, updating?.draining() ?? false);
+  const before = state.backend.phase();
   const ceiling = state.backend.ceiling();
   state.client.settings = {
     ...state.client.settings,
     sessionsMax: Math.min(state.settings.sessionsMax, ceiling),
   };
   const pass = await workerPoolClientPass(state.client, updating);
-  const phase = state.backend.phase();
-  const starting =
-    (phase === "Absent" || phase === "Ended") &&
-    chatHostWanted(state) !== undefined &&
-    state.seams.nowMs() >= state.startableMs;
-  return { pass, waiting: ceiling === 0 && !starting };
+  chatHostFollowed(
+    state,
+    updating?.draining() ?? false,
+    before === "Absent" || before === "Ended",
+  );
+  return { pass, waiting: ceiling === 0 };
 }
 
 /**
@@ -597,11 +640,22 @@ async function chatHostRun(state) {
       }
       if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
         seams.log(poolRunnerPassLine(pass));
-      if (waiting) await seams.sleep(chatHostUnreadyWaitMs);
+      if (waiting) await chatHostUnready(state);
       else if (pass.claim !== undefined)
         await seams.sleep(workerPoolClaimWaitMs);
     }
   } finally {
+    state.cut.abort();
+    await state.backend.closed();
+    await state.starting;
     await state.backend.closed();
   }
+}
+
+/** The wait of a host with no room, which a start that settles ends sooner. */
+async function chatHostUnready(state) {
+  const slept = state.seams.sleep(chatHostUnreadyWaitMs);
+  await (state.starting === undefined
+    ? slept
+    : Promise.race([slept, state.starting]));
 }

@@ -17,7 +17,11 @@
  * and the supervisor's own end are each named once by `ended`, as a session
  * that ended in the phase the supervisor says, or failed; one this host
  * stopped is never named. A session is held from its `Start` until it is
- * answered, stopped or not, since until then it runs.
+ * answered, stopped or not, since until then it runs; a supervisor that does
+ * not answer a stop within its bound is ended and killed. One whose process
+ * exited is ended once its output has been read to its end, within a bound,
+ * so the frames it wrote before it exited are acted on.
+
  *
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
  * INPUT: it carries the session's bearer. What the supervisor writes on its
@@ -60,7 +64,8 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @typedef {object} ChatHostBackendSettings
  * @property {number} outputBytesMax what a session may write of its output, which its envelope names
  * @property {number} readyWaitMs how long a supervisor started has to say it is ready
- * @property {number} exitWaitMs how long a supervisor whose input was ended has to exit before it is killed
+ * @property {number} exitWaitMs how long a supervisor whose input was ended has to exit before it is killed, and one that exited has for its output to end
+ * @property {number} stopWaitMs how long a supervisor has to end a session it was told to stop before it is killed
  *
  * @typedef {object} ChatHostBackendSeams
  * @property {(line: string) => void} log the host's own log
@@ -73,12 +78,13 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @property {(answer: {ready: ChatSupervisorReady} | {refused: string}) => void} answered settles what `attached` returned
  * @property {Promise<void>} done settles once it has ended
  * @property {() => void} finished
- * @property {ReturnType<typeof globalThis.setTimeout> | undefined} timer
+ * @property {ReturnType<typeof globalThis.setTimeout> | undefined} timer bounds its wait for `Ready`, and once it exited its wait for its output to end
  *
  * @typedef {object} ChatHostEntry
  * @property {WorkerPoolAttempt} attempt
  * @property {ChatHostSupervisor} supervisor
  * @property {boolean} stopping
+ * @property {ReturnType<typeof globalThis.setTimeout> | undefined} timer bounds its supervisor's answer to its stop
  *
  * @typedef {WorkerPoolBackend & {
  *   attached: (handle: ChatSupervisorHandle) => Promise<{ready: ChatSupervisorReady} | {refused: string}>,
@@ -153,6 +159,7 @@ function chatHostErrorsRouted(state, errors) {
 /** Names a session that ended, and not one this host stopped, once. */
 function chatHostEnded(state, entry, phase, why) {
   const { assignment } = entry.attempt;
+  globalThis.clearTimeout(entry.timer);
   state.entries.delete(assignment);
   state.seams.logFor(assignment)(why);
   if (entry.stopping) return;
@@ -309,6 +316,24 @@ function chatHostSupervisorOf(handle) {
 }
 
 /**
+ * The supervisor's process exited: it ends once what it wrote before it did
+ * has been read, which the end of its output says, or past the bound on that.
+ */
+function chatHostExited(state, supervisor) {
+  if (supervisor.phase === "Ended") return;
+  globalThis.clearTimeout(supervisor.timer);
+  supervisor.timer = globalThis.setTimeout(
+    () =>
+      chatHostSupervisorEnded(
+        state,
+        supervisor,
+        `it exited, and its output did not end within ${String(state.settings.exitWaitMs)} ms`,
+      ),
+    state.settings.exitWaitMs,
+  );
+}
+
+/**
  * Speaks to the supervisor `handle` runs, which is then the host's: what it
  * says is read from now on, and the answer is its `Ready`, or why it was
  * ended without one.
@@ -341,7 +366,8 @@ function chatHostAttached(state, handle) {
     chatHostSupervisorEnded(state, supervisor, "its output ended");
   });
   handle.output.once("error", ended("its output could not be read"));
-  handle.exited.then(ended("it exited"), ended("it exited"));
+  const exited = () => chatHostExited(state, supervisor);
+  handle.exited.then(exited, exited);
   chatHostErrorsRouted(state, handle.errors);
   supervisor.timer = globalThis.setTimeout(
     () =>
@@ -409,6 +435,7 @@ function chatHostPlaced(state, assignment, kind) {
     attempt: { assignment: assignment.assignment, callbackUrl, bearer },
     supervisor,
     stopping: false,
+    timer: undefined,
   });
   chatHostRecentKept(state, assignment.assignment);
   supervisor.handle.input.write(line);
@@ -418,7 +445,11 @@ function chatHostPlaced(state, assignment, kind) {
   return { placed: "Placed" };
 }
 
-/** A session stopped: its `Stop` written once, and it held until it is answered. */
+/**
+ * A session stopped: its `Stop` written once, and it held until it is
+ * answered, or until the bound on that, past which its supervisor is ended
+ * and killed and the session is held no longer.
+ */
 function chatHostStopped(state, assignment) {
   const entry = state.entries.get(assignment);
   if (entry !== undefined && !entry.stopping) {
@@ -427,6 +458,15 @@ function chatHostStopped(state, assignment) {
       entry.supervisor.handle.input.write(
         chatProtocolLine({ frame: "Stop", assignment }),
       );
+    entry.timer = globalThis.setTimeout(
+      () =>
+        chatHostUnfollowed(
+          state,
+          entry.supervisor,
+          `it did not end ${JSON.stringify(assignment)} within ${String(state.settings.stopWaitMs)} ms of its stop, and was killed`,
+        ),
+      state.settings.stopWaitMs,
+    );
     state.seams.logFor(assignment)("the session was stopped");
   }
   return { stopped: "Stopped" };

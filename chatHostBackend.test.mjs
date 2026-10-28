@@ -30,6 +30,7 @@ const settings = {
   outputBytesMax: 4_096,
   readyWaitMs: 5_000,
   exitWaitMs: 5_000,
+  stopWaitMs: 5_000,
 };
 
 /** A session the plane offers, under `bearer`. */
@@ -57,6 +58,12 @@ const ready = {
 async function settled() {
   for (let turn = 0; turn < 4; turn += 1)
     await new Promise((resolve) => globalThis.setImmediate(resolve));
+}
+
+/** Past a bound of a millisecond, and every callback it starts run. */
+async function elapsed() {
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 20));
+  await settled();
 }
 
 /**
@@ -304,9 +311,62 @@ test("a session stopped is stopped once, held until it is answered, and never na
   assert.deepEqual(await host.backend.ended(), []);
 });
 
+test("a supervisor that does not answer a stop in bound is ended and killed, and the session is held no longer", async () => {
+  const host = await readyHost({ ...settings, stopWaitMs: 1 });
+  for (const assignment of ["stopping", "running"])
+    await host.backend.place(sessionOf(assignment), "Session");
+  host.say(
+    { frame: "Started", assignment: "stopping" },
+    { frame: "Started", assignment: "running" },
+  );
+  await settled();
+  await host.backend.stop("stopping");
+  await elapsed();
+  assert.equal(host.handle.kills, 1);
+  assert.equal(host.backend.phase(), "Ended");
+  assert.deepEqual(await host.backend.held(), []);
+  assert.deepEqual(
+    (await host.backend.ended()).map(({ session, phase }) => [
+      session.assignment,
+      phase,
+    ]),
+    [["running", "Failed"]],
+  );
+  assert.ok(
+    host.logged.some(([, line]) =>
+      /did not end "stopping" within 1 ms of its stop/u.test(line),
+    ),
+  );
+});
+
+test("a supervisor that exited is ended once its output ends, so what it wrote before it exited is read", async () => {
+  const host = await readyHost();
+  await host.backend.place(sessionOf("a"), "Session");
+  host.say({ frame: "Started", assignment: "a" });
+  host.exit();
+  await settled();
+  assert.equal(host.backend.phase(), "Ready");
+  host.say(
+    { frame: "Ended", assignment: "a", phase: "Succeeded" },
+    { frame: "Drained" },
+  );
+  host.handle.output.end();
+  await settled();
+  assert.equal(host.backend.phase(), "Ended");
+  assert.deepEqual(
+    (await host.backend.ended()).map(({ session, phase }) => [
+      session.assignment,
+      phase,
+    ]),
+    [["a", "Succeeded"]],
+  );
+  await host.backend.closed();
+  assert.equal(host.handle.kills, 0);
+});
+
 for (const [end, how] of /** @type {const} */ ([
   ["output", (host) => host.handle.output.end()],
-  ["exit", (host) => host.exit()],
+  ["exit, its output not ending in bound", (host) => host.exit()],
   ["no frame", (host) => host.handle.output.write("not a frame\n")],
   [
     "an overlong line",
@@ -314,7 +374,7 @@ for (const [end, how] of /** @type {const} */ ([
   ],
 ]))
   test(`a supervisor's end by ${end} fails every session it was preparing or running, but one stopped, and it has no room after`, async () => {
-    const host = await readyHost({ ...settings });
+    const host = await readyHost({ ...settings, exitWaitMs: 1 });
     host.say({ ...ready, sessionsMax: 3 });
     for (const assignment of ["preparing", "running", "stopping"])
       await host.backend.place(sessionOf(assignment), "Session");
@@ -325,8 +385,9 @@ for (const [end, how] of /** @type {const} */ ([
     await settled();
     await host.backend.stop("stopping");
     how(host);
-    await settled();
+    await elapsed();
     assert.equal(host.backend.phase(), "Ended");
+
     assert.equal(host.backend.ceiling(), 0);
     assert.deepEqual(
       (await host.backend.ended()).map(({ session, phase }) => [

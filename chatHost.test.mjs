@@ -84,10 +84,11 @@ async function settled() {
 
 /**
  * A supervisor answering as the protocol says, of `sessionsMax`: each
- * session started at once, and, told to drain, each ended and itself gone;
- * `frames` is what the host wrote it.
+ * session started at once, and, told to drain, each ended and itself gone,
+ * or, `lingering`, once `finish` is called; `frames` is what the host wrote
+ * it.
  */
-function supervisorOf(sessionsMax = 3) {
+function supervisorOf(sessionsMax = 3, lingering = false) {
   const input = new PassThrough();
   const output = new PassThrough();
   const errors = new PassThrough();
@@ -102,6 +103,13 @@ function supervisorOf(sessionsMax = 3) {
     if (!output.writableEnded) output.end();
     exit();
   };
+  const finish = () => {
+    for (const assignment of running)
+      say({ frame: "Ended", assignment, phase: "Succeeded" });
+    running.clear();
+    say({ frame: "Drained" });
+    gone();
+  };
   let pending = "";
   input.on("data", (chunk) => {
     pending += String(chunk);
@@ -114,13 +122,7 @@ function supervisorOf(sessionsMax = 3) {
         say({ frame: "Started", assignment: frame.assignment });
       } else if (frame.frame === "Stop" && running.delete(frame.assignment))
         say({ frame: "Ended", assignment: frame.assignment, phase: "Failed" });
-      else if (frame.frame === "Drain") {
-        for (const assignment of running)
-          say({ frame: "Ended", assignment, phase: "Succeeded" });
-        running.clear();
-        say({ frame: "Drained" });
-        gone();
-      }
+      else if (frame.frame === "Drain" && !lingering) finish();
     }
   });
   input.on("finish", gone);
@@ -132,6 +134,7 @@ function supervisorOf(sessionsMax = 3) {
   });
   return {
     frames,
+    finish,
     crash: gone,
     handle: { input, output, errors, exited, kill: gone },
   };
@@ -145,11 +148,62 @@ function answered(status, body) {
   });
 }
 
+/** Settles once `signal` aborts, as an engine's call cut short ends. */
+function cutOf(signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) resolve(undefined);
+    signal?.addEventListener("abort", resolve, { once: true });
+  });
+}
+
+/** Every pending callback run, and a real moment past, so a start a fake engine makes has settled. */
+async function moment() {
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 1));
+  await settled();
+}
+
 /**
- * A chat host over fakes: `answers` is each poll's answer in turn, a poll
- * past them denied, and `present` the images the engine holds.
+ * An engine holding `present`, whose pulls answer `pulls` in turn, each
+ * once `gate` settles or the call is cut short.
  */
-async function hostOf(t, { answers, present = [], pulls = [], given = {} }) {
+function engineOf(seen, { present, pulls, gate }) {
+  return {
+    exec: async (argv, call) => {
+      seen.execs.push({ argv: [...argv], environment: call?.environment });
+      if (argv[0] === "image")
+        return {
+          code: present.includes(argv.at(-1)) ? 0 : 1,
+          stdout: "",
+          stderr: "no such image",
+        };
+      await Promise.race([gate, cutOf(call?.cut)]);
+      const answer = pulls.shift() ?? { code: 0, stdout: "", stderr: "" };
+      if (answer.code === 0) present.push(argv.at(-1));
+      return answer;
+    },
+    execTail: async () => assert.fail("no tail is read"),
+  };
+}
+
+/**
+ * A chat host over fakes:
+ `answers` is each poll's answer in turn, a poll
+ * past them denied, and `present` the images the engine holds. A pull waits
+ * on `gate`; a host's wait outlasts a start it is making unless `hasty`, so
+ * a start takes no time of the host's clock.
+ */
+async function hostOf(
+  t,
+  {
+    answers,
+    present = [],
+    pulls = [],
+    given = {},
+    gate,
+    hasty = false,
+    lingering = false,
+  },
+) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
   t.after(() => rm(runtimeDir, { recursive: true, force: true }));
   const seen = {
@@ -159,36 +213,26 @@ async function hostOf(t, { answers, present = [], pulls = [], given = {} }) {
     started: [],
     startedMs: [],
     sleeps: [],
+    events: [],
   };
   const logged = [];
   const supervisors = [];
   const invalidated = [];
   let clock = 0;
   let minted = 0;
-  const host = chatHost(
+  /** @type {ReturnType<typeof chatHost> | undefined} */
+  let host;
+  host = chatHost(
     credentials,
     { ...settings, ...given },
     {
-      engine: {
-        exec: async (argv, call) => {
-          seen.execs.push({ argv: [...argv], environment: call?.environment });
-          if (argv[0] === "image")
-            return {
-              code: present.includes(argv.at(-1)) ? 0 : 1,
-              stdout: "",
-              stderr: "no such image",
-            };
-          const answer = pulls.shift() ?? { code: 0, stdout: "", stderr: "" };
-          if (answer.code === 0) present.push(argv.at(-1));
-          return answer;
-        },
-        execTail: async () => assert.fail("no tail is read"),
-      },
+      engine: engineOf(seen, { present, pulls, gate }),
       site: { engine: "docker", runtimeDir, dockerHost: "unix:///docker.sock" },
       started: (container) => {
         seen.started.push(container);
         seen.startedMs.push(clock);
-        const supervisor = supervisorOf();
+        seen.events.push(`started ${container.image}`);
+        const supervisor = supervisorOf(3, lingering);
         supervisors.push(supervisor);
         return supervisor.handle;
       },
@@ -196,6 +240,7 @@ async function hostOf(t, { answers, present = [], pulls = [], given = {} }) {
       logFor: (assignment) => (line) => logged.push(`${assignment}: ${line}`),
       sleep: async (ms) => {
         seen.sleeps.push(ms);
+        while (!hasty && host?.status().starting) await moment();
         clock += ms;
       },
       nowMs: () => clock,
@@ -206,7 +251,10 @@ async function hostOf(t, { answers, present = [], pulls = [], given = {} }) {
         }),
         invalidate: (token) => invalidated.push(token),
       },
-      fetch: planeOf(seen, answers, supervisors),
+      fetch: planeOf(seen, answers, supervisors, {
+        nowMs: () => clock,
+        status: () => host?.status(),
+      }),
     },
   );
   return { host, seen, logged, supervisors, invalidated };
@@ -214,18 +262,21 @@ async function hostOf(t, { answers, present = [], pulls = [], given = {} }) {
 
 /**
  * A plane answering each poll with the next of `answers`, or what the next,
- * a function of the supervisors started, returns, and denying the host past
- * them; every settlement and session's end is taken.
+ * a function of the supervisors started and of the host's clock and status,
+ * settles to, and denying the host past them; every settlement and
+ * session's end is taken.
  */
-function planeOf(seen, answers, supervisors) {
+function planeOf(seen, answers, supervisors, host) {
   return async (input, init) => {
     await settled();
     const url = new URL(String(input));
     if (url.pathname.endsWith("/session/ended")) {
       seen.ended.push(JSON.parse(String(init.body)).phase);
+      seen.events.push("ended");
       return answered(204);
     }
     if (init.method === "POST") return answered(204);
+    seen.events.push("poll");
     seen.polls.push({
       wantedSessions: url.searchParams.get("wantedSessions"),
       held: url.searchParams.getAll("held"),
@@ -233,7 +284,9 @@ function planeOf(seen, answers, supervisors) {
       waitSecs: init.headers[workerRunnerPollWaitHeader],
     });
     let next = answers.shift();
-    if (typeof next === "function") next = next(supervisors);
+    if (typeof next === "function")
+      next = await next(supervisors, host.nowMs(), host.status);
+    await settled();
     return next === undefined
       ? answered(404, {})
       : answered(200, { assignments: [], sessions: [], stop: [], ...next });
@@ -255,7 +308,10 @@ test("a host polls with no room and for an answer at once until the plane names 
     { wantedSessions: "2", held: [], idleSecs: "600", waitSecs: undefined },
     { wantedSessions: "1", held: ["a"], idleSecs: "600", waitSecs: undefined },
   ]);
-  assert.deepEqual(run.seen.sleeps, [chatHostUnreadyWaitMs]);
+  assert.deepEqual(run.seen.sleeps, [
+    chatHostUnreadyWaitMs,
+    chatHostUnreadyWaitMs,
+  ]);
   assert.deepEqual(
     run.seen.started.map(({ image }) => image),
     [one],
@@ -270,6 +326,7 @@ test("a host polls with no room and for an answer at once until the plane names 
     used: one,
     own: undefined,
     supervisor: "Ended",
+    starting: false,
   });
   assert.ok(
     run.logged.every((line) => !line.includes(bearer)),
@@ -286,7 +343,7 @@ test("a supervisor's room is the least of its own and the host's", async (t) => 
   assert.equal(run.seen.polls[1].wantedSessions, "3");
 });
 
-test("an image the plane names anew drains the supervisor, whose sessions end of themselves, and one is started in it at once", async (t) => {
+test("an image the plane names anew drains the supervisor, whose sessions end of themselves, and one is started in it once they are named", async (t) => {
   const run = await hostOf(t, {
     answers: [
       { chatImage: one },
@@ -316,11 +373,79 @@ test("an image the plane names anew drains the supervisor, whose sessions end of
       ["2", undefined],
       ["1", undefined],
       ["0", "0"],
-      ["2", undefined],
+      ["0", "0"],
       ["2", undefined],
     ],
   );
   assert.deepEqual(run.host.status().used, two);
+});
+
+test("a drained supervisor's sessions are named as ended before a supervisor is started in the image named anew", async (t) => {
+  const run = await hostOf(t, {
+    answers: [
+      { chatImage: one },
+      { chatImage: one, sessions: [sessionOf("a")] },
+      { chatImage: two },
+      (supervisors) => {
+        supervisors[0].finish();
+        return { chatImage: two };
+      },
+      { chatImage: two },
+      { chatImage: two },
+    ],
+    lingering: true,
+  });
+  await run.host.run();
+  assert.deepEqual(run.seen.ended, ["Succeeded"]);
+  const { events } = run.seen;
+  assert.ok(
+    events.indexOf("ended") < events.indexOf(`started ${two}`),
+    events.join(", "),
+  );
+  assert.deepEqual(run.host.status().used, two);
+});
+
+test("a host goes on polling while its image is pulled, and a pull the host's end cuts short starts nothing", async (t) => {
+  let release = () => undefined;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const named = () => ({ chatImage: one });
+  const run = await hostOf(t, {
+    answers: [
+      named(),
+      named(),
+      named(),
+      () => {
+        release();
+        return named();
+      },
+      async (_supervisors, _nowMs, status) => {
+        while (status().starting) await moment();
+        return named();
+      },
+      named(),
+    ],
+    gate,
+    hasty: true,
+  });
+  await run.host.run();
+  const { events } = run.seen;
+  assert.deepEqual(events.slice(0, 4), ["poll", "poll", "poll", "poll"]);
+  assert.deepEqual(
+    events.filter((event) => event.startsWith("started")),
+    [`started ${one}`],
+  );
+  assert.equal(run.seen.polls.at(-1).wantedSessions, "2");
+  const cut = await hostOf(t, {
+    answers: [named(), named(), named()],
+    gate: new Promise(() => undefined),
+    hasty: true,
+  });
+  await cut.host.run();
+  assert.equal(cut.seen.started.length, 0);
+  assert.equal(cut.seen.polls.length, 4);
+  assert.equal(cut.host.status().starting, false);
 });
 
 test("an image of the pool's registry is pulled under the pool's token, once more under a fresh one where it was refused, and one already here is not pulled", async (t) => {
@@ -358,12 +483,14 @@ test("an image of the pool's registry is pulled under the pool's token, once mor
 test("a supervisor that could not be pulled for, or ended of itself, is started again only a backoff after", async (t) => {
   const named = () => ({ chatImage: one });
   const waits = chatHostRestartBackoffMs / chatHostUnreadyWaitMs;
+  let crashedMs = 0;
   const run = await hostOf(t, {
     answers: [
       named(),
       ...Array.from({ length: waits + 1 }, named),
-      (supervisors) => {
+      (supervisors, nowMs) => {
         supervisors[0].crash();
+        crashedMs = nowMs;
         return named();
       },
       ...Array.from({ length: waits + 1 }, named),
@@ -377,10 +504,21 @@ test("a supervisor that could not be pulled for, or ended of itself, is started 
     ),
     run.logged.join("\n"),
   );
-  assert.deepEqual(run.seen.startedMs, [
-    chatHostRestartBackoffMs,
-    2 * chatHostRestartBackoffMs,
-  ]);
+  const [first, second] = run.seen.startedMs;
+  assert.equal(run.seen.startedMs.length, 2);
+  for (const [startedMs, fromMs] of [
+    [first, 0],
+    [second, crashedMs],
+  ]) {
+    assert.ok(
+      startedMs >= fromMs + chatHostRestartBackoffMs,
+      String(startedMs),
+    );
+    assert.ok(
+      startedMs <= fromMs + chatHostRestartBackoffMs + chatHostUnreadyWaitMs,
+      String(startedMs),
+    );
+  }
 });
 
 test("a host's own image is run whatever the plane names, and pulled as its setting says", async (t) => {
@@ -394,7 +532,8 @@ test("a host's own image is run whatever the plane names, and pulled as its sett
     run.seen.started.map(({ image }) => image),
     [own],
   );
-  assert.equal(run.seen.polls[0].wantedSessions, "2");
+  assert.equal(run.seen.polls[1].wantedSessions, "2");
+
   assert.deepEqual(
     run.seen.execs.map(({ argv, environment }) => [
       argv.join(" "),
@@ -410,7 +549,9 @@ test("a host's own image is run whatever the plane names, and pulled as its sett
     used: own,
     own: { image: own, pull: "missing" },
     supervisor: "Ended",
+    starting: false,
   });
+
   const never = await hostOf(t, {
     answers: [{}, {}],
     given: { image: { image: own, pull: "never" } },
