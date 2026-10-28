@@ -2,8 +2,9 @@
  * The running service's door for the CLI on the same machine: a Unix socket
  * in the runner's runtime directory, which only its owner can enter, with one
  * JSON line asked and one answered. What only the service knows is what it is
- * still placing, and a stop asked here is the stop the plane asks for, so a
- * placement still pulling is cancelled rather than started afterwards.
+ * still placing, or a chat host's status, and a stop asked here is the stop
+ * the plane asks for, so a placement still pulling is cancelled rather than
+ * started afterwards.
  */
 
 import { rm } from "node:fs/promises";
@@ -19,6 +20,7 @@ import { z } from "zod";
  * @typedef {object} ControlBackend what of a runner's backend the door reaches
  * @property {() => readonly unknown[]} inFlight what it is still placing
  * @property {(assignment: string) => Promise<unknown>} stop
+ * @property {() => unknown} [chatStatus] a chat host's status, which a runner's backend has none of
  */
 
 /** Far above the longest request, a stop naming the longest assignment. */
@@ -26,6 +28,7 @@ const controlLineCharsMax = 4096;
 
 const controlRequestSchema = z.discriminatedUnion("op", [
   z.strictObject({ op: z.literal("status") }),
+  z.strictObject({ op: z.literal("chatStatus") }),
   z.strictObject({
     op: z.literal("stop"),
     assignment: workerPoolAssignmentIdentitySchema,
@@ -49,6 +52,10 @@ async function controlAnswer(backend, line) {
     return { refused: "not a request this service answers" };
   }
   if (request.op === "status") return { inFlight: backend.inFlight() };
+  if (request.op === "chatStatus")
+    return backend.chatStatus === undefined
+      ? { refused: "this service is no chat host's" }
+      : { chatStatus: backend.chatStatus() };
   return backend.stop(request.assignment);
 }
 

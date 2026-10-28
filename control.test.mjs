@@ -31,6 +31,13 @@ test("the service answers what it is placing", async (t) => {
   });
 });
 
+test("a runner's service, which is no chat host, refuses a chat host's status", async (t) => {
+  const { path } = await served(t);
+  assert.deepEqual(await controlAsked(path, { op: "chatStatus" }), {
+    refused: "this service is no chat host's",
+  });
+});
+
 test("a stop asked of the service is its backend's stop", async (t) => {
   const { path, stopped } = await served(t);
   assert.deepEqual(
