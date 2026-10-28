@@ -58,6 +58,13 @@ import {
   claudeEnvironment,
   prepareClaudeShell,
 } from "./claude.mjs";
+import {
+  chatChannelLine,
+  chatChannelVariable,
+  chatCheckoutCarried,
+  chatCheckoutVariable,
+  chatMintedVariable,
+} from "./chatChannel.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
   decidingFor,
@@ -223,6 +230,12 @@ test("exactly one task document is what a pod may be launched with", () => {
     () => workerMode({ [workerTaskVariable]: "", [sessionTaskVariable]: "" }),
     /needs one of/u,
   );
+  assert.equal(workerMode({ [chatChannelVariable]: "3" }), "Chat");
+  for (const beside of [workerTaskVariable, sessionTaskVariable])
+    assert.throws(
+      () => workerMode({ [chatChannelVariable]: "3", [beside]: "{}" }),
+      /alone/u,
+    );
 });
 
 /** The directory this suite and the core it holds to are in. */
@@ -526,12 +539,12 @@ const poolHeldSessionWire = {
 };
 
 /**
- * Catches an envelope's pod that refuses a pool-held session's task, runs it
- * as work, or runs it anywhere but on the envelope's plane under its bearer
- * with the credential the pool mounted. The credential is missing, so the
- * session stops at its token, before any runtime is opened.
+ * A pool-held session `launch` started against a plane answering its task and
+ * facts, in a directory of its own: one that asked that plane for both under
+ * the envelope's bearer and stopped at the credential file it names, which is
+ * missing, before any runtime opened.
  */
-test("a pod launched with an envelope whose task is a pool-held session runs that session", async () => {
+async function poolHeldSessionLaunched(prefix, launch) {
   const plane = await servedPlane(
     (route) =>
       route === "task"
@@ -539,17 +552,9 @@ test("a pod launched with an envelope whose task is a pool-held session runs tha
         : { status: 200, body: facts },
     poolHeldSessionWire,
   );
-  const root = await mkdtemp(join(tmpdir(), "chuggy-pool-session-"));
-  const providerCredentialFile = join(root, "claude-code");
+  const root = await mkdtemp(join(tmpdir(), prefix));
   try {
-    const ran = await launched({
-      [workerTaskVariable]: JSON.stringify({
-        ...envelope,
-        callbackUrl: plane.url,
-        workspace: root,
-        providerCredentialFile,
-      }),
-    });
+    const { ran, providerCredentialFile } = await launch(plane.url, root);
 
     assert.equal(ran.code, 1);
     assert.ok(ran.stderr.includes(providerCredentialFile), ran.stderr);
@@ -565,6 +570,92 @@ test("a pod launched with an envelope whose task is a pool-held session runs tha
     await plane.close();
     await rm(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * Catches an envelope's pod that refuses a pool-held session's task, runs it
+ * as work, or runs it anywhere but on the envelope's plane under its bearer
+ * with the credential the pool mounted. The credential is missing, so the
+ * session stops at its token, before any runtime is opened.
+ */
+test("a pod launched with an envelope whose task is a pool-held session runs that session", async () => {
+  await poolHeldSessionLaunched("chuggy-pool-session-", async (url, root) => {
+    const providerCredentialFile = join(root, "claude-code");
+    const ran = await launched({
+      [workerTaskVariable]: JSON.stringify({
+        ...envelope,
+        callbackUrl: url,
+        workspace: root,
+        providerCredentialFile,
+      }),
+    });
+    return { ran, providerCredentialFile };
+  });
+});
+
+/**
+ * One core launched as a chat supervisor launches a session: `written` on the
+ * channel its environment names, which then ends.
+ */
+function launchedChat(environment, written) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(here, "entrypoint.mjs")], {
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        [chatChannelVariable]: "3",
+        ...environment,
+      },
+      stdio: ["ignore", "ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.stdio[3].on("error", () => undefined);
+    child.stdio[3].end(written);
+    child.on("close", (code) => {
+      resolve({ code, stderr });
+    });
+  });
+}
+
+/**
+ * Catches a supervisor's session that reads its envelope anywhere but its
+ * channel, or runs it anywhere but in the workspace, minted directory and
+ * credential it was given. The credential is missing, so the session stops at
+ * its token, before any runtime is opened.
+ */
+test("a chat supervisor's session reads its envelope off its channel and runs it as a pool's", async () => {
+  await poolHeldSessionLaunched("chuggy-chat-session-", async (url, root) => {
+    const providerCredentialFile = join(root, "minted", "claude-code");
+    const session = Object.fromEntries(
+      Object.entries(envelope).filter(([name]) => name !== "workspace"),
+    );
+    const ran = await launchedChat(
+      {
+        [workerWorkspaceVariable]: root,
+        [chatMintedVariable]: join(root, "minted"),
+        [chatCheckoutVariable]: chatCheckoutCarried(undefined),
+      },
+      chatChannelLine({ ...session, callbackUrl: url, providerCredentialFile }),
+    );
+    return { ran, providerCredentialFile };
+  });
+});
+
+test("a chat supervisor's session whose channel carries no envelope asks nothing of any plane", async () => {
+  const ran = await launchedChat(
+    {
+      [workerWorkspaceVariable]: "/sessions/session-1",
+      [chatMintedVariable]: "/minted/session-1",
+      [chatCheckoutVariable]: chatCheckoutCarried(undefined),
+    },
+    "",
+  );
+
+  assert.equal(ran.code, 1);
+  assert.match(ran.stderr, /^the supervisor wrote no envelope$/mu);
 });
 
 /**

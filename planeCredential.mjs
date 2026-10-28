@@ -172,13 +172,18 @@ export async function planeCredentialAnswered({
  * where the plane says which way its app does not reach the repository; or
  * nothing where it mints none and the pod falls back to what its launcher
  * mounted. The caller presents it with `workerCredentialEnvironment` for the
- * URL it reaches, which is the host the askpass answers. `write` is the seam a
- * suite reads the password back from.
+ * URL it reaches, which is the host the askpass answers. `directory` is where
+ * the file is written, the contract's minted directory where it names none;
+ * `write` is the seam a suite reads the password back from.
  */
-export async function planeCredential({ write = writeFile, ...asked }) {
+export async function planeCredential({
+  write = writeFile,
+  directory = mintedCredentialDirectory,
+  ...asked
+}) {
   const minted = await planeCredentialAnswered(asked);
   if (minted === undefined || minted.unreached !== undefined) return minted;
-  const file = join(mintedCredentialDirectory, planeCredentialFileName);
+  const file = join(directory, planeCredentialFileName);
   await write(file, minted.password, { mode: planeCredentialFileMode });
   return { file, username: minted.username, password: minted.password };
 }

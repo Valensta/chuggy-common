@@ -56,6 +56,7 @@ import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createInterface } from "node:readline";
+import { Socket } from "node:net";
 
 import {
   mintedCredentialDirectory,
@@ -85,6 +86,13 @@ import {
 } from "@chuggy/worker-contract/workerTask";
 
 import { workerAgent } from "./agent.mjs";
+import {
+  chatChannelOpened,
+  chatChannelVariable,
+  chatCheckoutRead,
+  chatCheckoutVariable,
+  chatMintedVariable,
+} from "./chatChannel.mjs";
 import {
   runChecks,
   workerAgentEnvironment,
@@ -1267,7 +1275,9 @@ async function reportWorkerFailureBeforeRun(
 /**
  * Which mode the pod was launched in. Exactly one task document must be set:
  * neither leaves the pod with nothing to do, and both would let a launcher's
- * environment decide which of two authorities the pod acts under.
+ * environment decide which of two authorities the pod acts under. A chat
+ * supervisor's session names its channel in place of either, and never beside
+ * one.
  */
 export function workerMode(environment) {
   const named = (name) => {
@@ -1276,6 +1286,13 @@ export function workerMode(environment) {
   };
   const work = named(workerTaskVariable);
   const session = named(sessionTaskVariable);
+  if (named(chatChannelVariable)) {
+    if (work || session)
+      throw new Error(
+        `a chat supervisor's session is launched with ${chatChannelVariable} alone, never beside ${workerTaskVariable} or ${sessionTaskVariable}`,
+      );
+    return "Chat";
+  }
   if (work && session)
     throw new Error(
       `a pod is launched with ${workerTaskVariable} or ${sessionTaskVariable}, never both`,
@@ -1345,8 +1362,49 @@ async function main() {
   );
 }
 
+/**
+ * A session a chat supervisor runs as a user of its own: its envelope read
+ * off the channel the supervisor names, its task fetched as a pool's session
+ * fetches one, and the session run as a pool's runs, in the workspace, the
+ * minted directory and the checkout the supervisor made for it. The channel's
+ * end stops it.
+ */
+async function chatSessionMain(environment = process.env) {
+  const channel = chatChannelOpened(
+    new Socket({
+      fd: Number(environment[chatChannelVariable]),
+      readable: true,
+      writable: false,
+    }),
+  );
+  try {
+    const envelope = {
+      ...(await channel.envelope),
+      workspace: required(workerWorkspaceVariable),
+    };
+    const checkout = chatCheckoutRead(required(chatCheckoutVariable));
+    const fetched = await envelopeTask(envelope);
+    if (fetched.mode !== "Session")
+      throw new Error(
+        "the worker plane answered a chat session's bearer with a work task",
+      );
+    const { sessionEnvelopeServices, sessionMain } =
+      await import("./session.mjs");
+    process.exitCode = await sessionMain({
+      ...sessionEnvelopeServices(envelope, fetched.answer, environment),
+      minted: required(chatMintedVariable),
+      checkout: async () => checkout,
+      stopped: channel.stopped,
+    });
+  } finally {
+    channel.close();
+  }
+}
+
 async function run() {
-  if (workerMode(process.env) === "Work") return main();
+  const mode = workerMode(process.env);
+  if (mode === "Work") return main();
+  if (mode === "Chat") return chatSessionMain();
   const { sessionMain } = await import("./session.mjs");
   process.exitCode = await sessionMain();
 }

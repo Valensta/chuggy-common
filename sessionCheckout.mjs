@@ -80,7 +80,8 @@ const sessionCheckoutBufferBytesMax = 16 * 1024 * 1024;
  */
 export const sessionCheckoutTimeoutMs = 300_000;
 
-async function git(args, options) {
+/** One git call, bounded in what it may print back. */
+export async function sessionCheckoutGit(args, options) {
   return executeFile("git", args, {
     maxBuffer: sessionCheckoutBufferBytesMax,
     ...options,
@@ -96,7 +97,7 @@ async function git(args, options) {
  * runs: `rm` takes no bound, and a removal that stalled would otherwise take
  * the message that says why the clone failed with it.
  */
-async function discard(directory, log) {
+async function sessionCheckoutDiscarded(directory, log) {
   try {
     await rm(directory, { recursive: true, force: true });
   } catch (failure) {
@@ -117,13 +118,26 @@ async function discard(directory, log) {
  * A MINTED CREDENTIAL NAMES NO CAPABILITY, so the grant check below is the
  * mounted arm's alone: the plane decided this session may read this repository
  * before it minted anything, and the attempt's credential roster is a statement
- * about what its launcher mounted.
+ * about what its launcher mounted. `environment` is what the askpass
+ * environment is made of.
  */
-function sessionRemote(task, repositories, credentialFiles, reference, minted) {
+export function sessionRemote(
+  task,
+  repositories,
+  credentialFiles,
+  reference,
+  minted,
+  environment = process.env,
+) {
   let resolved;
   try {
     if (minted === undefined)
-      resolved = workerRepository(repositories, credentialFiles, reference);
+      resolved = workerRepository(
+        repositories,
+        credentialFiles,
+        reference,
+        environment,
+      );
     else {
       const repository = workerRepositoryUrl(repositories, reference);
       resolved = {
@@ -132,6 +146,7 @@ function sessionRemote(task, repositories, credentialFiles, reference, minted) {
           minted.file,
           minted.username,
           repository,
+          environment,
         ),
       };
     }
@@ -172,7 +187,7 @@ export async function sessionCheckout(
   services = {},
 ) {
   const {
-    run = git,
+    run = sessionCheckoutGit,
     log = (text) => process.stderr.write(text),
     scrub = (text) => text,
     minted,
@@ -201,14 +216,30 @@ export async function sessionCheckout(
     log(`session checkout ${reference} at ${commit}\n`);
     return { directory, commit };
   } catch (failure) {
-    log(
-      scrub(
-        `session checkout ${reference} failed: ${
-          failure instanceof Error ? failure.message : String(failure)
-        }\n`,
-      ),
-    );
-    await discard(directory, log);
+    await sessionCheckoutFailed(reference, failure, directory, {
+      log,
+      scrub,
+    });
     return undefined;
   }
+}
+
+/**
+ * A clone of `reference` into `directory` that did not finish: why, scrubbed
+ * and logged, and whatever it left removed.
+ */
+export async function sessionCheckoutFailed(
+  reference,
+  failure,
+  directory,
+  { log, scrub },
+) {
+  log(
+    scrub(
+      `session checkout ${reference} failed: ${
+        failure instanceof Error ? failure.message : String(failure)
+      }\n`,
+    ),
+  );
+  await sessionCheckoutDiscarded(directory, log);
 }

@@ -78,6 +78,27 @@ test("an attempt asks for nothing and is answered a credential git reads from a 
   });
 });
 
+test("a credential is written under the directory the caller names, where it names one", async () => {
+  const plane = planeOf({ status: 200, ok: true, json: async () => minted });
+  const writer = writerOf();
+
+  const credential = await planeCredential({
+    task,
+    bearer: "capability",
+    path: sessionCredentialPath,
+    repository: "https://github.com/kasofsk/chuggy.git",
+    request: plane.request,
+    write: writer.write,
+    directory: "/minted/session-1",
+  });
+
+  assert.deepEqual(
+    writer.written.map(({ file }) => file),
+    ["/minted/session-1/chuggy-git-credential"],
+  );
+  assert.equal(credential.file, "/minted/session-1/chuggy-git-credential");
+});
+
 test("a not-found is an answer the transport hands back rather than retries", async () => {
   const plane = planeOf({
     status: 404,

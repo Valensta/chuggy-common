@@ -4,6 +4,7 @@ import { setTimeout as wait } from "node:timers/promises";
 
 import {
   sessionPlaneAnswers,
+  sessionPlaneRoutes,
   sessionTurnResultCharsMax,
 } from "@chuggy/worker-contract/sessionPlane";
 import { chuggyToolPrefix } from "@chuggy/worker-contract/sessionTools";
@@ -1661,4 +1662,66 @@ test("the checkout is handed the scrub built from this pod's own secrets", async
   const printed = handed(`git failed: token ${token} bearer ${bearer}`);
   assert.ok(!printed.includes(token), "a failed clone would print the token");
   assert.ok(!printed.includes(bearer), "a failed clone would print the bearer");
+});
+
+/** Catches a session's own credential written where every session's is, rather than under its own minted directory. */
+test("a bound session's minted credential is written under the directory it is launched with", async () => {
+  const plane = planeOf([], facts, () => undefined, mintedCredential);
+  const { query } = queryOf(() => []);
+  const written = [];
+
+  await run({
+    request: plane.request,
+    query,
+    environment: boundEnvironment,
+    minted: "/minted/session-3",
+    write: async (file) => written.push(file),
+    checkout: async () => undefined,
+  });
+
+  assert.deepEqual(written, ["/minted/session-3/chuggy-git-credential"]);
+});
+
+/** Catches a stop its launcher asked for cutting the turn being answered short, or claiming another. */
+test("a stop its launcher asks for lets the turn being answered settle and claims no other", async () => {
+  const second = { ...turnOne, turn: "turn-2", ordinal: 2 };
+  const plane = planeOf([turnOne, second], facts);
+  const stop = new globalThis.AbortController();
+  const { query } = queryOf(() => [
+    () => stop.abort(),
+    result("success", { result: "answered" }),
+  ]);
+
+  const code = await run({
+    request: plane.request,
+    query,
+    stopped: stop.signal,
+  });
+
+  assert.equal(code, 0);
+  const claims = plane.calls.filter(
+    ({ path }) => path === sessionPlaneRoutes.turn.path,
+  );
+  assert.equal(claims.length, 1);
+  assert.ok(
+    plane.calls.some(({ path }) => path === sessionPlaneRoutes.turnAnswer.path),
+    "the stopped turn was never answered",
+  );
+});
+
+test("a stop asked before the session opened its mailbox claims no turn", async () => {
+  const plane = planeOf([turnOne], facts);
+  const { query } = queryOf(() => [result("success", { result: "x" })]);
+
+  const code = await run({
+    request: plane.request,
+    query,
+    stopped: globalThis.AbortSignal.abort(),
+  });
+
+  assert.equal(code, 0);
+  assert.ok(
+    !plane.calls.some(({ path }) => path === sessionPlaneRoutes.turn.path),
+    "a stopped session claimed a turn",
+  );
 });

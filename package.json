@@ -26,6 +26,7 @@
   "files": [
     "agent.mjs",
     "boundedResponse.mjs",
+    "chatChannel.mjs",
     "check.sh",
     "checks.mjs",
     "chuggyApi.mjs",
