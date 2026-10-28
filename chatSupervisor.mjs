@@ -344,7 +344,7 @@ export async function chatSupervisorMain(environment = process.env) {
     task: (envelope) => envelopeTask(envelope),
     checkout: chatSupervisorCheckout(environment, mirrors, log),
   });
-  if (!(await sessions.holding())) await mirrors.pruned();
+  if (!(await sessions.holding())) await mirrors.pruned(log);
   const closed = new globalThis.AbortController();
   for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"])
     process.once(signal, () => closed.abort());

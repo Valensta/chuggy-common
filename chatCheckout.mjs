@@ -119,13 +119,24 @@ export async function chatMirrorsOpened({
       queues.set(path, Promise.allSettled([before, queued]));
       return queued.then(() => ({ path, group }));
     },
-    /** Every mirror with what no ref reaches dropped, for a supervisor holding no session's tree. */
-    pruned: async () => {
-      for (const path of groups.keys())
-        await run(["--git-dir", path, "gc", "--prune=now", "--quiet"], {
-          cwd: root,
-          timeout: sessionCheckoutTimeoutMs,
-        });
+    /**
+     * Every mirror with what no ref reaches dropped, for a supervisor holding
+     * no session's tree. One left half-made is passed over, since its next
+     * fetch makes it again, and one that cannot be pruned is said on `log`
+     * and left as it is.
+     */
+    pruned: async (log) => {
+      for (const path of groups.keys()) {
+        if (!(await chatMirrorMade(path))) continue;
+        try {
+          await run(["--git-dir", path, "gc", "--prune=now", "--quiet"], {
+            cwd: root,
+            timeout: sessionCheckoutTimeoutMs,
+          });
+        } catch {
+          log(`the mirror at ${path} could not be pruned\n`);
+        }
+      }
     },
   };
 }

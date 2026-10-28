@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -407,11 +408,50 @@ test("a prune drops from every mirror what no ref of its reaches", async () => {
     const path = join(root, "mirrors", mirror);
     await run("git", ["cat-file", "-e", dropped], { cwd: path });
 
-    await mirrors.pruned();
+    await mirrors.pruned(() => undefined);
 
     assert.ok(ran.some((args) => args.includes("gc")));
     await assert.rejects(
       run("git", ["cat-file", "-e", dropped], { cwd: path }),
     );
   });
+});
+
+/** Catches a mirror that cannot be pruned keeping a supervisor from starting, every time it restarts. */
+test("a prune passes over a half-made mirror, and one it cannot prune is logged and left", async () => {
+  const root = await mkdtemp(join(tmpdir(), "chuggy-chat-checkout-"));
+  try {
+    const { url } = await remoteOf(root);
+    const made = await chatMirrorsOpened({
+      root: join(root, "mirrors"),
+      owner: process.getuid(),
+      own: async () => undefined,
+    });
+    await chatCheckout(
+      task,
+      bearer,
+      join(root, "session-1"),
+      servicesOf(made, url),
+    );
+    await mkdir(join(root, "mirrors", `${"0".repeat(64)}.git`));
+    const ran = [];
+    const reopened = await chatMirrorsOpened({
+      root: join(root, "mirrors"),
+      owner: process.getuid(),
+      own: async () => undefined,
+      run: async (args) => {
+        ran.push(args);
+        throw new Error("No space left on device");
+      },
+    });
+    const logged = [];
+
+    await reopened.pruned((text) => logged.push(text));
+
+    assert.equal(ran.length, 1);
+    assert.equal(logged.length, 1);
+    assert.match(logged[0] ?? "", /^the mirror at .* could not be pruned\n$/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
