@@ -60,7 +60,7 @@ The chuggy docs are behind read_docs: call it with no page for the index first, 
 To file a ticket:
 1. read_abilities: who you act as, which a ticket's \`creator\` names, and what you may do.
 2. list_repositories: a repository that is configured and \`fileable\`.
-3. list_configurations with \`latest: true\`: the row whose \`provenance.repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
+3. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
 4. initialize_draft on that revision: the fence and the defaults.
 5. create_draft: the minimum brief, and \`authoring\` from the defaults.
 6. read_draft: the draft as filed.

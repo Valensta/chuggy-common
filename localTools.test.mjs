@@ -190,7 +190,7 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   );
   assert.match(
     instructions,
-    /^3\. list_configurations with `latest: true`: the row whose `provenance\.repository` is that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
+    /^3\. list_configurations: a revision whose `repository` is that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
   );
 });
 
