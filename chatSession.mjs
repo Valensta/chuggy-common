@@ -167,6 +167,9 @@ const chatSessionCredentialName = "provider-credential";
  * The variables of the supervisor's own a session is handed. A proxy's
  * address is handed as it is set, any credential in it included: the
  * container's proxy is taken to be no secret from its own sessions.
+ * `RUSTUP_HOME` names the image's toolchains, without which a session's cargo
+ * looks for them in its own home and finds none; `CARGO_HOME` is not handed,
+ * so cargo keeps its registry in the session's home.
  */
 const chatSessionPassedVariables = [
   "PATH",
@@ -182,6 +185,7 @@ const chatSessionPassedVariables = [
   "NODE_EXTRA_CA_CERTS",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
+  "RUSTUP_HOME",
   claudeCredentialVariable,
   workerRepositoriesVariable,
   ...workerImageSteeringVariables.map(workerImageVariable),

@@ -48,6 +48,8 @@ const settings = {
       "claude-code": "/credentials/claude-code",
     }),
     CHUG_SUPERVISOR_ONLY: "the supervisor's own",
+    RUSTUP_HOME: "/usr/local/rustup",
+    CARGO_HOME: "/usr/local/cargo",
   },
 };
 
@@ -179,6 +181,7 @@ test("a session is started as its own user, in its own places, its envelope on i
   assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe", "pipe"]);
   assert.deepEqual(options.env, {
     PATH: "/usr/bin:/bin",
+    RUSTUP_HOME: "/usr/local/rustup",
     HOME: "/sessions/session-20000/home",
     TMPDIR: "/sessions/session-20000/tmp",
     CHUG_WORKER_WORKSPACE: "/sessions/session-20000",
