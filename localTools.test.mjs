@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   localToolAskRefusal,
   localToolContext,
+  localToolInstructions,
   localToolRepeatDescription,
   localToolRequest,
   localToolServe,
@@ -81,8 +82,9 @@ test("a second 401 is relayed rather than asked a third time", async () => {
 function sdkOf() {
   const registered = [];
   class McpServer {
-    constructor(info) {
+    constructor(info, options) {
       this.info = info;
+      this.options = options;
       this.server = {};
     }
     registerTool(name, config, handler) {
@@ -116,6 +118,22 @@ test("a person's agent is given every project tool and no decision tool, under o
   const first = context.turn();
   assert.ok(first.length > 0);
   assert.notEqual(context.turn(), first);
+});
+
+test("the server tells the agent the docs are behind read_docs, index first", () => {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  const { registered, sdk } = sdkOf();
+  const server = localToolServer(context, sdk);
+  assert.deepEqual(server.options, { instructions: localToolInstructions });
+  assert.match(localToolInstructions, /read_docs/u);
+  assert.match(localToolInstructions, /index first/u);
+  assert.ok(registered.some(({ name }) => name === "read_docs"));
 });
 
 test("a registered tool reaches its project's route under the person's token", async () => {

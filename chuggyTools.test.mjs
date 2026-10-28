@@ -12,6 +12,8 @@ import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
   briefLineCharsMax,
+  chuggyDocsIndex,
+  chuggyToolDocsResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolPrefix,
   chuggyToolResponseBytesMax,
@@ -1416,6 +1418,136 @@ test("fetch_image is registered and allowed under ProjectRead, and under nothing
     assert.ok(registered([...roster]).includes("fetch_image"));
 });
 
+/** The docs tools, each fetch the docs host is asked recorded and answered by `answer`. */
+function docsToolsOf(answer) {
+  const fetched = [];
+  const tools = toolsOf({
+    docsFetch: async (url, init) => {
+      fetched.push({ url: String(url), init });
+      return answer(String(url));
+    },
+  });
+  return { ...tools, fetched };
+}
+
+const docsPage = new URL("guide/tickets.md", chuggyDocsIndex).href;
+
+test("read_docs with no page answers the index the contract names, verbatim", async () => {
+  const index = "# chuggy\n\n- [Tickets](https://example.test/x.md)\n";
+  const { api, call, fetched } = docsToolsOf(
+    () => new globalThis.Response(index),
+  );
+
+  const answer = await call("read_docs", {});
+
+  assert.equal(answer.isError, undefined, textOf(answer));
+  assert.equal(textOf(answer), index);
+  assert.deepEqual(
+    fetched.map(({ url }) => url),
+    [chuggyDocsIndex],
+  );
+  assert.equal(api.calls.length, 0, "the docs were asked of chuggy's API");
+});
+
+test("read_docs with a page under the index's directory answers that page, verbatim", async () => {
+  const markdown = "# Tickets\n\nA ticket is … ✓\n";
+  const { call, fetched } = docsToolsOf(
+    () => new globalThis.Response(markdown),
+  );
+
+  const answer = await call("read_docs", { page: docsPage });
+
+  assert.equal(answer.isError, undefined, textOf(answer));
+  assert.equal(textOf(answer), markdown);
+  assert.deepEqual(
+    fetched.map(({ url }) => url),
+    [docsPage],
+  );
+});
+
+test("read_docs refuses a page outside the index's directory without fetching anything", async () => {
+  const directory = new URL(".", chuggyDocsIndex);
+  for (const page of [
+    "not a url",
+    "https://example.test/llms.txt",
+    `http://${directory.host}${directory.pathname}guide.md`,
+    `https://${directory.host}:8443${directory.pathname}guide.md`,
+    new URL("../other/guide.md", directory).href,
+    `${directory.href}../other/guide.md`,
+    `${directory.href.slice(0, -1)}line/guide.md`,
+    `${directory.origin}/kasofsk/chuggy/main/README.md`,
+  ]) {
+    const { call, fetched } = docsToolsOf(
+      () => new globalThis.Response("leaked"),
+    );
+
+    const answer = await call("read_docs", { page });
+
+    assert.equal(answer.isError, true, page);
+    assert.match(textOf(answer), /nothing was fetched\.$/u, page);
+    assert.deepEqual(fetched, [], page);
+  }
+});
+
+test("read_docs refuses a body past the contract's bound rather than cutting it", async () => {
+  const over = "x".repeat(chuggyToolDocsResponseBytesMax + 1);
+  for (const response of [
+    () => new globalThis.Response(over),
+    () =>
+      new globalThis.Response(over, {
+        headers: { "content-length": String(Buffer.byteLength(over)) },
+      }),
+  ]) {
+    const { call } = docsToolsOf(response);
+
+    const answer = await call("read_docs", { page: docsPage });
+
+    assert.equal(answer.isError, true);
+    assert.match(
+      textOf(answer),
+      new RegExp(
+        `larger than the ${String(chuggyToolDocsResponseBytesMax)} bytes`,
+        "u",
+      ),
+    );
+    assert.ok(!textOf(answer).includes("xxxx"));
+  }
+});
+
+test("read_docs answers a status other than a 2xx as a refusal, and not its body", async () => {
+  for (const status of [301, 404, 500]) {
+    const { call } = docsToolsOf(
+      () =>
+        new globalThis.Response("the host's own page", {
+          status,
+          headers: status === 301 ? { location: "https://example.test/" } : {},
+        }),
+    );
+
+    const answer = await call("read_docs", {});
+
+    assert.equal(answer.isError, true, String(status));
+    assert.equal(
+      textOf(answer),
+      `the docs host answered HTTP ${String(status)} for ${chuggyDocsIndex}.`,
+    );
+  }
+});
+
+test("read_docs sends the docs host no header of chuggy's, follows no redirect, and is bounded in time", async () => {
+  const { call, fetched } = docsToolsOf(() => new globalThis.Response("# x"));
+
+  await call("read_docs", {});
+  await call("read_docs", { page: docsPage });
+
+  for (const { init } of fetched) {
+    assert.deepEqual(Object.keys(init).sort(), ["redirect", "signal"]);
+    assert.equal(init.redirect, "manual");
+    assert.ok(init.signal instanceof globalThis.AbortSignal);
+    assert.ok(!JSON.stringify(init).includes(bearer));
+  }
+});
+
 /**
  * Every identity a tool puts in a path segment, given one that carries the
  * separator. A segment is model-chosen text bounded only by `identity(z)`, so
@@ -2468,6 +2600,7 @@ const projectToolArguments = {
   read_thread_transcript: { session: "t-1" },
   list_repositories: {},
   fetch_image: { artifact: "image/png:ce47" },
+  read_docs: {},
   initialize_draft: { revision: "r1" },
   file_dependent: dependent,
   revise_draft: {
@@ -2511,11 +2644,16 @@ test("every project tool reaches its own session's project and nothing outside i
     await definition.call(
       chuggyToolContext(task, bearer, {
         request: api.request,
+        docsFetch: async () => new globalThis.Response("# docs"),
         turn: () => "turn-1",
       }),
       projectToolArguments[definition.name],
     );
 
+    if (definition.name === "read_docs") {
+      assert.equal(api.calls.length, 0, "read_docs asked chuggy's API");
+      continue;
+    }
     assert.equal(api.calls.length, 1, definition.name);
     const { pathname } = new URL(api.calls[0].path, task.api.url);
     assert.ok(
@@ -2559,25 +2697,37 @@ test("origination, revocation, updating and dispatching are registered for a thr
  * tool that answered without asking stood: a suite that drives the definition
  * passes whatever is between it and the session.
  */
-test("every project tool a session holds asks its route, and answers what the route did", async (t) => {
+test("every project tool a session holds asks its route, read_docs the docs host, and answers what it was answered", async (t) => {
   const temporary = await temporaryOf(t);
   for (const { name } of chuggyProjectTools) {
-    const { api, call } = imageToolsOf(temporary, (path) => ({
-      status: 200,
-      body: path.includes("/artifacts/")
-        ? JSON.stringify(pngAnswered)
-        : path.endsWith("/error")
-          ? JSON.stringify({ read: "Content", content: "x" })
-          : path.endsWith("/landings")
-            ? JSON.stringify({ landings: [], truncated: false })
-            : path.includes("/dispatch-view")
-              ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
-              : "{}",
-    }));
+    const docs = [];
+    const { api, call } = toolsOf(
+      {
+        imageFile: chuggyToolImageFiles({ TMPDIR: temporary }),
+        docsFetch: async (url) => {
+          docs.push(String(url));
+          return new globalThis.Response("# docs");
+        },
+      },
+      (path) => ({
+        status: 200,
+        body: path.includes("/artifacts/")
+          ? JSON.stringify(pngAnswered)
+          : path.endsWith("/error")
+            ? JSON.stringify({ read: "Content", content: "x" })
+            : path.endsWith("/landings")
+              ? JSON.stringify({ landings: [], truncated: false })
+              : path.includes("/dispatch-view")
+                ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
+                : "{}",
+      }),
+    );
 
     const answer = await call(name, projectToolArguments[name]);
 
-    assert.equal(api.calls.length, name === "dispatch_ticket" ? 2 : 1, name);
+    const asked = { dispatch_ticket: 2, read_docs: 0 }[name] ?? 1;
+    assert.equal(api.calls.length, asked, name);
+    assert.equal(docs.length, name === "read_docs" ? 1 : 0, name);
     assert.ok(answer.isError === undefined, name);
   }
 });

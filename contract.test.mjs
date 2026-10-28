@@ -28,6 +28,7 @@ import {
 import {
   allChuggyTools,
   builtInToolCapabilities,
+  chuggyDocsIndex,
   chuggyToolCapabilities,
   chuggyToolNames,
   chuggyToolPrefix,
@@ -1167,6 +1168,7 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
   const reached = new Set();
   for (const definition of chuggyProjectTools) {
     const paths = [];
+    const docs = [];
     const context = chuggyToolContext(
       { tenant: "t-1", project: "p-1", api: { url: "https://api.test" } },
       bearer,
@@ -1174,6 +1176,10 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
         request: async (_task, _bearer, path) => {
           paths.push(new URL(path, "https://api.test").pathname);
           return { status: 200, text: async () => "{}" };
+        },
+        docsFetch: async (url) => {
+          docs.push(String(url));
+          return new globalThis.Response("# docs");
         },
         turn: () => "turn-1",
       },
@@ -1184,6 +1190,12 @@ test("the pod's tools reach exactly the routes the contract gives them", async (
       z,
     )(everyToolArgument);
 
+    if (definition.name === "read_docs") {
+      assert.deepEqual(paths, [], "read_docs asked chuggy's API");
+      assert.deepEqual(docs, [chuggyDocsIndex]);
+      continue;
+    }
+    assert.deepEqual(docs, [], `${definition.name} asked the docs host`);
     assert.equal(paths.length, 1, definition.name);
     const matched = toolRoutesMatching(paths[0]);
     assert.equal(matched.length, 1, `${definition.name} asked ${paths[0]}`);
