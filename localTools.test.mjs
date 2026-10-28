@@ -130,13 +130,35 @@ test("the server tells the agent the docs are behind read_docs, index first", ()
   });
   const { registered, sdk } = sdkOf();
   const server = localToolServer(context, sdk);
-  assert.deepEqual(server.options, { instructions: localToolInstructions });
-  assert.match(localToolInstructions, /read_docs/u);
-  assert.match(localToolInstructions, /index first/u);
+  assert.deepEqual(server.options, {
+    instructions: localToolInstructions(context.task),
+  });
+  assert.match(server.options.instructions, /read_docs/u);
+  assert.match(server.options.instructions, /index first/u);
   assert.ok(registered.some(({ name }) => name === "read_docs"));
 });
 
+test("the server's instructions open with the workspace and project it is bound to", () => {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn: signInOf(["token"]),
+  });
+  const { sdk } = sdkOf();
+  const { instructions } = localToolServer(context, sdk).options;
+  assert.match(
+    instructions,
+    /^This server is bound to the workspace vteng and its project chuggy\b/u,
+  );
+});
+
 test("the server's instructions name the filing recipe's tools in order, then who starts the work", () => {
+  const instructions = localToolInstructions({
+    tenant: "vteng",
+    project: "chuggy",
+  });
   const recipe = [
     "list_repositories",
     "list_configurations",
@@ -146,20 +168,21 @@ test("the server's instructions name the filing recipe's tools in order, then wh
     "release_draft",
     "read_operation",
   ];
-  const steps = [...localToolInstructions.matchAll(/^(\d+)\. (\w+)/gmu)];
+  const steps = [...instructions.matchAll(/^(\d+)\. (\w+)/gmu)];
   assert.deepEqual(
     steps.map(([, number, tool]) => [Number(number), tool]),
     recipe.map((tool, index) => [index + 1, tool]),
   );
   const tools = new Set(chuggyProjectTools.map(({ name }) => name));
   for (const tool of recipe) assert.ok(tools.has(tool), tool);
+  assert.match(instructions, /^1\. list_repositories: [^\n]*`fileable`/mu);
   assert.match(
-    localToolInstructions,
-    /^1\. list_repositories: [^\n]*`fileable`/mu,
+    instructions,
+    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
   );
   assert.match(
-    localToolInstructions,
-    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
+    instructions,
+    /^2\. list_configurations: the newest revision for that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
   );
 });
 

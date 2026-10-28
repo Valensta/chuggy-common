@@ -62,7 +62,8 @@
  * TWO ARE ANSWERED RESHAPED, every other field as the route answered it.
  * `list_repositories` adds to each row whether a ticket may be filed in it,
  * read from that row alone, and `initialize_draft` leaves out the
- * configuration's `canonical`, which `read_configuration` answers.
+ * configuration's `canonical`, which `read_configuration` answers, and its
+ * dependency candidates, which are chosen from `list_tickets`.
  *
  * THE LAST IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
  * bytes. Its route answers them as base64, bounded by the largest upload rather
@@ -180,7 +181,7 @@ const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links:
 ${chuggyBriefDescription}`;
 
 /** What a draft's authoring carries, which initialize_draft answers the defaults of. */
-const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers from its \`dependencyCandidates\`.`;
+const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers chosen from list_tickets.`;
 
 /** What the same call made again within one turn answers, which is that operation as it now stands. */
 export const chuggySubmissionRepeatDescription = `The same call again in the same turn is the same operation, answered as it now stands: a \`state\` other than Pending is the outcome it already settled on, not a new attempt.`;
@@ -192,7 +193,7 @@ const chuggySubmissionDescription = `Answers the operation's id and its \`state\
 const chuggyProgramShortDescription = `A draft whose program runs less than its configuration plans, leaving out a stage of the selected plan or of a document's \`evaluations\`, or for a catalog an evaluator of a stage it keeps, is released, or its ticket updated to it, only by a caller holding the project's skip_planned_evaluations permit, which its administrators hold; any other caller is answered 403 ProgramSkipsPlannedEvaluations and nothing is submitted, so revise_draft it to run the whole plan, as initialize_draft's \`defaults.program\` does, or ask your owner to have it sent.`;
 
 /** What a new draft is fenced on, which is the project's head and not any one ticket's. */
-const chuggyExpectedProjectSequenceDescription = `The \`fence.projectSequence\` initialize_draft answered: the project's journal head, which every command anywhere in the project moves. A stale one is refused (DraftInitializationStale) with the head it is at now as \`currentProjectSequence\`, which the same write may be sent again with; a project that is not active refuses the write at any head (ProjectNotActive), naming its \`lifecycle\`.`;
+const chuggyExpectedProjectSequenceDescription = `The \`fence.projectSequence\` initialize_draft answered: the project's journal head, which every command anywhere in the project moves. Where nothing else has moved it since, the \`decidedSequence\` of your last Succeeded operation is the head to pass next. A stale one is refused (DraftInitializationStale) with the head it is at now as \`currentProjectSequence\`, which the same write may be sent again with; a project that is not active refuses the write at any head (ProjectNotActive), naming its \`lifecycle\`.`;
 
 /** The configuration a new draft is filed against, which initialize_draft answered. */
 const chuggyNewDraftConfigurationDescription = {
@@ -646,13 +647,23 @@ function listRepositoriesFileable(body) {
   };
 }
 
-/** A draft's initialization without its configuration's canonical document, which read_configuration answers. */
+/** The fields of a draft's initialization initialize_draft leaves out. */
+const initializeDraftUnanswered = [
+  "dependencyCandidates",
+  "dependencyCandidatesTruncated",
+];
+
+/** A draft's initialization without its configuration's canonical document, which read_configuration answers, or its dependency candidates, which list_tickets does. */
 function initializeDraftUncanonical(body) {
   const { configuration } = body;
   if (configuration === null || typeof configuration !== "object")
     return undefined;
   return {
-    ...body,
+    ...Object.fromEntries(
+      Object.entries(body).filter(
+        ([key]) => !initializeDraftUnanswered.includes(key),
+      ),
+    ),
     configuration: Object.fromEntries(
       Object.entries(configuration).filter(([key]) => key !== "canonical"),
     ),
@@ -1220,7 +1231,7 @@ export const chuggyProjectTools = [
   {
     name: "read_operation",
     description:
-      "One submitted operation's outcome. Call it after every command: this is the only way to learn what a command did.",
+      "One submitted operation's outcome. Call it after every command: this is the only way to learn what a command did. A Succeeded operation carries `decidedSequence`, the project's journal head the command moved it to.",
     shape: (z) => ({
       operation: identity(z).describe(
         "The operation's id, as the command that submitted it answered it.",
@@ -1274,7 +1285,7 @@ export const chuggyProjectTools = [
   {
     name: "list_repositories",
     description:
-      "Every repository this project binds, oldest first. Call it for the repository a ticket is filed in. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. A retired binding carries `retiredAt`, and a draft write naming it is refused. `pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why. A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`, since a ticket in a repository the worker app does not reach stops at its clone.",
+      "Every repository this project binds, oldest first. Call it for the repository a ticket is filed in. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what it holds now: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. `lastImport` is the newest import attempt, and it can fail while earlier imported revisions stay usable. A retired binding carries `retiredAt`, and a draft write naming it is refused. `pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why. A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`, since a ticket in a repository the worker app does not reach stops at its clone.",
     shape: () => ({}),
     call: (context) =>
       readReshaped(
@@ -1315,7 +1326,7 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document.",
+      "The defaults and the fence a new draft is filed against, for one configuration revision. Call it before create_draft or file_dependent. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from: each stage's `key` and each evaluator's `key` are positions counted from one in the configuration's plan, and passing it unchanged runs the whole plan. `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, stage N runs the selected plan's Nth stage, and `defaults` and `choices` are those of the selection passed. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document. Dependencies are chosen from list_tickets.",
     shape: (z) => ({
       revision: revision(z),
       work: identity(z)
@@ -1449,7 +1460,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "release_draft",
-    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
+    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does. A Pending ticket with no open dependencies waits on the lead's dispatch decision or on a dispatch by someone who may, and read_lead answers whether a lead is active and, where none, why. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z).describe(
         "The ticket number the draft holds, as read_draft answers it.",
@@ -1587,6 +1598,14 @@ function raised(failure) {
   );
 }
 
+/** What a call its `chuggyToolTimeoutMs` signal aborted answers, the same for every tool but its name. */
+function chuggyToolTimedOut(name) {
+  return answered(
+    `${name} ended at its ${String(chuggyToolTimeoutMs / 1_000)}-second timeout: a read tool (every list_* and read_*) may simply be called again, while a write tool's outcome is learned through read_operation where it answered an operation id.`,
+    true,
+  );
+}
+
 /**
  * One tool's handler: its input checked against its own shape, then the call,
  * with every raise answered as text the model reads rather than thrown into the
@@ -1623,15 +1642,17 @@ export function chuggyToolHandler(definition, z) {
   const fields = definition.shape(z);
   const shape = z.object(fields);
   const pageItemsMax = fields[chuggyToolPageArgument]?.unwrap().maxValue;
+  const { name } = definition;
   const asked = async (given) => {
     try {
       const answer = await definition.call(given);
       return typeof answer === "string" ? answered(answer) : answer;
     } catch (failure) {
-      return raised(failure);
+      return failure?.name === "TimeoutError"
+        ? chuggyToolTimedOut(name)
+        : raised(failure);
     }
   };
-  const { name } = definition;
   return async (args) => {
     let given;
     try {
