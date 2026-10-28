@@ -843,7 +843,7 @@ async function readDocs(context, page) {
     );
   const response = await context.docsFetch(url, {
     redirect: "manual",
-    signal: globalThis.AbortSignal.timeout(chuggyToolTimeoutMs),
+    signal: chuggyToolSignal(),
   });
   if (!response.ok) {
     await response.body?.cancel();
@@ -1598,7 +1598,21 @@ function raised(failure) {
   );
 }
 
-/** What a call its `chuggyToolTimeoutMs` signal aborted answers, the same for every tool but its name. */
+/** The reason a `chuggyToolSignal` aborts with, so a timeout of anything else is not mistaken for it. */
+class ChuggyToolTimeout extends Error {}
+
+/** The signal one tool call's requests are cut off by at `chuggyToolTimeoutMs`. */
+export function chuggyToolSignal() {
+  const controller = new globalThis.AbortController();
+  globalThis
+    .setTimeout(() => {
+      controller.abort(new ChuggyToolTimeout("the tool call timed out"));
+    }, chuggyToolTimeoutMs)
+    .unref();
+  return controller.signal;
+}
+
+/** What a call its `chuggyToolSignal` aborted answers, the same for every tool but its name. */
 function chuggyToolTimedOut(name) {
   return answered(
     `${name} ended at its ${String(chuggyToolTimeoutMs / 1_000)}-second timeout: a read tool (every list_* and read_*) may simply be called again, while a write tool's outcome is learned through read_operation where it answered an operation id.`,
@@ -1648,7 +1662,7 @@ export function chuggyToolHandler(definition, z) {
       const answer = await definition.call(given);
       return typeof answer === "string" ? answered(answer) : answer;
     } catch (failure) {
-      return failure?.name === "TimeoutError"
+      return failure instanceof ChuggyToolTimeout
         ? chuggyToolTimedOut(name)
         : raised(failure);
     }

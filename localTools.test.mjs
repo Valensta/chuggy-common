@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers";
 
-import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
+import {
+  chuggyToolServerName,
+  chuggyToolTimeoutMs,
+} from "@chuggy/worker-contract/sessionTools";
 import { z } from "zod";
 
 import {
@@ -207,6 +210,72 @@ test("a registered tool reaches its project's route under the person's token", a
     api.calls[0].path,
     /\/tenants\/vteng\/projects\/chuggy\/tickets\/7$/,
   );
+});
+
+/** `release_draft` as a person's agent is given it, under `signIn` and `request`. */
+function releaseDraftOf(signIn, request) {
+  const context = localToolContext({
+    site: "https://chuggy.test",
+    tenant: "vteng",
+    project: "chuggy",
+    version: "1",
+    signIn,
+    request,
+  });
+  const { registered, sdk } = sdkOf();
+  localToolServer(context, sdk);
+  const { handler } = registered.find(({ name }) => name === "release_draft");
+  return () =>
+    handler({ ticket: 4, authoringVersion: 2, configurationRevision: "r1" });
+}
+
+test("a call cut off at the tool timeout answers the retry sentence", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const release = releaseDraftOf(
+    signInOf(["token"]),
+    async (_task, _bearer, _path, init) => {
+      await new Promise((resolve) => {
+        init.signal.addEventListener("abort", resolve, { once: true });
+      });
+      throw init.signal.reason;
+    },
+  );
+
+  const answered = release();
+  await new Promise(setImmediate);
+  t.mock.timers.tick(chuggyToolTimeoutMs);
+  const answer = await answered;
+
+  assert.equal(answer.isError, true);
+  assert.match(
+    answer.content[0].text,
+    /^release_draft ended at its \d+-second timeout: /u,
+  );
+});
+
+test("a sign-in that times out is answered as itself, not as the tool timeout", async () => {
+  const api = apiOf([200]);
+  const release = releaseDraftOf(
+    {
+      token: async () => {
+        throw new globalThis.DOMException(
+          "The operation was aborted due to timeout",
+          "TimeoutError",
+        );
+      },
+      invalidate: () => undefined,
+    },
+    api.request,
+  );
+
+  const answer = await release();
+
+  assert.equal(answer.isError, true);
+  assert.equal(
+    answer.content[0].text,
+    "The operation was aborted due to timeout",
+  );
+  assert.equal(api.calls.length, 0);
 });
 
 test("a submitted command is described as a new operation each call, and every other description is the pod's", () => {

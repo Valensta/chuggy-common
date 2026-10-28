@@ -5,6 +5,7 @@ import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 import { URL } from "node:url";
 
 import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
@@ -48,6 +49,7 @@ import {
   chuggyToolHandler,
   chuggyToolImageFiles,
   chuggyToolServer,
+  chuggyToolSignal,
   chuggyTranscriptBodyBytesMax,
   sessionAllowedTools,
   sessionBuiltInTools,
@@ -1363,17 +1365,20 @@ test("a draft's initialization is answered without its configuration's canonical
   );
 });
 
-/** A request its own timeout signal aborts, as fetch rejects with that signal's reason. */
-async function requestTimedOut() {
-  const signal = globalThis.AbortSignal.timeout(0);
+/** A request that hangs until its signal aborts, then rejects with that signal's reason, as fetch does. */
+async function requestHung(_task, _bearer, _path, init) {
   await new Promise((resolve) => {
-    signal.addEventListener("abort", resolve, { once: true });
+    init.signal.addEventListener("abort", resolve, { once: true });
   });
-  throw signal.reason;
+  throw init.signal.reason;
 }
 
-test("a call its timeout aborts names the tool and the timeout, and says which tools may be called again", async () => {
-  const { call } = toolsOf({ request: requestTimedOut });
+test("a call its tool signal aborts names the tool and the timeout, and says which tools may be called again", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { call } = toolsOf({
+    request: (task, bearer, path, init) =>
+      requestHung(task, bearer, path, { ...init, signal: chuggyToolSignal() }),
+  });
 
   for (const [name, args] of [
     ["list_repositories", {}],
@@ -1382,7 +1387,10 @@ test("a call its timeout aborts names the tool and the timeout, and says which t
       { ticket: 4, authoringVersion: 2, configurationRevision: "r1" },
     ],
   ]) {
-    const answer = await call(name, args);
+    const answered = call(name, args);
+    await new Promise(setImmediate);
+    t.mock.timers.tick(chuggyToolTimeoutMs);
+    const answer = await answered;
 
     assert.equal(answer.isError, true, name);
     assert.equal(
@@ -1390,6 +1398,26 @@ test("a call its timeout aborts names the tool and the timeout, and says which t
       `${name} ended at its ${String(chuggyToolTimeoutMs / 1_000)}-second timeout: a read tool (every list_* and read_*) may simply be called again, while a write tool's outcome is learned through read_operation where it answered an operation id.`,
     );
   }
+});
+
+test("a timeout that is not the tool signal's answers the raise itself", async () => {
+  const { call } = toolsOf({
+    request: async () => {
+      throw new globalThis.DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+    },
+  });
+
+  const answer = await call("release_draft", {
+    ticket: 4,
+    authoringVersion: 2,
+    configurationRevision: "r1",
+  });
+
+  assert.equal(answer.isError, true);
+  assert.equal(textOf(answer), "The operation was aborted due to timeout");
 });
 
 test("a call that raises anything but its timeout answers the raise itself", async () => {

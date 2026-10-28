@@ -28,10 +28,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { URL } from "node:url";
 
-import {
-  chuggyToolServerName,
-  chuggyToolTimeoutMs,
-} from "@chuggy/worker-contract/sessionTools";
+import { chuggyToolServerName } from "@chuggy/worker-contract/sessionTools";
 
 import { chuggyRequest } from "./chuggyApi.mjs";
 import {
@@ -39,6 +36,7 @@ import {
   chuggyToolContext,
   chuggyToolDefinitions,
   chuggyToolHandler,
+  chuggyToolSignal,
 } from "./chuggyTools.mjs";
 import { localSignIn } from "./localSignIn.mjs";
 import { localTokenStore } from "./localTokenStore.mjs";
@@ -76,7 +74,7 @@ const localToolAttemptsMax = 2;
 /** A request under the person's current token, made again once on a 401. */
 export function localToolRequest(signIn, request = chuggyRequest) {
   return async (task, _bearer, path, init = {}) => {
-    const signal = globalThis.AbortSignal.timeout(chuggyToolTimeoutMs);
+    const signal = chuggyToolSignal();
     for (let attempt = 1; ; attempt += 1) {
       const token = await signIn.token();
       const response = await request(task, token, path, { ...init, signal });
