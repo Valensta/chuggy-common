@@ -129,13 +129,16 @@ export const chatSupervisorCommand = Object.freeze([
 
 /**
  * What the supervisor needs as root: owning and opening each session's
- * directories and mirrors whoever made them, and dropping to a session's
- * user, its groups and none of its own capabilities.
+ * directories and mirrors whoever made them, keeping a mirror's group on
+ * what is made in it, which a mirror whose group root is not in loses
+ * without `FSETID`, and dropping to a session's user, its groups and none
+ * of its own capabilities.
  */
 export const chatSupervisorCapabilities = Object.freeze([
   "CHOWN",
   "DAC_OVERRIDE",
   "FOWNER",
+  "FSETID",
   "SETUID",
   "SETGID",
   "SETPCAP",

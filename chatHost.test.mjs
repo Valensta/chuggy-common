@@ -450,7 +450,15 @@ test("a supervisor's container is root with the capabilities it needs and none t
     user: "0:0",
     capabilities: {
       drop: ["ALL"],
-      add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "SETPCAP"],
+      add: [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "SETUID",
+        "SETGID",
+        "SETPCAP",
+      ],
     },
     securityOptions: ["no-new-privileges"],
     interactive: true,
