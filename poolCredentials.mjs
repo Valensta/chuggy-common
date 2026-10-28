@@ -2,7 +2,9 @@
  * The file a pool's registration writes: who the pool is, where its issuer,
  * plane and image registry are, and its client credential. A personal
  * runner's is a pool's with the project and pool taken out and the member it
- * serves put in, told apart by its `kind`. Its `host`, the one thing in it
+ * serves put in, told apart by its `kind`, and a chat host's is a personal
+ * runner's with no capabilities, since it takes sessions alone, and a `kind`
+ * of its own. Its `host`, the one thing in it
  * chuggy did not answer, is the operator's: a job that pins no image runs on
  * the machine itself. It is refused unless
  * only its owner can read or write it, and no refusal carries the file's text,
@@ -18,7 +20,7 @@ import { z } from "zod";
  * @typedef {import("./poolIdentity.mjs").PoolIdentity} PoolIdentity
  *
  * @typedef {object} PoolEndpoints
- * @property {string[]} capabilities
+ * @property {string[]} [capabilities] none in a chat host's file
  * @property {string} tokenUrl
  * @property {string} audience
  * @property {string} planeUrl
@@ -62,6 +64,16 @@ const personalRunnerCredentialsSchema = poolCredentialsSchema
   .omit({ project: true, pool: true })
   .extend({ kind: z.literal("Personal"), owner: poolCredentialsTextSchema });
 
+const chatHostCredentialsSchema = personalRunnerCredentialsSchema
+  .omit({ capabilities: true, host: true })
+  .extend({ kind: z.literal("ChatHost") });
+
+/** The schema a file's `kind` reads it by: a pool's, which names none, where it names no other. */
+const poolCredentialsKinds = {
+  Personal: personalRunnerCredentialsSchema,
+  ChatHost: chatHostCredentialsSchema,
+};
+
 /**
  * The credentials at `file`, checked and read through one handle so the file
  * checked is the file read. A syntax error's own message quotes the text, so
@@ -94,9 +106,10 @@ export async function poolCredentials(file) {
   } catch {
     throw new Error(`pool credentials ${file} is not JSON`);
   }
+  const kind = document?.kind;
   const parsed = (
-    document?.kind === "Personal"
-      ? personalRunnerCredentialsSchema
+    Object.hasOwn(poolCredentialsKinds, kind)
+      ? poolCredentialsKinds[kind]
       : poolCredentialsSchema
   ).safeParse(document);
   if (!parsed.success)

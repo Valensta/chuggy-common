@@ -1,5 +1,5 @@
 /**
- * What chuggy answers a pool's or a personal redemption with, and a fetch
+ * What chuggy answers a pool's, a personal or a chat host's redemption with, and a fetch
  * that answers with it, for a suite that registers without the network.
  */
 
@@ -29,6 +29,19 @@ export const registeredPersonalFixture = {
   registryHost: "chuggy-registry.chuggy.example",
   clientId: "chuggy-personal-client",
   clientSecret: "personal-client-secret-fixture",
+};
+
+/** The file chuggy answers a chat host's redemption with: a personal runner's of the same member, with no capabilities. */
+export const registeredChatHostFixture = {
+  kind: "ChatHost",
+  tenant: registeredPersonalFixture.tenant,
+  owner: registeredPersonalFixture.owner,
+  tokenUrl: "https://auth.chuggy.example/oauth2/token",
+  audience: "https://chuggy.example/api",
+  planeUrl: "https://chuggy-pool.chuggy.example/",
+  registryHost: "chuggy-registry.chuggy.example",
+  clientId: "chuggy-chat-host-client",
+  clientSecret: "chat-host-client-secret-fixture",
 };
 
 /**
