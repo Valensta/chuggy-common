@@ -571,7 +571,7 @@ test("a host's own image is run whatever the plane names, and pulled as its sett
   );
 });
 
-test("a supervisor's container is root with the capabilities it needs and none to gain, its credentials read-only beneath a directory only their owner opens", () => {
+test("a supervisor's container is root with the capabilities it needs and none to gain, its credentials' directories read-only beneath one only their owner opens", () => {
   const container = chatSupervisorContainer(one, {
     ...places,
     credentialOwner: { uid: 1000, gid: 1000 },
@@ -627,14 +627,14 @@ test("a supervisor's container is root with the capabilities it needs and none t
     ],
     binds: [
       {
-        source: "/home/geoff/.chuggy/claude.json",
+        source: "/home/geoff/.chuggy",
         target: "/var/run/chuggy/credentials/claude",
       },
     ],
     environment: {
       CHUG_CHAT_SESSIONS_MAX: "4",
       CHUG_WORKER_CREDENTIAL_FILES:
-        '{"claude":"/var/run/chuggy/credentials/claude"}',
+        '{"claude":"/var/run/chuggy/credentials/claude/claude.json"}',
       CHUG_WORKER_CLAUDE_CREDENTIAL: '{"kind":"Subscription"}',
       CHUG_WORKER_REPOSITORIES: '{"kasofsk/chuggy":{}}',
     },
@@ -662,6 +662,9 @@ test("a container whose credentials a session's user could own or open another w
     [{ credentialFiles: { "../x": "/a" } }, /no credential slot/u],
     [{ credentialFiles: { "..": "/a" } }, /no credential slot/u],
     [{ credentialFiles: { claude: "relative.json" } }, /no absolute path/u],
+    [{ credentialFiles: { claude: "/a/../b.json" } }, /written plainly/u],
+    [{ credentialFiles: { claude: "/a/" } }, /no directory of its own/u],
+    [{ credentialFiles: { claude: "/b.json" } }, /no directory of its own/u],
   ])
     assert.throws(
       () => chatSupervisorContainer(one, { ...places, ...changed }),

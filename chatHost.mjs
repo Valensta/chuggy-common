@@ -25,9 +25,21 @@
  *
  * THE SUPERVISOR'S CONTAINER IS ROOT WITH THE FEW CAPABILITIES IT NEEDS to
  * make each session's user, directories and mirrors and to drop to that
- * user, and gains none. The Claude credential is mounted read-only in a
- * directory only its owner opens, which the supervisor reads it as.
+ * user, and gains none. Each credential's directory is mounted read-only in
+ * one only the credentials' owner opens, which the supervisor reads each as.
+ *
+ * A CREDENTIAL'S DIRECTORY IS BOUND, NOT ITS FILE. A file bound alone stays
+ * the file that was there when the container started, so a credential
+ * renewed by being replaced, as most writers renew a file, is never seen by
+ * a supervisor started before it; its directory shows each renewal, however
+ * it was written. The supervisor can read whatever else that directory
+ * holds, so a CLI keeps each credential in a directory of its own. Every
+ * credential file is the credentials' owner's, since only that user opens
+ * where they are.
+
  */
+
+import { posix } from "node:path";
 
 import {
   workerCredentialFilesVariable,
@@ -75,8 +87,8 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  *
  * @typedef {object} ChatSupervisorPlaces what a supervisor's container is given of this machine
  * @property {{sessions: string, mirrors: string}} volumes the engine's volumes its sessions' directories and its mirrors are kept in
- * @property {Readonly<Record<string, string>>} credentialFiles each credential a session may be handed, by its slot, as the path of its file on this machine
- * @property {{uid: number, gid: number}} credentialOwner who owns those files as the engine shows them inside a container
+ * @property {Readonly<Record<string, string>>} credentialFiles each credential a session may be handed, by its slot, as the path of its file on this machine, whose directory the supervisor is given whole
+ * @property {{uid: number, gid: number}} credentialOwner who owns every one of those files as the engine shows them inside a container, as no session's user does
  * @property {ClaudeCredentialSetting} [claudeCredential] the kind of credential the Claude one is
  * @property {string} [repositories] the site's map of the repositories a session may reach, as `CHUG_WORKER_REPOSITORIES` carries it
  * @property {Readonly<Record<string, string>>} [variables] the supervisor's own counts, by the `CHUG_CHAT_` name of each
@@ -221,18 +233,26 @@ function chatSupervisorCounts(places) {
   return variables;
 }
 
-/** Each credential's mount, refused where its slot is no file's name or its file no absolute path. */
+/**
+ * Each credential's mount, its directory bound at its slot: refused where
+ * its slot is no file's name, its file no absolute path written plainly, or
+ * its directory the root.
+ */
 function chatSupervisorCredentialMounts(places) {
-  return Object.entries(places.credentialFiles).map(([slot, source]) => {
+  return Object.entries(places.credentialFiles).map(([slot, file]) => {
     if (!chatSupervisorSlotPattern.test(slot) || slot === "." || slot === "..")
       throw new RangeError(`${JSON.stringify(slot)} is no credential slot`);
-    if (!source.startsWith("/"))
-      throw new RangeError(`the ${slot} credential's file is no absolute path`);
-    return {
-      slot,
-      source,
-      target: `${chatSupervisorCredentialsDirectory}/${slot}`,
-    };
+    if (!file.startsWith("/") || posix.normalize(file) !== file)
+      throw new RangeError(
+        `the ${slot} credential's file is no absolute path written plainly`,
+      );
+    const source = posix.dirname(file);
+    if (source === "/" || file.endsWith("/"))
+      throw new RangeError(
+        `the ${slot} credential's file is in no directory of its own`,
+      );
+    const target = `${chatSupervisorCredentialsDirectory}/${slot}`;
+    return { slot, source, target, file: `${target}/${posix.basename(file)}` };
   });
 }
 
@@ -240,8 +260,8 @@ function chatSupervisorCredentialMounts(places) {
  * The supervisor's container, for any engine to run: root with the
  * capabilities it needs and none to gain, its input held open, its
  * sessions' directories and mirrors in volumes of its own, its run directory
- * a tmpfs a session's user may pass through, and each credential bound
- * read-only into a tmpfs only that credential's owner opens.
+ * a tmpfs a session's user may pass through, and each credential's
+ * directory bound read-only into a tmpfs only the credentials' owner opens.
  *
  * @param {string} image
  * @param {ChatSupervisorPlaces} places
@@ -285,7 +305,7 @@ export function chatSupervisorContainer(image, places) {
     environment: {
       ...variables,
       [workerCredentialFilesVariable]: JSON.stringify(
-        Object.fromEntries(mounts.map(({ slot, target }) => [slot, target])),
+        Object.fromEntries(mounts.map(({ slot, file }) => [slot, file])),
       ),
       ...claudeCredentialCarried(places.claudeCredential),
       ...(places.repositories === undefined
