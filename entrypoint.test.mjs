@@ -2722,9 +2722,10 @@ const agentWorker = {
 /**
  * One finished work attempt reaching the plane, with git stood in for by a
  * recorder but for the `init` that makes the repository the push is made
- * from: what the push would have run, and what the report carried.
+ * from, and for the push where `pushed` answers it: what the push would have
+ * run, and what the report carried.
  */
-async function workPublished(worker, run) {
+async function workPublished(worker, run, pushed) {
   const runs = [];
   const { calls, request } = planeCalls();
   await publishWorkerResult(
@@ -2743,6 +2744,7 @@ async function workPublished(worker, run) {
             ...options,
             env: { PATH: process.env.PATH ?? "", ...options.env },
           });
+        if (pushed !== undefined && args.includes("push")) return pushed();
         return { stdout: `${workCommit}\n` };
       },
     },
@@ -2835,26 +2837,64 @@ test("a passing commanded work attempt commits and pushes what it declares", asy
 });
 
 /**
- * The commands' exit status is the work's success, and a failed one leaves
- * nothing behind. Catches a push that stopped reading the verdict: the plane
- * refuses a source on a Fail, so the attempt would crash rather than fail.
+ * The commands' exit status is the work's success, and a failed one keeps what
+ * it changed on its branch without declaring it. Catches a failed attempt's
+ * work lost with its container, a source declared on a Fail, which the plane
+ * refuses, and a kept branch named nowhere its reader looks.
  */
-test("a failing commanded work attempt pushes nothing and declares no source", async () => {
+test("a failing commanded work attempt pushes what it changed to its branch, names it in its log and report, and declares no source", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
   const { runs, reported } = await workPublished(
     commandedWorker,
     commandedRun(1),
   );
 
-  assert.deepEqual(runs, []);
+  assert.deepEqual(gitRun(runs, "push").args.slice(-1), [
+    `${workCommit}:${ticketBranch(workAttempt)}`,
+  ]);
   assert.equal(reported.verdict, "Fail");
   assert.equal(reported.source, undefined);
+  const kept = `The failed attempt's changes are kept on ${ticketBranch(workAttempt)} at ${workCommit}.`;
+  assert.equal(reported.report, `${kept} .chug/tasks/ci.sh exited 1`);
+  assert.deepEqual(logged, [`${kept}\n`]);
 });
 
 /**
- * A passing work attempt published from a real checkout under `run`'s secrets,
- * what its push was refused with, and every call the plane saw.
+ * Keeping a failed attempt's work is never its failure. Catches a push that
+ * fails turning the attempt's Fail into a lost run, its failure into the
+ * push step's, or its report into a claim that something was kept.
  */
-async function passedFrom({ remote, directory, base }, run, bearer) {
+test("a failing work attempt whose push fails still reports the Fail it ran to", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+  const { reported } = await workPublished(
+    commandedWorker,
+    commandedRun(1),
+    async () => {
+      throw new Error("the forge is gone");
+    },
+  );
+
+  assert.equal(reported.verdict, "Fail");
+  assert.equal(reported.source, undefined);
+  assert.equal(reported.report, ".chug/tasks/ci.sh exited 1");
+  assert.deepEqual(logged, [
+    "the failed attempt's changes could not be kept: the forge is gone\n",
+  ]);
+});
+
+/**
+ * A work attempt published from a real checkout under `run`'s secrets with
+ * `verdict`, a pass by default, what its push was refused with, and every
+ * call the plane saw.
+ */
+async function finishedFrom(
+  { remote, directory, base },
+  run,
+  bearer,
+  verdict = "Pass",
+) {
   const { calls, request } = planeCalls();
   const refused = await publishWorkerResult(
     {
@@ -2875,7 +2915,7 @@ async function passedFrom({ remote, directory, base }, run, bearer) {
     },
     {
       output: {},
-      result: { verdict: "Pass", summary: "done" },
+      result: { verdict, summary: "done" },
       diagnosticPath: ".chuggy/agent-result.json",
     },
   ).then(
@@ -2926,7 +2966,7 @@ test("a passing work attempt pushes no commit carrying any secret it holds", asy
       await inCheckout(async (checkout) => {
         await writeFile(join(checkout.directory, "leaked"), held.value);
 
-        const { refused, calls } = await passedFrom(checkout, run, bearer);
+        const { refused, calls } = await finishedFrom(checkout, run, bearer);
 
         assert.match(
           refused.message,
@@ -2942,6 +2982,42 @@ test("a passing work attempt pushes no commit carrying any secret it holds", asy
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * A failed attempt's kept work is checked as a candidate is, and its refusal
+ * is logged rather than raised. Catches a held secret reaching the remote on a
+ * Fail, and a refusal that turns the Fail into the commit step's failure.
+ */
+test("a failing work attempt whose commit carries a held secret pushes nothing and still reports the Fail it ran to", async (t) => {
+  const logged = [];
+  t.mock.method(process.stderr, "write", (text) => logged.push(text));
+  const held = { kind: "the attempt's bearer", value: "bearer-0123456789ab" };
+  await inCheckout(async (checkout) => {
+    await writeFile(join(checkout.directory, "leaked"), held.value);
+
+    const { refused, calls } = await finishedFrom(
+      checkout,
+      { scrub: (text) => text, held: () => [held] },
+      held.value,
+      "Fail",
+    );
+
+    assert.equal(refused.message, "pushed", "the kept work failed the attempt");
+    assert.equal(await remoteRefs(checkout.remote), "");
+    const reported = JSON.parse(reportedBody(calls));
+    assert.equal(reported.verdict, "Fail");
+    assert.equal(reported.source, undefined);
+    assert.equal(reported.report, "done");
+  });
+  assert.equal(logged.length, 1);
+  assert.match(
+    logged[0],
+    new RegExp(
+      `^the failed attempt's changes could not be kept: commit [0-9a-f]{40} carries ${held.kind} in a file, so the attempt pushes nothing\n$`,
+      "u",
+    ),
+  );
 });
 
 /**

@@ -595,6 +595,7 @@ test("a commit its hook stops fails the commit step, takes no credential and mak
 async function publishedFrom(
   { remote, directory, base },
   meanwhile = async () => undefined,
+  more = {},
 ) {
   const asked = { refreshes: 0 };
   const source = commitAndPushSource({
@@ -611,6 +612,7 @@ async function publishedFrom(
       await meanwhile();
       return process.env;
     },
+    ...more,
   });
   return { asked, source: await source.catch((error) => error) };
 }
@@ -677,6 +679,59 @@ test("an attempt that changed nothing still declares a commit on its branch", as
       cwd: remote,
     });
     assert.equal(pushed.trim(), source.commit);
+  });
+});
+
+/**
+ * Catches a failed attempt's work lost with its container: what it changed,
+ * committed or not, is pushed to the branch a pass would have used.
+ */
+test("an attempt that declares no empty commit pushes what it changed to its branch", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    const authored = await agentCommitted(directory, "change", "made\n");
+    await writeFile(join(directory, "left"), "over\n");
+
+    const { source } = await publishedFrom(checkout, undefined, {
+      emptyDeclared: false,
+    });
+
+    assert.equal(source.ref, ticketBranch({ ticket: 9, attempt: "opaque" }));
+    const { stdout: parent } = await git(
+      "git",
+      ["rev-parse", `${source.commit}^`],
+      { cwd: directory },
+    );
+    assert.equal(parent.trim(), authored);
+    const { stdout: pushed } = await git("git", ["rev-parse", source.ref], {
+      cwd: remote,
+    });
+    assert.equal(pushed.trim(), source.commit);
+  });
+});
+
+/**
+ * Catches an empty commit pushed for an attempt that changed nothing but the
+ * files provisioned for it, which keeps nothing, and a credential taken for it.
+ */
+test("an attempt that declares no empty commit and changed nothing pushes nothing", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote, base } = checkout;
+    await writeFile(join(directory, "provisioned.json"), "{}\n");
+
+    const { asked, source } = await publishedFrom(checkout, undefined, {
+      task: {
+        ticket: 9,
+        attempt: "opaque",
+        worker: { files: [{ path: "provisioned.json" }] },
+      },
+      emptyDeclared: false,
+    });
+
+    assert.equal(source, undefined);
+    assert.equal(await headOf(directory), base);
+    assert.equal(asked.refreshes, 0);
+    assert.equal(await remoteRefs(remote), "");
   });
 });
 
