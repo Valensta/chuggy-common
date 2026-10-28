@@ -49,6 +49,7 @@ import { rm } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { jobRepositoryDirectory } from "./job.mjs";
+import { planeCredentialUnreachedText } from "./planeCredential.mjs";
 import {
   workerCredentialEnvironment,
   workerRepository,
@@ -159,7 +160,9 @@ function sessionRemote(task, repositories, credentialFiles, reference, minted) {
  * `run` and `log` are seams so a suite can drive a real clone and still say
  * where its output went; the defaults are `git` itself and the pod's stderr.
  * `minted` is the file the plane's credential was written to and its username,
- * where the plane minted one; without it the site's mounted map is what answers.
+ * where the plane minted one; without it the site's mounted map is what
+ * answers, unless `unreached` says which way the plane's app does not reach the
+ * repository, which is then the refusal.
  */
 export async function sessionCheckout(
   task,
@@ -173,16 +176,14 @@ export async function sessionCheckout(
     log = (text) => process.stderr.write(text),
     scrub = (text) => text,
     minted,
+    unreached,
   } = services;
   if (task.repository === undefined) return undefined;
   const reference = task.repository.reference;
-  const remote = sessionRemote(
-    task,
-    repositories,
-    credentialFiles,
-    reference,
-    minted,
-  );
+  const remote =
+    unreached === undefined
+      ? sessionRemote(task, repositories, credentialFiles, reference, minted)
+      : { refused: planeCredentialUnreachedText(unreached) };
   if (remote.refused !== undefined) return { refused: scrub(remote.refused) };
   const { repository, environment } = remote;
   const directory = jobRepositoryDirectory(workspace);

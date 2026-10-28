@@ -18,11 +18,16 @@ import {
 import { sessionBuiltInTools, sessionCapabilityTools } from "./chuggyTools.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import {
+  credentialUnreachedCases,
+  credentialUnreadMap,
+} from "./credentialUnreached.fixture.mjs";
+import {
   checkedSessionBounds,
   sessionBoundNames,
   sessionTurnFailure,
 } from "./session.mjs";
 import { observeRateLimit, rateLimitSightings } from "./rateLimit.mjs";
+import { sessionCheckout } from "./sessionCheckout.mjs";
 import {
   bearer,
   boundEnvironment,
@@ -1510,6 +1515,34 @@ test("a plane that mints nothing leaves the checkout on the launcher's mount", a
   );
   assert.equal(services.minted, undefined);
   assert.deepEqual(written, []);
+});
+
+test("a bound session the plane says its app does not reach is refused with which way", async () => {
+  const [{ unreached, told }] = credentialUnreachedCases;
+  const plane = planeOf([turnOne], facts, () => undefined, {
+    reason: "NotMinted",
+    unreached,
+  });
+  const { query } = queryOf(() => []);
+  const warned = [];
+
+  const code = await run({
+    request: plane.request,
+    query,
+    environment: boundEnvironment,
+    write: async () => assert.fail("a credential was written"),
+    warn: (text) => warned.push(text),
+    checkout: (checkoutTask, _repositories, files, workspace, services) =>
+      sessionCheckout(checkoutTask, credentialUnreadMap, files, workspace, {
+        ...services,
+        run: async () => assert.fail("a clone ran with no credential"),
+      }),
+  });
+
+  assert.equal(code, 1);
+  const said = warned.find((text) => text.includes(unreached.repository));
+  assert.ok(said, warned.join(""));
+  for (const phrase of told) assert.ok(said.includes(phrase), said);
 });
 
 test("a session binding no repository asks the plane for no credential", async () => {

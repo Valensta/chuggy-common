@@ -897,7 +897,8 @@ async function sessionTree(take, task, environment, credentialFiles, logging) {
  * The credential the plane mints for the repository this session was placed
  * against, or nothing where the session has no repository or the plane mints
  * none for it — a mirror the project does not bind among them, which is the
- * mounted credential's case exactly as before.
+ * mounted credential's case exactly as before; or `{unreached}` where the
+ * plane says which way its app does not reach it.
  */
 async function sessionMintedCredential(task, bearer, request, write) {
   if (task.repository === undefined) return undefined;
@@ -912,12 +913,25 @@ async function sessionMintedCredential(task, bearer, request, write) {
 }
 
 /**
+ * What the checkout is handed of the plane's answer for this session's
+ * repository: the credential it minted, or which way its app does not reach
+ * the repository where it said, or nothing.
+ */
+function sessionHeldCheckout(answered) {
+  if (answered === undefined) return {};
+  if (answered.unreached !== undefined)
+    return { unreached: answered.unreached };
+  return { minted: answered };
+}
+
+/**
  * Every secret this session holds as it starts — each the runtime's credential
  * holds and the whole of the file its launcher mounted it in, as a job holds
  * its own, the credential the plane minted for the repository it was placed
- * against, and its own bearer — and the scrub over them. `keepSecret` adds a
- * secret arriving later to the scrub every holder of `scrub` and `scrubHead`
- * already has.
+ * against, and its own bearer — and the scrub over them, with `checkout`, what
+ * the checkout is handed of the plane's answer. `keepSecret` adds a secret
+ * arriving later to the scrub every holder of `scrub` and `scrubHead` already
+ * has.
  */
 async function sessionHeld(context, environment, read, write, facts) {
   const { task, bearer, request } = context;
@@ -926,7 +940,9 @@ async function sessionHeld(context, environment, read, write, facts) {
     read,
     facts.credentialSlot,
   );
-  const minted = await sessionMintedCredential(task, bearer, request, write);
+  const checkout = sessionHeldCheckout(
+    await sessionMintedCredential(task, bearer, request, write),
+  );
   const { scrub, scrubHead, keepSecret } = credentialScrubbing([
     ...credential.secrets.map((value) => ({
       kind: sessionSecretKinds.credential,
@@ -934,14 +950,14 @@ async function sessionHeld(context, environment, read, write, facts) {
     })),
     { kind: sessionSecretKinds.mounted, value: text },
     { kind: sessionSecretKinds.bearer, value: bearer },
-    ...(minted === undefined
+    ...(checkout.minted === undefined
       ? []
-      : [{ kind: sessionSecretKinds.minted, value: minted.password }]),
+      : [{ kind: sessionSecretKinds.minted, value: checkout.minted.password }]),
   ]);
   return {
     credentialFiles: files,
     credential,
-    minted,
+    checkout,
     scrub,
     scrubHead,
     keepSecret,
@@ -1248,7 +1264,7 @@ export async function sessionMain(services = {}) {
     };
     const facts = await sessionFacts(context);
     const held = await sessionHeld(context, environment, read, write, facts);
-    const { credentialFiles, credential, minted, scrubHead, keepSecret } = held;
+    const { credentialFiles, credential, scrubHead, keepSecret } = held;
     scrub = held.scrub;
     Object.assign(context, { scrub, scrubHead, keepSecret });
     const workspace =
@@ -1263,7 +1279,7 @@ export async function sessionMain(services = {}) {
       {
         log: warn,
         scrub,
-        ...(minted === undefined ? {} : { minted }),
+        ...held.checkout,
       },
     );
     return await sessionRun(context, facts, {
