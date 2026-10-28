@@ -51,6 +51,7 @@ const settings = {
   supervisorMinted: "/supervisor",
   freeBytesMin: 1_024,
   stopGraceMs: 10,
+  clearWaitMs: 60_000,
   node: "/usr/bin/node",
   entrypoint: "/core/entrypoint.mjs",
   environment: {
@@ -97,7 +98,10 @@ function systemOf(overrides = {}) {
   const recorded =
     (name) =>
     async (...args) => {
-      calls.push([name, ...args]);
+      calls.push([
+        name,
+        ...args.filter((arg) => !(arg instanceof globalThis.AbortSignal)),
+      ]);
     };
   const system = {
     calls,
@@ -417,7 +421,38 @@ test("a session's user whose scattered leftovers could not be removed is not giv
   );
 });
 
+/** Catches a stop a host must wait on for as long as a session's directories take to empty. */
+test("a session's clear cut short by its bound still ends the session, and its user is not given out again", async () => {
+  const signals = [];
+  const system = systemOf({
+    emptied: (_path, _uid, signal) => {
+      signals.push(signal);
+      return new Promise((_resolve, reject) => {
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    },
+  });
+  const { sessions, logged } = await sessionsOf(system, { clearWaitMs: 20 });
+  const running = await sessions.prepared(assignment, envelope, live());
+
+  system.children[0].child.emit("exit", 0, null);
+
+  assert.equal(await running.ended, "Succeeded");
+  assert.equal(signals.length, 2);
+  assert.match(
+    logged.join(""),
+    /\[assignment-1 session-20000\] the removal of \/sessions\/session-20000 failed: .*timeout/u,
+  );
+  assert.match(logged.join(""), /its user is not given out again/u);
+  await sessions.prepared(assignment, envelope, live());
+  assert.ok(system.children[1].args.includes("--reuid=20001"));
+});
+
 /** Catches scattered leftovers removed while a process of the user may still be making more. */
+
 test("what a session scattered is not looked for while its processes may outlive the sweep", async () => {
   const system = systemOf({
     swept: async (uid) => {

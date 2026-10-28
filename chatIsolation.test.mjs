@@ -269,6 +269,7 @@ async function supervisorIn(place, uidCount = 2) {
       supervisorMinted: place("supervisor"),
       freeBytesMin: 1,
       stopGraceMs: 300,
+      clearWaitMs: 60_000,
       node: process.execPath,
       entrypoint: place("probe.mjs"),
       environment: {

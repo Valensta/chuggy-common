@@ -53,6 +53,7 @@ import {
   chatMirrorsOpened,
 } from "./chatCheckout.mjs";
 import {
+  chatSessionClearWaitMs,
   chatSessionEntrypoint,
   chatSessionFreeBytesMin,
   chatSessionStopGraceMs,
@@ -117,6 +118,7 @@ export function chatSupervisorSettings(environment) {
     groupCount: count(names.groupCount, chatMirrorGroupCount),
     freeBytesMin: chatSessionFreeBytesMin,
     stopGraceMs: chatSessionStopGraceMs,
+    clearWaitMs: chatSessionClearWaitMs,
     node: process.execPath,
     entrypoint: chatSessionEntrypoint,
     environment,

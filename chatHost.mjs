@@ -50,7 +50,10 @@ import { z } from "zod";
 import { chatHostBackend } from "./chatHostBackend.mjs";
 import { chatMirrorsDirectory } from "./chatCheckout.mjs";
 import {
+  chatSessionClearWaitMs,
   chatSessionStopGraceMs,
+  chatSessionSweepPauseMs,
+  chatSessionSweepsMax,
   chatSessionsDirectory,
 } from "./chatSession.mjs";
 import {
@@ -193,8 +196,18 @@ const chatHostReadyWaitMs = 5 * 60 * 1000;
 /** How long a supervisor whose input ended has to exit, above the grace each session it stops is given. */
 const chatHostExitWaitMs = 60 * 1000;
 
-/** How long a supervisor has to end a session it was told to stop: the session's grace, and the time to sweep its user after. */
-const chatHostStopWaitMs = chatSessionStopGraceMs + 20_000;
+/**
+ * How long a supervisor has to end a session it was told to stop: the
+ * session's grace, the sweep of its user once that has passed, and the
+ * bound on its clear, each as the supervisor gives it, above which is room
+ * for what neither bounds, such as giving up a preparation and telling the
+ * end. Killing a supervisor ends every session it runs, so this errs long.
+ */
+export const chatHostStopWaitMs =
+  chatSessionStopGraceMs +
+  chatSessionSweepsMax * chatSessionSweepPauseMs +
+  chatSessionClearWaitMs +
+  60_000;
 
 /** The wait between polls of a host with no room, which ask for an answer at once. */
 export const chatHostUnreadyWaitMs = 5_000;

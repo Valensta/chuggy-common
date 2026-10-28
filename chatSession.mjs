@@ -32,9 +32,13 @@
  * once no process of its user is left, everything it owns in the places every
  * user may write is removed as that user and every System V IPC object it
  * made is removed. Only then is the user free for another session and the
- * end told. A user any of that failed for is not given out again, and a
- * supervisor starting does the same for every user of its range, once none
- * has a process left, so nothing a predecessor's sessions left is the next's.
+ * end told. All of it is given `clearWaitMs`, past which what is left of it
+ * is cut short, so a stop is answered within a bound a host can wait out. A
+ * user any of that failed for, or was cut short for, is not given out again,
+ * and a supervisor starting does the same for every user of its range, once
+ * none has a process left, so nothing a predecessor's sessions left is the
+ * next's.
+
  *
  * The places every user may write are found when the supervisor starts,
  * once no session user's process is left: every directory any user may
@@ -164,10 +168,17 @@ const chatSessionLineBytesMax = 16 * 1024;
 const chatSessionCredentialBytesMax = 1024 * 1024;
 
 /** How often a session's user is swept before its processes are taken to be past killing. */
-const chatSessionSweepsMax = 16;
+export const chatSessionSweepsMax = 16;
 
 /** How long a sweep waits for what it killed to go before it looks again. */
-const chatSessionSweepPauseMs = 50;
+export const chatSessionSweepPauseMs = 50;
+
+/**
+ * How long a session's clear is given once its process has exited: its
+ * sweep, its directories emptied, and what it left in the places every user
+ * writes removed, each removal on the slowest volume a session may fill.
+ */
+export const chatSessionClearWaitMs = 5 * 60 * 1000;
 
 /** How long a look for the scratch places, or through them, or a removal from them, is given. */
 const chatSessionScratchTimeoutMs = 120_000;
@@ -333,27 +344,18 @@ export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
       });
       await chown(path, uid, uid);
     },
-    swept: (uid) => chatUserSwept(uid, asUser),
-    emptied: async (path, uid) => {
-      if (!(await chatSystemExists(path))) return;
-      await asUser(uid, [
-        "/bin/sh",
-        "-c",
-        'chmod -R u+rwX -- "$1"; find "$1" -mindepth 1 -delete',
-        "sh",
-        path,
-      ]);
-      await rmdir(path);
-    },
+    swept: (uid, signal) => chatUserSwept(uid, asUser, signal),
+    emptied: (path, uid, signal) =>
+      chatSystemEmptied(path, uid, asUser, signal),
     removed: (path) => rm(path, { recursive: true, force: true }),
     named: chatUsersNamed,
     scratchFound: async (settings) => scratch ?? chatScratchFound(settings),
-    scattered: async (uid, roots) => {
+    scattered: async (uid, roots, signal) => {
       const cleared = await Promise.allSettled([
-        chatScratchCleared(uid, roots, asUser),
+        chatScratchCleared(uid, roots, asUser, signal),
         chatSessionIpcCleared(uid, {
           read: (table) => readFile(table, "utf8").catch(() => undefined),
-          remove: (flag, id) => asUser(uid, ["ipcrm", flag, id]),
+          remove: (flag, id) => asUser(uid, ["ipcrm", flag, id], { signal }),
         }),
       ]);
       const failed = cleared.find(({ status }) => status === "rejected");
@@ -401,12 +403,13 @@ export function chatSessionMountsWalked(mounts) {
  * each once. Something gone between being listed and being looked at is
  * gone, not a failure; any other complaint fails the look.
  */
-export async function chatSessionScratchListed(starts, expression) {
+export async function chatSessionScratchListed(starts, expression, signal) {
   let stdout;
   try {
     ({ stdout } = await executeFile("find", [...starts, ...expression], {
       timeout: chatSessionScratchTimeoutMs,
       maxBuffer: chatSessionScratchBytesMax,
+      signal,
     }));
   } catch (failure) {
     const complaints = String(failure?.stderr ?? "")
@@ -468,11 +471,17 @@ async function chatScratchFound(settings) {
   ]);
 }
 
-/** Every process of `uid` killed as `uid`, looked for again until none is left or the sweeps run out. */
-async function chatUserSwept(uid, asUser) {
+/**
+ * Every process of `uid` killed as `uid`, looked for again until none is
+ * left, the sweeps run out or `signal` cuts it short.
+ */
+async function chatUserSwept(uid, asUser, signal) {
   for (let sweep = 0; sweep < chatSessionSweepsMax; sweep += 1) {
+    signal?.throwIfAborted();
     if ((await chatUserProcesses(uid)).length === 0) return;
-    await asUser(uid, ["/bin/sh", "-c", "kill -9 -1"]).catch(() => undefined);
+    await asUser(uid, ["/bin/sh", "-c", "kill -9 -1"], { signal }).catch(
+      () => undefined,
+    );
     await new Promise((resolve) =>
       globalThis.setTimeout(resolve, chatSessionSweepPauseMs),
     );
@@ -480,7 +489,28 @@ async function chatUserSwept(uid, asUser) {
   throw new Error(`the processes of user ${String(uid)} outlived a sweep`);
 }
 
+/**
+ * The directory `path` emptied as `uid` and removed, its removal given the
+ * bound a removal has and cut short by `signal`.
+ */
+async function chatSystemEmptied(path, uid, asUser, signal) {
+  if (!(await chatSystemExists(path))) return;
+  await asUser(
+    uid,
+    [
+      "/bin/sh",
+      "-c",
+      'chmod -R u+rwX -- "$1"; find "$1" -mindepth 1 -delete',
+      "sh",
+      path,
+    ],
+    { timeout: chatSessionScratchTimeoutMs, signal },
+  );
+  await rmdir(path);
+}
+
 /** Whether anything is at `path`. */
+
 async function chatSystemExists(path) {
   try {
     await lstat(path);
@@ -496,35 +526,39 @@ async function chatSystemExists(path) {
  * link, leaving a root's filesystem or entering a directory another user
  * owns, and removed as `uid`, so a link the user or another planted reaches
  * nothing `uid` could not remove itself. A directory it owns goes whole.
- * Anything left fails the clear.
+ * Anything left fails the clear, as does `signal` cutting it short.
  */
-async function chatScratchCleared(uid, roots, asUser) {
+async function chatScratchCleared(uid, roots, asUser, signal) {
   const present = [];
   for (const root of new Set(roots))
     if (await chatSystemExists(root)) present.push(root);
   if (present.length === 0) return;
   const found = () =>
-    chatSessionScratchListed(present, [
-      "-xdev",
-      "-ignore_readdir_race",
-      "-mindepth",
-      "1",
-      "(",
-      "-user",
-      String(uid),
-      "-prune",
-      "-print0",
-      ")",
-      "-o",
-      "(",
-      "-type",
-      "d",
-      "!",
-      "-user",
-      "0",
-      "-prune",
-      ")",
-    ]);
+    chatSessionScratchListed(
+      present,
+      [
+        "-xdev",
+        "-ignore_readdir_race",
+        "-mindepth",
+        "1",
+        "(",
+        "-user",
+        String(uid),
+        "-prune",
+        "-print0",
+        ")",
+        "-o",
+        "(",
+        "-type",
+        "d",
+        "!",
+        "-user",
+        "0",
+        "-prune",
+        ")",
+      ],
+      signal,
+    );
   const paths = await found();
   for (let at = 0; at < paths.length; at += chatSessionScratchBatch)
     await asUser(
@@ -536,7 +570,7 @@ async function chatScratchCleared(uid, roots, asUser) {
         "sh",
         ...paths.slice(at, at + chatSessionScratchBatch),
       ],
-      { timeout: chatSessionScratchTimeoutMs },
+      { timeout: chatSessionScratchTimeoutMs, signal },
     );
   if (paths.length > 0 && (await found()).length > 0)
     throw new Error(
@@ -700,20 +734,21 @@ async function chatSessionsUsersCleared(state) {
 
 /**
  * Everything of a session's gone, its user free again where it all went, and
- * held for good where some of it did not.
+ * held for good where some of it did not or `clearWaitMs` cut it short.
  */
 async function chatSessionCleared(state, place) {
   const { system, log } = state;
+  const signal = globalThis.AbortSignal.timeout(state.settings.clearWaitMs);
   const attempt = (what, step) =>
     chatSessionAttempted(state, place.label, what, step);
   let cleared = await attempt("the sweep of its processes", () =>
-    system.swept(place.uid),
+    system.swept(place.uid, signal),
   );
   for (const path of [place.workspace, place.minted])
     if (place.made.includes(path))
       cleared =
         (await attempt(`the removal of ${path}`, () =>
-          system.emptied(path, place.uid),
+          system.emptied(path, place.uid, signal),
         )) && cleared;
   cleared =
     (await attempt(`the removal of ${place.checkoutMinted}`, () =>
@@ -722,7 +757,7 @@ async function chatSessionCleared(state, place) {
   if (cleared)
     cleared = await attempt(
       "the removal of what it left in the places every user writes",
-      () => system.scattered(place.uid, state.scratch),
+      () => system.scattered(place.uid, state.scratch, signal),
     );
   if (cleared) state.held.delete(place.uid);
   else log(`[${place.label}] its user is not given out again\n`);

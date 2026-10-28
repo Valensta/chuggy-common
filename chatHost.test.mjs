@@ -27,10 +27,17 @@ import { workerRunnerPollWaitHeader } from "@chuggy/worker-contract/workerPool";
 import {
   chatHost,
   chatHostRestartBackoffMs,
+  chatHostStopWaitMs,
   chatHostUnreadyWaitMs,
   chatHostVolumes,
   chatSupervisorContainer,
 } from "./chatHost.mjs";
+import {
+  chatSessionClearWaitMs,
+  chatSessionStopGraceMs,
+  chatSessionSweepPauseMs,
+  chatSessionSweepsMax,
+} from "./chatSession.mjs";
 
 const bearer = "chgs_0123456789abcdef0123456789abcdef";
 
@@ -670,6 +677,16 @@ test("a container whose credentials a session's user could own or open another w
       () => chatSupervisorContainer(one, { ...places, ...changed }),
       why,
     );
+});
+
+/** Catches a host that kills a healthy supervisor, and every session it runs, for one stop it is still clearing. */
+test("a host waits on a stopped session longer than its supervisor may take to end it", () => {
+  assert.ok(
+    chatHostStopWaitMs >
+      chatSessionStopGraceMs +
+        chatSessionSweepsMax * chatSessionSweepPauseMs +
+        chatSessionClearWaitMs,
+  );
 });
 
 test("a host's volumes are its own", () => {
