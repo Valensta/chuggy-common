@@ -26,6 +26,20 @@
  * for it: it says so on its log, without the line, reads nothing more, and
  * ends as it would at the end of its input, exiting non-zero. A signal to end
  * is taken as the end of its input.
+ *
+ * THE PROTOCOL IS MORE THAN THE FRAMES. A host and a supervisor are built from
+ * cores released apart, and `chatProtocolVersion` names everything one hands
+ * the other: the frames, and the environment, mounts and tmpfs a host runs
+ * this supervisor with. The host names the protocol it speaks in
+ * `CHUG_CHAT_PROTOCOL`, which the supervisor reads before anything else, and
+ * exits refusing a host that names none or one not in
+ * `chatSupervisorProtocols`, saying which side to update. A supervisor's
+ * `Ready` names the same protocols, and a host ends one that lacks its own.
+ * So a change to any of that bumps the version, and the supervisor speaks the
+ * old one beside it, reading either shape, for one release window: a host
+ * and a supervisor a release apart then agree, and any further apart each
+ * refuses the other before a session is claimed. `chatProtocol.test.mjs`
+ * holds that shape against the version.
  */
 
 import process from "node:process";
@@ -66,6 +80,35 @@ import { envelopeTask } from "./entrypoint.mjs";
 import { planeCredential, sessionCredentialPath } from "./planeCredential.mjs";
 import { workerRepositories } from "./repository.mjs";
 import { sessionRequest } from "./sessionTransport.mjs";
+
+/**
+ * The protocols this supervisor speaks, newest last: the version, and in a
+ * release window the one before it, as the module says.
+ */
+export const chatSupervisorProtocols = Object.freeze([chatProtocolVersion]);
+
+/** Where the host names the protocol it speaks, which it sets beside every other variable. */
+export const chatSupervisorProtocolVariable = "CHUG_CHAT_PROTOCOL";
+
+/**
+ * Why this supervisor cannot follow the host whose environment is
+ * `environment`, naming the side to update, or nothing where it speaks the
+ * host's protocol.
+ *
+ * @param {Readonly<Record<string, string | undefined>>} environment
+ */
+export function chatSupervisorProtocolRefusal(environment) {
+  const named = environment[chatSupervisorProtocolVariable];
+  const spoken = /^[1-9]\d*$/u.test(named ?? "") ? Number(named) : undefined;
+  if (spoken !== undefined && chatSupervisorProtocols.includes(spoken))
+    return undefined;
+  const newest = chatSupervisorProtocols.at(-1) ?? chatProtocolVersion;
+  const side =
+    spoken !== undefined && spoken > newest
+      ? "update this image to one whose supervisor speaks it"
+      : "update the host's runner to one that speaks one of these";
+  return `this image's supervisor speaks protocol(s) [${chatSupervisorProtocols.join(", ")}]; the host speaks ${named === undefined || named.length === 0 ? "none" : named}: run matching versions; ${side}`;
+}
 
 /**
  * The variables a supervisor's places and bounds are read from, each its
@@ -305,7 +348,7 @@ export function chatSupervised({
   });
   chatSupervisorWritten(state, {
     frame: "Ready",
-    protocols: [chatProtocolVersion],
+    protocols: [...chatSupervisorProtocols],
     sessionsMax,
     contractRelease: workerContractRelease,
   });
@@ -364,6 +407,11 @@ function chatSupervisorCheckout(environment, mirrors) {
 /** The supervisor as its image starts it, on its own standard streams. */
 export async function chatSupervisorMain(environment = process.env) {
   const log = (text) => process.stderr.write(text);
+  const refused = chatSupervisorProtocolRefusal(environment);
+  if (refused !== undefined) {
+    log(`${refused}\n`);
+    return 1;
+  }
   const settings = chatSupervisorSettings(environment);
   const mirrors = await chatMirrorsOpened({
     root: settings.mirrorsRoot,

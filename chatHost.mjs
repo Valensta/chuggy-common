@@ -45,6 +45,7 @@ import { lstat, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import process from "node:process";
 
+import { chatProtocolVersion } from "@chuggy/worker-contract/chatHost";
 import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
 
@@ -64,6 +65,8 @@ import {
   chatSessionsDirectory,
 } from "./chatSession.mjs";
 import {
+  chatSupervisorProtocolRefusal,
+  chatSupervisorProtocolVariable,
   chatSupervisorSettings,
   chatSupervisorVariables,
 } from "./chatSupervisor.mjs";
@@ -335,6 +338,7 @@ function chatSupervisorCredentialMount(file) {
 function chatSupervisorEnvironment(places, mount) {
   const names = chatSupervisorVariables;
   const environment = {
+    [chatSupervisorProtocolVariable]: String(chatProtocolVersion),
     ...chatSupervisorCounts(places),
     [names.credential]: mount.file,
     [names.credentialUid]: String(places.credentialOwner.uid),
@@ -344,6 +348,8 @@ function chatSupervisorEnvironment(places, mount) {
       ? {}
       : { [workerRepositoriesVariable]: places.repositories }),
   };
+  const refused = chatSupervisorProtocolRefusal(environment);
+  if (refused !== undefined) throw new RangeError(refused);
   chatSupervisorSettings(environment);
   return environment;
 }

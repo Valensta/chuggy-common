@@ -717,8 +717,9 @@ test("a supervisor's container is root with the capabilities it needs and none t
   });
 });
 
-test("a supervisor's container is told its counts, the credential's file and owner, and the site's", () => {
+test("a supervisor's container is told the protocol its host speaks, its counts, the credential's file and owner, and the site's", () => {
   assert.deepEqual(supervisorContainerOf().environment, {
+    CHUG_CHAT_PROTOCOL: String(chatProtocolVersion),
     CHUG_CHAT_SESSIONS_MAX: "4",
     CHUG_CHAT_CREDENTIAL: "/var/run/chuggy/credentials/provider/claude.json",
     CHUG_CHAT_CREDENTIAL_UID: "1000",
