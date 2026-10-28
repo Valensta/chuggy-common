@@ -417,7 +417,13 @@ async function sourcePushDiscarded(made) {
   }
 }
 
-/** The commit everything the attempt changed is in, refused where it carries a held secret. */
+/**
+ * The commit everything the attempt changed is in, refused where it carries a
+ * held secret. What is left staged is committed on top of `HEAD`; where
+ * nothing is, a `HEAD` past `base` is that commit as it stands, and a `HEAD`
+ * still at `base` gets an empty one, declaring that the attempt found nothing
+ * left to do.
+ */
 async function sourceCommitted({
   task,
   base,
@@ -441,16 +447,24 @@ async function sourceCommitted({
   if (provisioned.length > 0) {
     await command("git", ["reset", "--", ...provisioned], local);
   }
-  await command(
+  const { stdout: staged } = await command("git", ["write-tree"], local);
+  const { stdout: head } = await command(
     "git",
-    [
-      "commit",
-      "--allow-empty",
-      "-m",
-      `ticket ${String(task.ticket)} attempt ${task.attempt}`,
-    ],
+    ["rev-parse", "HEAD", "HEAD^{tree}"],
     local,
   );
+  const [authored, tree] = head.trim().split("\n");
+  if (staged.trim() !== tree || authored === base)
+    await command(
+      "git",
+      [
+        "commit",
+        "--allow-empty",
+        "-m",
+        `ticket ${String(task.ticket)} attempt ${task.attempt}`,
+      ],
+      local,
+    );
   const { stdout } = await command("git", ["rev-parse", "HEAD"], local);
   const commit = stdout.trim();
   const carried =
