@@ -12,6 +12,15 @@
  * from is refused in docker 28's words, as its classic store refuses it once
  * every other name is gone.
  *
+ * AN IMAGE IS FOR ONE PLATFORM, `fakeImagePlatformDefault` where
+ * `imagePlatforms` names none for its id, as docker 28's classic store holds
+ * one variant by a name: a pull for another platform makes the name name
+ * another image, and a `run --platform` or an `image inspect --platform` of a
+ * name held for another refuses it in that store's words. Where
+ * `containerdStore` is set an image holds `imageVariants` too, as that store
+ * holds several: a pull for another platform adds it there, a plain
+ * inspection still answers the first, and a refusal is in that store's words.
+ *
  * A CONTAINER'S MEMORY is the cap `--memory` ran it with, which an inspection
  * answers as docker's `HostConfig.Memory`, and what `stats` prints it uses,
  * which is `usedBytes`, in docker's binary units. `info` answers the engine's
@@ -207,6 +216,24 @@ function fakeEngineState() {
      */
     imageIds: new Map(),
     /**
+     * The platform an image is for, by its id, where it is not
+     * `fakeImagePlatformDefault`.
+     *
+     * @type {Map<string, string>}
+     */
+    imagePlatforms: new Map(),
+    /**
+     * The other platforms an image is held for, by its id, where
+     * `containerdStore` is set.
+     *
+     * @type {Map<string, string[]>}
+     */
+    imageVariants: new Map(),
+    /** Whether the engine holds several platforms of an image, as docker's containerd store does. */
+    containerdStore: false,
+    /** Whether `image inspect` takes no `--platform`, as docker's before 28.1 does not. */
+    inspectPlatformUnknown: false,
+    /**
      * When an image was built, by its id, where it is not the start of 2026.
      *
      * @type {Map<string, string>}
@@ -319,6 +346,9 @@ function filled(state, call, image) {
       `docker: Error response from daemon: No such image: ${image}`,
       125,
     );
+  const [platform] = flagValues(call.argv, "--platform");
+  if (platform !== undefined && !fakeImageHeldFor(state, image, platform))
+    return failed(`docker: ${platformRefused(state, image, platform)}`, 125);
   const id = `c${String(state.nextId++).padStart(63, "0")}`;
   const [name = id] = flagValues(call.argv, "--name");
   const volumes = flagValues(call.argv, "--volume");
@@ -463,7 +493,28 @@ function pulled(state, call) {
     call.authFile = readFileSync(auth, "utf8");
     call.authDirectory = dirname(auth);
   }
-  return state.pull(call.argv.at(-1) ?? "", call);
+  const image = call.argv.at(-1) ?? "";
+  const [platform] = flagValues(call.argv, "--platform");
+  return Promise.resolve(state.pull(image, call)).then((pull) => {
+    if (
+      pull.code !== 0 ||
+      platform === undefined ||
+      fakeImageHeldFor(state, image, platform)
+    )
+      return pull;
+    if (state.containerdStore) {
+      const id = fakeImageId(state, image);
+      state.imageVariants.set(id, [
+        ...(state.imageVariants.get(id) ?? []),
+        platform,
+      ]);
+      return pull;
+    }
+    const id = fakeImageId(state, `${image} for ${platform}`);
+    state.imageIds.set(image, id);
+    state.imagePlatforms.set(id, platform);
+    return pull;
+  });
 }
 
 /**
@@ -641,6 +692,77 @@ export function fakeImageId(state, name) {
   );
 }
 
+/** The platform of an image `imagePlatforms` names none for. */
+export const fakeImagePlatformDefault = "linux/amd64";
+
+/**
+ * The platform the image a name or an id names is for.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} reference
+ */
+export function fakeImagePlatform(state, reference) {
+  const id = state.images.has(reference)
+    ? fakeImageId(state, reference)
+    : reference;
+  return state.imagePlatforms.get(id) ?? fakeImagePlatformDefault;
+}
+
+/**
+ * Whether the image a name or an id names is held for a platform.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} reference
+ * @param {string} platform
+ */
+export function fakeImageHeldFor(state, reference, platform) {
+  const id = state.images.has(reference)
+    ? fakeImageId(state, reference)
+    : reference;
+  return [
+    fakeImagePlatform(state, reference),
+    ...(state.imageVariants.get(id) ?? []),
+  ].some((held) => fakePlatformMatched(held, platform));
+}
+
+/**
+ * What the engine says of a name held for no variant of a platform, in the
+ * words of its store.
+ *
+ * @param {FakeEngineState} state
+ * @param {string} image
+ * @param {string} platform
+ */
+function platformRefused(state, image, platform) {
+  return state.containerdStore
+    ? `Error response from daemon: image with reference ${image} was found but does not provide the specified platform (${platform})`
+    : `Error response from daemon: image with reference ${image} was found but its platform (${fakeImagePlatform(state, image)}) does not match the specified platform (${platform})`;
+}
+
+/**
+ * Whether an image for one platform is one for another, as docker's matcher
+ * takes a variant only one of them names for its architecture's default.
+ *
+ * @param {string} held
+ * @param {string} wanted
+ */
+function fakePlatformMatched(held, wanted) {
+  const [heldSystem, heldVariant] = [
+    held.split("/").slice(0, 2).join("/"),
+    held.split("/")[2],
+  ];
+  const [wantedSystem, wantedVariant] = [
+    wanted.split("/").slice(0, 2).join("/"),
+    wanted.split("/")[2],
+  ];
+  return (
+    heldSystem === wantedSystem &&
+    (heldVariant === undefined ||
+      wantedVariant === undefined ||
+      heldVariant === wantedVariant)
+  );
+}
+
 /**
  * The names of the image of this id.
  *
@@ -657,10 +779,14 @@ function imageNames(state, id) {
  * @param {FakeEngineState} state
  * @param {string} id
  */
-function imageInspected(state, id) {
+function imageInspected(state, id, platform = fakeImagePlatform(state, id)) {
   const names = imageNames(state, id);
+  const [Os, Architecture, Variant] = platform.split("/");
   return {
     Id: id,
+    Os,
+    Architecture,
+    ...(Variant === undefined ? {} : { Variant }),
     RepoTags: names.filter((name) => !name.includes("@")),
     RepoDigests: names.filter((name) => name.includes("@")),
     Created: state.imageCreated.get(id) ?? "2026-01-01T00:00:00Z",
@@ -692,8 +818,8 @@ function imageRemoved(state, name) {
 }
 
 /**
- * `image inspect`, by `--format {{.Id}}` of one name or whole by ids, `image
- * ls` and `image rm`.
+ * `image inspect`, by `--format {{.Id}}` of one name, by `--platform` of one,
+ * or whole by names or ids, `image ls` and `image rm`.
  *
  * @param {FakeEngineState} state
  * @param {FakeCall} call
@@ -713,10 +839,30 @@ function imaged(state, call) {
       ? answered(`${fakeImageId(state, name)}\n`)
       : failed(`Error response from daemon: No such image: ${name}`);
   }
-  const absent = rest.find((id) => imageNames(state, id).length === 0);
+  if (rest[0] === "--platform") {
+    const [, platform, name] = rest;
+    if (state.inspectPlatformUnknown)
+      return failed(
+        "unknown flag: --platform\nSee 'docker image inspect --help'.",
+        125,
+      );
+    if (!state.images.has(name))
+      return failed(`Error response from daemon: No such image: ${name}`);
+    if (!fakeImageHeldFor(state, name, platform))
+      return failed(platformRefused(state, name, platform));
+    return answered(
+      `${JSON.stringify([imageInspected(state, fakeImageId(state, name), platform)])}\n`,
+    );
+  }
+  const ids = rest.map((reference) =>
+    state.images.has(reference) ? fakeImageId(state, reference) : reference,
+  );
+  const absent = rest.find(
+    (_, index) => imageNames(state, ids[index]).length === 0,
+  );
   const stdout = `${JSON.stringify(
-    rest
-      .filter((id) => id !== absent && imageNames(state, id).length > 0)
+    ids
+      .filter((id) => imageNames(state, id).length > 0)
       .map((id) => imageInspected(state, id)),
   )}\n`;
   return absent === undefined

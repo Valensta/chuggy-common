@@ -145,9 +145,20 @@ export function imageListArgv() {
   return ["image", "ls", "--quiet", "--no-trunc"];
 }
 
-/** @param {readonly string[]} images each by id */
+/** @param {readonly string[]} images each by id or name */
 export function imageInspectManyArgv(images) {
   return ["image", "inspect", ...images];
+}
+
+/**
+ * An image's variant for one platform, which docker answers from 28.1, and
+ * podman never.
+ *
+ * @param {string} image
+ * @param {string} platform
+ */
+export function imageInspectPlatformArgv(image, platform) {
+  return ["image", "inspect", "--platform", platform, image];
 }
 
 /**
@@ -183,13 +194,23 @@ export function dockerDiskUsageArgv() {
 }
 
 /**
+ * What a pull names of the platform it pulls for.
+ *
+ * @param {string | undefined} platform
+ */
+function pullArgvPlatform(platform) {
+  return platform === undefined ? [] : ["--platform", platform];
+}
+
+/**
  * A pull as the engine's own configuration makes it, under whatever logins,
  * credential helpers and endpoint the runner's user and environment give it.
  *
  * @param {string} image
+ * @param {string} [platform] the one variant of a multi-platform image it pulls; none, and the engine's own
  */
-export function pullArgv(image) {
-  return ["pull", "--quiet", image];
+export function pullArgv(image, platform) {
+  return ["pull", "--quiet", ...pullArgvPlatform(platform), image];
 }
 
 /**
@@ -206,16 +227,23 @@ export function pullArgv(image) {
  * @param {string} image
  * @param {string} authDirectory
  * @param {string | undefined} dockerHost the endpoint `dockerContextArgv` answered; docker's alone
+ * @param {string} [platform] as `pullArgv` takes it
  * @returns {{argv: string[], environment: Record<string, string>}}
  */
-export function poolPullArgv(engine, image, authDirectory, dockerHost) {
+export function poolPullArgv(
+  engine,
+  image,
+  authDirectory,
+  dockerHost,
+  platform,
+) {
   if (engine === "docker") {
     if (dockerHost === undefined)
       throw new RangeError(
         "a docker pull under the pool's token needs the endpoint its context names",
       );
     return {
-      argv: pullArgv(image),
+      argv: pullArgv(image, platform),
       environment: {
         DOCKER_CONFIG: authDirectory,
         DOCKER_HOST: dockerHost,
@@ -227,6 +255,7 @@ export function poolPullArgv(engine, image, authDirectory, dockerHost) {
     argv: [
       "pull",
       "--quiet",
+      ...pullArgvPlatform(platform),
       "--authfile",
       join(authDirectory, registryAuthFile),
       image,
@@ -472,15 +501,20 @@ export function runtimeVolumeCreateArgv(volume, pool, assignment, fill) {
  * the copy's own node, from the volume, so a runtime left unfilled fails the
  * fill, and what that node does is open the workspace, which only the
  * volume's owner may. That owner is the engine's root, so this container runs
- * as root, with no capability, no privilege escalation and no network.
+ * as root, with no capability, no privilege escalation and no network. The
+ * copy is the runtime's variant for `platform`, which an engine holding the
+ * image only for another refuses to run rather than run that one.
  *
  * @param {RuntimeVolumes} volumes
  * @param {string} runtime the runtime image
+ * @param {string} platform the job's image's
  */
-export function runtimeFillArgv(volumes, runtime) {
+export function runtimeFillArgv(volumes, runtime, platform) {
   return [
     "run",
     "--rm",
+    "--platform",
+    platform,
     "--pull=never",
     "--name",
     volumes.fill,

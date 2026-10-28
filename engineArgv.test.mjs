@@ -11,6 +11,7 @@ import {
   heldListArgv,
   imageInspectArgv,
   imageInspectManyArgv,
+  imageInspectPlatformArgv,
   imageListArgv,
   imageContainersArgv,
   imageRemoveArgv,
@@ -351,7 +352,7 @@ test("a job given runtime volumes is labelled with them, mounts each uncopied, t
   }
 });
 
-test("a runtime volume is made labelled by its pool, assignment and fill, filled by that named container with the runtime image's own copy, whose node opens the workspace as a root holding nothing, and removed by name", () => {
+test("a runtime volume is made labelled by its pool, assignment and fill, filled by that named container with the runtime image's own copy for the job's image's platform, whose node opens the workspace as a root holding nothing, and removed by name", () => {
   assert.deepEqual(
     runtimeVolumeCreateArgv(
       volumes.volume,
@@ -371,9 +372,11 @@ test("a runtime volume is made labelled by its pool, assignment and fill, filled
       volumes.volume,
     ],
   );
-  assert.deepEqual(runtimeFillArgv(volumes, runtime), [
+  assert.deepEqual(runtimeFillArgv(volumes, runtime, "linux/arm64"), [
     "run",
     "--rm",
+    "--platform",
+    "linux/arm64",
     "--pull=never",
     "--name",
     volumes.fill,
@@ -478,12 +481,46 @@ test("a pull of the pool's registry reads its credential from DOCKER_CONFIG, tol
   ]);
 });
 
+test("a pull for a platform names it, the engine's own and either engine's under the pool's token alike", () => {
+  const directory = "/run/user/1000/chuggy-runner/pull-x";
+  assert.deepEqual(pullArgv(image, "linux/arm64/v8"), [
+    "pull",
+    "--quiet",
+    "--platform",
+    "linux/arm64/v8",
+    image,
+  ]);
+  assert.deepEqual(
+    poolPullArgv(
+      "docker",
+      image,
+      directory,
+      "unix:///run/user/1000/docker.sock",
+      "linux/arm64/v8",
+    ).argv,
+    pullArgv(image, "linux/arm64/v8"),
+  );
+  assert.deepEqual(
+    poolPullArgv("podman", image, directory, undefined, "linux/arm64/v8").argv,
+    [
+      "pull",
+      "--quiet",
+      "--platform",
+      "linux/arm64/v8",
+      "--authfile",
+      `${directory}/config.json`,
+      image,
+    ],
+  );
+});
+
 test("every other call is handed to either engine as this argv", () => {
   assert.deepEqual(
     [
       imageInspectArgv(image),
       imageListArgv(),
       imageInspectManyArgv(["sha256:1", "sha256:2"]),
+      imageInspectPlatformArgv(image, "linux/arm64/v8"),
       imageRemoveArgv(image),
       listArgv("vteng/chuggy/shame"),
       listArgv("vteng/chuggy/shame", "asg-1"),
@@ -503,6 +540,7 @@ test("every other call is handed to either engine as this argv", () => {
       ["image", "inspect", "--format", "{{.Id}}", image],
       ["image", "ls", "--quiet", "--no-trunc"],
       ["image", "inspect", "sha256:1", "sha256:2"],
+      ["image", "inspect", "--platform", "linux/arm64/v8", image],
       ["image", "rm", image],
       [
         "ps",
