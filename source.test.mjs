@@ -693,7 +693,7 @@ test("an attempt that declares no empty commit pushes what it changed to its bra
     await writeFile(join(directory, "left"), "over\n");
 
     const { source } = await publishedFrom(checkout, undefined, {
-      emptyDeclared: false,
+      candidate: false,
     });
 
     assert.equal(source.ref, ticketBranch({ ticket: 9, attempt: "opaque" }));
@@ -725,7 +725,7 @@ test("an attempt that declares no empty commit and changed nothing pushes nothin
         attempt: "opaque",
         worker: { files: [{ path: "provisioned.json" }] },
       },
-      emptyDeclared: false,
+      candidate: false,
     });
 
     assert.equal(source, undefined);
@@ -857,6 +857,104 @@ async function agentCommitted(directory, path, content) {
   });
   return headOf(directory);
 }
+
+/**
+ * `checkout` with its base one commit past the one it was made with, which is
+ * `below`, and a branch `target` at a commit made on `below` that the base
+ * does not have, as a target that moved on would hold.
+ */
+async function rewritableCheckout(checkout) {
+  const { directory } = checkout;
+  const below = checkout.base;
+  const base = await agentCommitted(directory, "base", "started\n");
+  await git("git", ["checkout", "--quiet", "-b", "target", below], {
+    cwd: directory,
+  });
+  await agentCommitted(directory, "target", "moved on\n");
+  await git("git", ["checkout", "--quiet", "-"], { cwd: directory });
+  return { ...checkout, base, below };
+}
+
+/** Asserts `refused` is a candidate refused for not descending from `base`, and that nothing left the checkout. */
+async function assertRewrittenRefused(checkout, { refused, asked }) {
+  assert.ok(refused instanceof Error, "a rewritten history was pushed");
+  assert.equal(refused.evidence, runCommitFailed);
+  assert.equal(
+    refused.message,
+    `commit ${await headOf(checkout.directory)} does not descend from ${checkout.base}, the commit this attempt started from: the history below it was rewritten, so the attempt pushes nothing. Add commits on top of ${checkout.base} instead, merging the target in rather than rebasing onto it.`,
+  );
+  assert.equal(
+    asked.refreshes,
+    0,
+    "a credential was minted for a refused push",
+  );
+  assert.equal(await remoteRefs(checkout.remote), "");
+}
+
+/**
+ * Catches a candidate pushed from an attempt that rebased its base onto a
+ * newer target: it no longer descends from the base it is published with,
+ * and no candidate can be built from it.
+ */
+test("a candidate rebased below its base is refused, and nothing is pushed", async () => {
+  await inCheckout(async (made) => {
+    const checkout = await rewritableCheckout(made);
+    await agentCommitted(checkout.directory, "change", "made\n");
+    await git(
+      "git",
+      [...author, "rebase", "--quiet", "--onto", "target", checkout.below],
+      { cwd: checkout.directory },
+    );
+
+    const { asked, source } = await publishedFrom(checkout);
+
+    await assertRewrittenRefused(checkout, { refused: source, asked });
+  });
+});
+
+/** Catches a candidate pushed from an attempt that squashed its base into its own commit. */
+test("a candidate squashed below its base is refused, and nothing is pushed", async () => {
+  await inCheckout(async (made) => {
+    const checkout = await rewritableCheckout(made);
+    await agentCommitted(checkout.directory, "change", "made\n");
+    await git("git", ["reset", "--soft", checkout.below], {
+      cwd: checkout.directory,
+    });
+    await git("git", [...author, "commit", "--quiet", "-m", "squashed"], {
+      cwd: checkout.directory,
+    });
+
+    const { asked, source } = await publishedFrom(checkout);
+
+    await assertRewrittenRefused(checkout, { refused: source, asked });
+  });
+});
+
+/**
+ * Catches a check that refuses what it should pass: a newer target merged in
+ * on top of the base, after a commit of the agent's own, keeps the base an
+ * ancestor, and the candidate is pushed as it stands.
+ */
+test("a candidate that merged a newer target in on top of its base is pushed", async () => {
+  await inCheckout(async (made) => {
+    const checkout = await rewritableCheckout(made);
+    await agentCommitted(checkout.directory, "change", "made\n");
+    await git("git", [...author, "merge", "--quiet", "--no-edit", "target"], {
+      cwd: checkout.directory,
+    });
+    const merged = await headOf(checkout.directory);
+
+    const { source } = await publishedFrom(checkout);
+
+    assert.ok(!(source instanceof Error), String(source.message));
+    assert.equal(source.commit, merged);
+    assert.equal(source.base, checkout.base);
+    const { stdout: pushed } = await git("git", ["rev-parse", source.ref], {
+      cwd: checkout.remote,
+    });
+    assert.equal(pushed.trim(), merged);
+  });
+});
 
 /**
  * The check reads every commit the push adds, and names the first to carry

@@ -1065,7 +1065,9 @@ test("the manifest the pod reports is one the contract's manifest schema reads",
                 ...options,
                 env: { PATH: process.env.PATH ?? "", ...options.env },
               })
-            : { stdout: `${"a".repeat(40)}\n` },
+            : {
+                stdout: args.includes("rev-list") ? "" : `${"a".repeat(40)}\n`,
+              },
       },
       {
         repositoryId: "repository-1",

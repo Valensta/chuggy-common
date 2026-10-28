@@ -223,9 +223,14 @@ async function sourceSecretCarried(directory, base, head, secrets) {
 }
 
 /**
- * The branch one work attempt leaves behind: a passing attempt's candidate, or
- * what a failing one changed, kept for whoever reads the attempt. Nothing
- * where `emptyDeclared` is false and the attempt changed nothing.
+ * The branch one work attempt leaves behind: a passing attempt's candidate,
+ * where `candidate`, or what a failing one changed, kept for whoever reads the
+ * attempt. Nothing where it is not a candidate and the attempt changed nothing.
+ *
+ * A CANDIDATE DESCENDS FROM `base`. One whose history below `base` the attempt
+ * rewrote, by a rebase, a squash or an amend, is refused before the remote is
+ * reached, since no candidate can be built from it. A failing attempt's branch
+ * is never read as a candidate, so what it keeps is kept whatever its history.
  *
  * NOTHING HELD IS PUSHED. `secrets` is every `{ kind, value }` the pod scrubs
  * from what it uploads, and a commit carrying one of them is refused before the
@@ -267,9 +272,10 @@ async function sourceSecretCarried(directory, base, head, secrets) {
  * push is tried again as `gitRemote.mjs` says, under that one credential and
  * from that one repository, with `pause` between tries.
  *
- * EACH HALF IS A STEP. A failure up to and including the secret check fails
- * the commit step, and one making the repository the push is made from,
- * taking the credential or pushing fails the push step.
+ * EACH HALF IS A STEP. A failure up to and including the secret check and,
+ * for a candidate, the descent check fails the commit step, and one making the
+ * repository the push is made from, taking the credential or pushing fails the
+ * push step.
  */
 export async function commitAndPushSource({
   task,
@@ -283,7 +289,7 @@ export async function commitAndPushSource({
   secrets,
   git = [],
   pause,
-  emptyDeclared = true,
+  candidate = true,
 }) {
   if (!Array.isArray(secrets))
     throw new Error("a push is checked against the secrets the pod holds");
@@ -297,7 +303,7 @@ export async function commitAndPushSource({
         command,
         secrets,
         git,
-        emptyDeclared,
+        candidate,
       }),
     gitFailureLine,
   );
@@ -432,10 +438,11 @@ async function sourcePushDiscarded(made) {
 
 /**
  * The commit everything the attempt changed is in, refused where it carries a
- * held secret. What is left staged is committed on top of `HEAD`; where
- * nothing is, a `HEAD` past `base` is that commit as it stands, and a `HEAD`
- * still at `base` gets an empty one where `emptyDeclared`, declaring that the
- * attempt found nothing left to do, and is nothing where not.
+ * held secret or, as a candidate, does not descend from `base`. What is left
+ * staged is committed on top of `HEAD`; where nothing is, a `HEAD` past `base`
+ * is that commit as it stands, and a `HEAD` still at `base` gets an empty one
+ * where it is a candidate, declaring that the attempt found nothing left to
+ * do, and is nothing where not.
  */
 async function sourceCommitted({
   task,
@@ -444,7 +451,7 @@ async function sourceCommitted({
   command,
   secrets,
   git,
-  emptyDeclared,
+  candidate,
 }) {
   const local = {
     cwd: directory,
@@ -469,7 +476,7 @@ async function sourceCommitted({
   );
   const [authored, tree] = head.trim().split("\n");
   const unchanged = staged.trim() === tree;
-  if (unchanged && authored === base && !emptyDeclared) return undefined;
+  if (unchanged && authored === base && !candidate) return undefined;
   if (!unchanged || authored === base)
     await command(
       "git",
@@ -491,5 +498,23 @@ async function sourceCommitted({
     throw new Error(
       `commit ${carried.commit} carries ${carried.kind} in ${carried.place}, so the attempt pushes nothing`,
     );
+  if (candidate) await sourceDescended(directory, base, commit, command);
   return commit;
+}
+
+/**
+ * Refuses `commit` where `base` is not among its ancestors, saying what the
+ * next attempt does instead. Replacement refs are ignored, as the push ignores
+ * them.
+ */
+async function sourceDescended(directory, base, commit, command) {
+  const { stdout: missing } = await command(
+    "git",
+    ["--no-replace-objects", "rev-list", "--max-count=1", base, `^${commit}`],
+    { cwd: directory, env: workerStageEnvironment(process.env) },
+  );
+  if (missing.trim() !== "")
+    throw new Error(
+      `commit ${commit} does not descend from ${base}, the commit this attempt started from: the history below it was rewritten, so the attempt pushes nothing. Add commits on top of ${base} instead, merging the target in rather than rebasing onto it.`,
+    );
 }
