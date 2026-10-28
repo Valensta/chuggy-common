@@ -438,8 +438,9 @@ async function runCheckCommand(command, room, services) {
  * A command's output within `units` code units: everything, while it fits, and
  * otherwise its head and a rolling tail of what came last, joined by the
  * dropped marker where the marker fits, so the capture still ends where the
- * command did. The tail is cut before it is added to, so neither half is ever
- * held longer than its own room.
+ * command did. Until output is dropped the head also holds the marker's room,
+ * and gives it up when the tail first drops something. The tail is cut before
+ * it is added to, so the two together never hold more than `units`.
  */
 function checkCapture(units) {
   const marker = units >= checkCaptureMarker.length ? checkCaptureMarker : "";
@@ -451,14 +452,17 @@ function checkCapture(units) {
   let truncated = false;
   return {
     take(chunk) {
-      const taken = headOpen ? checkHead(chunk, headUnits - head.length) : "";
+      const room = units - tailUnits - head.length;
+      const taken = headOpen ? checkHead(chunk, room) : "";
       head += taken;
-      const rest = checkTail(chunk.slice(taken.length), tailUnits);
       if (taken.length === chunk.length) return;
       headOpen = false;
+      const rest = checkTail(chunk.slice(taken.length), tailUnits);
       const kept = checkTail(tail, tailUnits - rest.length);
-      truncated ||=
+      const dropped =
         kept.length + rest.length < tail.length + chunk.length - taken.length;
+      if (dropped && !truncated) head = checkHead(head, headUnits);
+      truncated ||= dropped;
       tail = kept + rest;
     },
     kept: () => ({

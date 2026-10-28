@@ -254,6 +254,28 @@ test("a chatty command's capture keeps its start and its real ending", async () 
   assert.ok(result.summary.endsWith("chatter FINAL LINE"), result.summary);
 });
 
+test("a command's output exactly at the bound is captured whole", async () => {
+  const command = `yes x | head -c ${String(workerCheckOutputCharsMax)}`;
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, false);
+  const whole = "x\n".repeat(workerCheckOutputCharsMax);
+  assert.equal(
+    output.checks[0].output,
+    whole.slice(0, workerCheckOutputCharsMax),
+  );
+});
+
+test("a command's output just past the bound is marked and still bounded", async () => {
+  const command = `yes x | head -c ${String(workerCheckOutputCharsMax)}; echo END`;
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, true);
+  assert.ok(output.checks[0].output.length <= workerCheckOutputCharsMax);
+  assert.ok(output.checks[0].output.includes("[capture dropped output here]"));
+  assert.ok(output.checks[0].output.endsWith("x\nEND\n"));
+});
+
 test("a capture cut through astral output lands on code points", async () => {
   const wide = "\u{1F600}";
   const command = `yes ${wide} | head -c ${String(workerCheckOutputCharsMax * 8)}`;
