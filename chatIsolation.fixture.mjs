@@ -11,6 +11,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   statSync,
@@ -96,7 +97,33 @@ function probed(targets) {
     ),
     otherMirror: went(() => readdirSync(targets.otherMirror)),
     credential: went(() => readFileSync(targets.credential)),
+    ...scattered(targets),
   };
+}
+
+/**
+ * What `targets` asks to be left behind in the places every user writes,
+ * each file under its own directory there too, and System V IPC objects,
+ * and whether what it asks to be looked for is there.
+ */
+function scattered(targets) {
+  const said = {};
+  if (targets.scatter !== undefined) {
+    for (const path of targets.scatter) {
+      writeFileSync(path, "left");
+      mkdirSync(`${path}.d`);
+      writeFileSync(join(`${path}.d`, "inner"), "left");
+    }
+    said.scattered = went(() => {
+      execFileSync("ipcmk", ["--shmem", "4096"], { stdio: "ignore" });
+      execFileSync("ipcmk", ["--queue"], { stdio: "ignore" });
+    });
+  }
+  if (targets.seek !== undefined)
+    said.found = targets.seek.flatMap((path) =>
+      [path, `${path}.d`].filter((each) => existsSync(each)),
+    );
+  return said;
 }
 
 const asked = join(workspace, "probe.json");

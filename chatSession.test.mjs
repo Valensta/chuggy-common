@@ -111,6 +111,7 @@ function systemOf(overrides = {}) {
     swept: recorded("swept"),
     emptied: recorded("emptied"),
     removed: recorded("removed"),
+    scattered: recorded("scattered"),
     ...overrides,
   };
   return system;
@@ -299,9 +300,91 @@ test("a session that ends is cleared as its user before its end is told, and its
     ["emptied", "/sessions/session-20000", 20_000],
     ["emptied", "/minted/session-20000", 20_000],
     ["removed", "/supervisor/session-20000"],
+    ["scattered", 20_000],
   ]);
   await sessions.prepared(envelope, live());
   assert.ok(system.children[2].args.includes("--reuid=20000"));
+});
+
+/** Catches a user given out again at once, where one that has rested since is free. */
+test("users are given out in turn, a free one only once those after it have been", async () => {
+  const system = systemOf();
+  const { sessions } = await sessionsOf(system, { uidCount: 3 });
+
+  for (let session = 0; session < 4; session += 1) {
+    const running = await sessions.prepared(envelope, live());
+    system.children[session].child.emit("exit", 0, null);
+    await running.ended;
+  }
+
+  assert.deepEqual(
+    system.children.map(({ args }) =>
+      args.find((arg) => arg.startsWith("--reuid=")),
+    ),
+    ["--reuid=20000", "--reuid=20001", "--reuid=20002", "--reuid=20000"],
+  );
+});
+
+/** Catches a user given out again with files or IPC objects of its last session still in the places every user writes. */
+test("a session's user whose scattered leftovers could not be removed is not given out again", async () => {
+  const system = systemOf({
+    scattered: async () => {
+      if (system.children.length > 0) throw new Error("find: timed out");
+    },
+  });
+  const { sessions, logged } = await sessionsOf(system);
+  const running = await sessions.prepared(envelope, live());
+
+  system.children[0].child.emit("exit", 0, null);
+  await running.ended;
+
+  assert.match(
+    logged.join(""),
+    /\[session-20000\] the removal of what it left in the places every user writes failed: find: timed out/u,
+  );
+  assert.match(logged.join(""), /its user is not given out again/u);
+  await sessions.prepared(envelope, live());
+  await assert.rejects(
+    sessions.prepared(envelope, live()),
+    /every user a session may be run as is held/u,
+  );
+});
+
+/** Catches scattered leftovers removed while a process of the user may still be making more. */
+test("what a session scattered is not looked for while its processes may outlive the sweep", async () => {
+  const system = systemOf({
+    swept: async (uid) => {
+      if (uid === 20_000 && system.children.length > 0)
+        throw new Error("the processes outlived a sweep");
+    },
+  });
+  const { sessions } = await sessionsOf(system);
+  const running = await sessions.prepared(envelope, live());
+  const before = system.calls.length;
+
+  system.children[0].child.emit("exit", 0, null);
+  await running.ended;
+
+  assert.ok(!since(system, before).some(([name]) => name === "scattered"));
+});
+
+/** Catches a directory made but not handed to its user, left in the way of every later session of that user. */
+test("a directory whose handing over failed is cleared with the rest", async () => {
+  const system = systemOf({
+    made: async (path, uid) => {
+      system.calls.push(["made", path, uid]);
+      if (path.endsWith("/home")) throw new Error("chown: EPERM");
+    },
+  });
+  const { sessions } = await sessionsOf(system);
+  const before = system.calls.length;
+
+  await assert.rejects(sessions.prepared(envelope, live()), /EPERM/u);
+
+  assert.deepEqual(
+    since(system, before).filter(([name]) => name === "emptied"),
+    [["emptied", "/sessions/session-20000", 20_000]],
+  );
 });
 
 test("a session whose process does not exit clean ends Failed", async () => {
@@ -379,15 +462,18 @@ test("a preparation that fails is refused with everything it made gone and its u
     ["emptied", "/sessions/session-20000", 20_000],
     ["emptied", "/minted/session-20000", 20_000],
     ["removed", "/supervisor/session-20000"],
+    ["scattered", 20_000],
   ]);
   assert.match(logged.join(""), /\[session-20000\] was not prepared: /u);
   assert.deepEqual(system.children, []);
   await assert.rejects(sessions.prepared(envelope, live()), /not mounted/u);
+  await assert.rejects(sessions.prepared(envelope, live()), /not mounted/u);
   assert.equal(
-    system.calls.filter(([name, , uid]) => name === "made" && uid === 20_001)
-      .length,
-    0,
-    "a free user was passed over",
+    system.calls.filter(
+      ([name, path]) => name === "made" && path === "/sessions/session-20000",
+    ).length,
+    2,
+    "a user whose preparation failed was not free again",
   );
 });
 
@@ -552,7 +638,9 @@ test("sessions opened sweep every session user and clear what a predecessor left
     ["rootMade", "/minted", 0o711],
     ["rootMade", "/supervisor", 0o700],
     ["swept", 20_000],
+    ["scattered", 20_000],
     ["swept", 20_001],
+    ["scattered", 20_001],
     ["emptied", "/sessions/session-20001", 20_001],
     ["removed", "/sessions/stray"],
     ["emptied", "/minted/session-20001", 20_001],
@@ -576,4 +664,36 @@ test("a predecessor's directory that cannot be cleared holds its user", async ()
   await sessions.prepared(envelope, live());
 
   assert.ok(system.children[0].args.includes("--reuid=20001"));
+});
+
+/** Catches a root-owned leftover named for a session's user, which every later session of that user would fail to make again. */
+test("a predecessor's leftover no session user owns, which cannot be removed, holds the user it is named for", async () => {
+  const system = systemOf({
+    listed: async (root) =>
+      root === "/sessions" ? [{ path: "/sessions/session-20000", uid: 0 }] : [],
+    removed: async (path) => {
+      if (path === "/sessions/session-20000")
+        throw new Error("Operation not permitted");
+    },
+  });
+  const { sessions } = await sessionsOf(system);
+
+  await sessions.prepared(envelope, live());
+
+  assert.ok(system.children[0].args.includes("--reuid=20001"));
+});
+
+/** Catches a supervisor kept from starting by one user's process that no kill reaches. */
+test("a user whose processes outlive the sweep at the start is held, and the supervisor starts", async () => {
+  const system = systemOf({
+    swept: async (uid) => {
+      if (uid === 20_000) throw new Error("the processes outlived a sweep");
+    },
+  });
+  const { sessions, logged } = await sessionsOf(system);
+
+  await sessions.prepared(envelope, live());
+
+  assert.ok(system.children[0].args.includes("--reuid=20001"));
+  assert.match(logged.join(""), /\[user-20000\] it is not given out/u);
 });

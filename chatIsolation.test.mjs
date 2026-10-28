@@ -196,10 +196,10 @@ function checkoutOf(place, mirrors, log) {
 
 /**
  * A supervisor's sessions on a machine placed under `place`, run as
- * `uidFirst` and the user after it, each answered the task `answers` holds
+ * `uidCount` users from `uidFirst`, each answered the task `answers` holds
  * for its bearer.
  */
-async function supervisorIn(place) {
+async function supervisorIn(place, uidCount = 2) {
   const { heads, credentials } = await machinePlaced(place);
   const logged = [];
   const log = (text) => logged.push(text);
@@ -212,7 +212,7 @@ async function supervisorIn(place) {
   const sessions = await chatSessionsOpened(
     {
       uidFirst,
-      uidCount: 2,
+      uidCount,
       sessionsRoot: place("sessions"),
       mintedRoot: place("minted"),
       supervisorMinted: place("supervisor"),
@@ -379,7 +379,7 @@ test(
   { skip: skipped },
   () =>
     inMachine(async (place) => {
-      const machine = await supervisorIn(place);
+      const machine = await supervisorIn(place, 1);
       machine.answers.set(bearers[0], answerOf("a"));
       const live = new globalThis.AbortController().signal;
       const own = placesOf(place, uidFirst);
@@ -410,6 +410,72 @@ test(
       assert.equal((await said(machine.logged, own.id, "probed")).tree, later);
       second.stop();
       assert.equal(await second.ended, "Succeeded");
+    }),
+);
+
+/** The ids of every System V IPC object `uid` owns or made. */
+async function ipcOf(uid) {
+  const held = [];
+  for (const table of ["shm", "msg", "sem"]) {
+    const text = await readFile(join("/proc/sysvipc", table), "utf8");
+    const [header = "", ...rows] = text.trim().split("\n");
+    const columns = header.trim().split(/\s+/u);
+    const owners = [columns.indexOf("uid"), columns.indexOf("cuid")];
+    for (const row of rows) {
+      const fields = row.trim().split(/\s+/u);
+      if (owners.some((at) => fields[at] === String(uid)))
+        held.push(`${table} ${String(fields[1])}`);
+    }
+  }
+  return held;
+}
+
+/** One session on `machine` run to its end, having first been asked to do what `targets` says. */
+async function oneRun(place, machine, targets) {
+  const own = placesOf(place, uidFirst);
+  const running = await machine.sessions.prepared(
+    envelopeOf(bearers[0]),
+    new globalThis.AbortController().signal,
+  );
+  await said(machine.logged, own.id, "hello");
+  await writeFile(
+    join(own.workspace, "probe.json"),
+    JSON.stringify({
+      ...targetsOf(place, own, placesOf(place, uidFirst + 1), [
+        await mirrorOf(own.workspace),
+      ]),
+      ...targets,
+    }),
+  );
+  const probed = await said(machine.logged, own.id, "probed");
+  machine.logged.length = 0;
+  running.stop();
+  assert.equal(await running.ended, "Succeeded");
+  return probed;
+}
+
+/** Catches a user given out again with what its last session left where every user writes, or in System V IPC. */
+test(
+  "what a session leaves in the places every user writes is gone before its user runs another",
+  { skip: skipped },
+  () =>
+    inMachine(async (place) => {
+      const machine = await supervisorIn(place, 1);
+      machine.answers.set(bearers[0], answerOf("a"));
+      const name = `chuggy-scattered-${String(process.pid)}`;
+      const scatter = ["/tmp", "/var/tmp", "/dev/shm"].map((root) =>
+        join(root, name),
+      );
+
+      const first = await oneRun(place, machine, { scatter });
+
+      assert.equal(first.scattered, "ok");
+      for (const path of scatter)
+        for (const each of [path, `${path}.d`])
+          await assert.rejects(stat(each), { code: "ENOENT" });
+      assert.deepEqual(await ipcOf(uidFirst), [], machine.logged.join(""));
+      const second = await oneRun(place, machine, { seek: scatter });
+      assert.deepEqual(second.found, []);
     }),
 );
 
