@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -31,6 +32,7 @@ import {
 } from "./register.mjs";
 import {
   answeringFetch,
+  registeredChatHostFixture as chatHost,
   registeredFixture as registered,
   registeredPersonalFixture as personal,
 } from "./register.fixture.mjs";
@@ -900,8 +902,23 @@ test("a personal ask names no pool, and is checked as a pool's is otherwise", ()
       host: false,
     },
   });
+  assert.match(
+    refusalOf({ ...asked, pool: "shame" }),
+    /^--pool names a pool, .*without --pool$/u,
+  );
+  memberAskRefusalsAsserted(asked);
+});
+
+/** Why `asked` is refused, where it is. */
+function refusalOf(asked) {
+  const answer = registerAskedChecked(asked, "shame");
+  assert.ok("refused" in answer, JSON.stringify(asked));
+  return answer.refused;
+}
+
+/** Catches a member's ask that takes a token, an origin or a machine a pool's would refuse. */
+function memberAskRefusalsAsserted(asked) {
   for (const [refusedAsk, why] of [
-    [{ ...asked, pool: "shame" }, /^--pool names a pool, .*without --pool$/u],
     [{ ...asked, token: "" }, /^--token is not a registration token$/u],
     [
       { ...asked, token: "t".repeat(257) },
@@ -909,15 +926,12 @@ test("a personal ask names no pool, and is checked as a pool's is otherwise", ()
     ],
     [{ ...asked, api: "http://chuggy.example" }, /must be https/u],
     [{ ...asked, token: undefined }, /needs --api and --token/u],
-  ]) {
-    const answer = registerAskedChecked(refusedAsk, "shame");
-    assert.ok("refused" in answer, JSON.stringify(refusedAsk));
-    assert.match(answer.refused, why);
-  }
+  ])
+    assert.match(refusalOf(refusedAsk), why);
   assert.deepEqual(registerRequest(asked, { hostname: "x", arch: "ia32" }), {
     refused: "this machine is ia32, and a pool runs Linux on x64 or arm64",
   });
-});
+}
 
 test("a personal runner's file is named by its tenant and owner, two parts where a pool's has three", () => {
   assert.equal(
@@ -975,5 +989,186 @@ test("a personal runner's file is written owner-only beside a pool's of its tena
     (await poolCredentials(file)).clientId,
     "chuggy-personal-client-2",
   );
+  assert.equal((await readdir(directory)).length, 2);
+});
+
+/** @type {import("./register.mjs").RegisterRequest} */
+const chatRequest = {
+  kind: "ChatHost",
+  api: new URL("https://chuggy.example"),
+  token: "registration-token-fixture",
+};
+
+test("a chat host's ask names no pool and declares nothing, and is checked as a personal one is otherwise", () => {
+  const asked = {
+    api: "https://chuggy.example/",
+    token: "t",
+    pool: undefined,
+    chat: true,
+  };
+  const checked = {
+    kind: "ChatHost",
+    api: new URL("https://chuggy.example"),
+    token: "t",
+  };
+  assert.deepEqual(registerAskedChecked(asked, "---"), { checked });
+  assert.deepEqual(registerRequest(asked, { hostname: "x", arch: "arm64" }), {
+    request: checked,
+  });
+  for (const [refusedAsk, why] of [
+    [
+      { ...asked, personal: true },
+      /^--chat registers a chat host and --personal/u,
+    ],
+    [
+      { ...asked, pool: "shame" },
+      /^--pool names a pool, and a chat host names none/u,
+    ],
+    [{ ...asked, capabilities: ["Gpu"] }, /declares nothing/u],
+    [{ ...asked, host: true }, /declares nothing/u],
+  ])
+    assert.match(refusalOf(refusedAsk), why);
+  memberAskRefusalsAsserted(asked);
+});
+
+test("a chat host's redemption is posted where a personal one is, declaring no capability, and answers its file", async () => {
+  const { fetch, requests } = answeringFetch(201, chatHost);
+  assert.deepEqual(await registerRedeemed(chatRequest, fetch), chatHost);
+  const [{ url, init }] = requests;
+  assert.equal(
+    url,
+    "https://chuggy.example/api/v1/personal-runner-registrations",
+  );
+  assert.deepEqual(JSON.parse(String(init.body)), {
+    token: "registration-token-fixture",
+    capabilities: [],
+  });
+});
+
+test("a 201 whose body is no chat host's file is refused, naming no value in it", async () => {
+  const { kind, ...kindless } = chatHost;
+  assert.equal(kind, "ChatHost");
+  for (const [body, why] of [
+    [registered, /Unrecognized key/u],
+    [kindless, /kind /u],
+    [{ ...chatHost, capabilities: [] }, /Unrecognized key/u],
+    [{ ...chatHost, owner: "" }, /owner /u],
+    [{ ...chatHost, clientSecret: "" }, /clientSecret /u],
+    [
+      { ...chatHost, tokenUrl: "http://auth.chuggy.example/" },
+      /tokenUrl is not an https URL/u,
+    ],
+  ])
+    await assert.rejects(
+      registerRedeemed(chatRequest, answeringFetch(201, body).fetch),
+      (failure) => {
+        const { message } = /** @type {Error} */ (failure);
+        assert.match(message, why, message);
+        assert.match(message, /the token is spent, so mint another$/u);
+        assert.ok(!message.includes("client-secret-fixture"), message);
+        return true;
+      },
+      JSON.stringify(body),
+    );
+});
+
+test("a member's token registers what it was minted for, and a file of the other kind says what chuggy registered", async () => {
+  await assert.rejects(
+    registerRedeemed(chatRequest, answeringFetch(201, personal).fetch),
+    /^Error: chuggy registered a personal runner, which the token was minted for, rather than the member's chat host as asked; the token is spent, so mint another$/u,
+  );
+  await assert.rejects(
+    registerRedeemed(personalRequest, answeringFetch(201, chatHost).fetch),
+    /^Error: chuggy registered the member's chat host, which the token was minted for, rather than a personal runner as asked; the token is spent, so mint another$/u,
+  );
+  await assert.rejects(
+    registerRedeemed(request, answeringFetch(201, chatHost).fetch),
+    /no pool file this runner reads \(.*Unrecognized key.*\)/u,
+  );
+});
+
+test("a chat host's ask answered that its member holds their bound of runners holds a runner's token, unspent", async () => {
+  const conflict = {
+    error: { code: "RunnerLimitReached", message: "at the bound" },
+  };
+  await assert.rejects(
+    registerRedeemed(chatRequest, answeringFetch(409, conflict).fetch),
+    /^Error: the token registers a runner rather than a chat host, .*the token is not spent, so mint a chat host's token and run register again with it$/u,
+  );
+});
+
+test("a chat host's file is named by its tenant and owner then chat and host, four parts, and its long names make a digest of their own kind", () => {
+  assert.equal(
+    registerPoolFileName(chatHost, nameCharsMax),
+    "newtenant.28_3ahttps_3a_2f_2fauth_2echuggy_2eexample_2f0f3c9a52-member.chat.host.json",
+  );
+  const one = {
+    kind: /** @type {const} */ ("ChatHost"),
+    tenant: "a",
+    owner: "b",
+  };
+  assert.equal(registerPoolFileName(one, nameCharsMax), "a.b.chat.host.json");
+  for (const other of [
+    { ...one, kind: /** @type {const} */ ("Personal") },
+    { tenant: "a", project: "b", pool: "chat" },
+    { tenant: "a", project: "b.chat", pool: "host" },
+  ])
+    assert.notEqual(
+      registerPoolFileName(one, nameCharsMax),
+      registerPoolFileName(other, nameCharsMax),
+    );
+  const long = { ...chatHost, owner: "o".repeat(nameCharsMax) };
+  const name = registerPoolFileName(long, nameCharsMax);
+  assert.match(name, /^chat-host-[0-9a-f]{20}\.json$/u);
+  assert.notEqual(
+    name.slice("chat-host-".length),
+    registerPoolFileName({ ...long, kind: "Personal" }, nameCharsMax).slice(
+      "personal-".length,
+    ),
+  );
+});
+
+test("a personal runner's and a pool's files are named as they always were", () => {
+  assert.equal(
+    registerPoolFileName(personal, nameCharsMax),
+    "newtenant.28_3ahttps_3a_2f_2fauth_2echuggy_2eexample_2f0f3c9a52-member.json",
+  );
+  assert.equal(
+    registerPoolFileName(registered, nameCharsMax),
+    "newtenant.arbbot.shame.json",
+  );
+  assert.equal(
+    registerPoolFileName(
+      { ...personal, owner: "o".repeat(nameCharsMax) },
+      nameCharsMax,
+    ),
+    `personal-${createHash("sha256")
+      .update(JSON.stringify([["newtenant", "o".repeat(nameCharsMax)]]), "utf8")
+      .digest("hex")
+      .slice(0, 20)}.json`,
+  );
+});
+
+test("a chat host's file is written beside its member's runner's, overwriting neither, and each is read back by the core", async (t) => {
+  const directory = await scratch(t);
+  const runner = await registerPoolFileWritten(
+    directory,
+    personal,
+    nameCharsMax,
+  );
+  const host = await registerPoolFileWritten(directory, chatHost, nameCharsMax);
+  assert.equal(host.replaced, false);
+  assert.notEqual(host.file, runner.file);
+  assert.equal((await stat(host.file)).mode & 0o777, 0o600);
+  assert.deepEqual(await poolCredentials(host.file), chatHost);
+  assert.deepEqual(await poolCredentials(runner.file), personal);
+  const again = await registerPoolFileWritten(
+    directory,
+    { ...chatHost, clientId: "chuggy-chat-host-client-2" },
+    nameCharsMax,
+  );
+  assert.equal(again.file, host.file);
+  assert.equal(again.replaced, true);
+  assert.deepEqual(await poolCredentials(runner.file), personal);
   assert.equal((await readdir(directory)).length, 2);
 });

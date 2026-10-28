@@ -187,6 +187,7 @@ import {
 } from "./job.mjs";
 import {
   poolIdentityDigest,
+  poolIdentityChatHost,
   poolIdentityDigestChars,
   poolIdentityPersonal,
   poolLabelValue,
@@ -527,8 +528,17 @@ function containerNameSegment(pool) {
   return poolIdentityPersonal(pool) ? "personal" : pool.pool;
 }
 
-/** @param {ContainerBackendSettings} settings */
+/**
+ * The settings as given, or a throw naming what is wrong with them; a chat
+ * host's identity is refused, since a chat host runs no job.
+ *
+ * @param {ContainerBackendSettings} settings
+ */
 export function checkedContainerBackendSettings(settings) {
+  if (poolIdentityChatHost(settings.pool))
+    throw new RangeError(
+      "a chat host runs no job, so its credentials run no container backend",
+    );
   const segment = containerNameSegment(settings.pool);
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(segment))
     throw new RangeError(

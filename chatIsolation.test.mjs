@@ -17,6 +17,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -32,6 +33,7 @@ import { workerCredentialFilesVariable } from "@chuggy/worker-contract/workerEnv
 
 import { chatCheckout, chatMirrorsOpened } from "./chatCheckout.mjs";
 import {
+  chatSessionHome,
   chatSessionsOpened,
   chatSessionLabel,
   chatSystem,
@@ -58,8 +60,8 @@ const groupFirst = 42_000;
 /** A user of the image's own that holds the provider credential, which the supervisor is to read as. */
 const credentialOwner = 1_000;
 
-/** The users this suite made for its sessions to run as, removed once it is over. */
-const usersMade = [];
+/** The users this suite made for its sessions to run as, by uid, removed once it is over. */
+const usersMade = new Map();
 
 /** Each user and group the suite's sessions run as made where the machine does not name it, as an image names its own. */
 before(async () => {
@@ -82,15 +84,16 @@ before(async () => {
       "/usr/sbin/nologin",
       name,
     ]);
-    usersMade.push(name);
+    usersMade.set(uid, name);
   }
 });
 
 after(async () => {
-  for (const name of usersMade.splice(0)) {
+  for (const name of usersMade.values()) {
     await run("userdel", [name]).catch(() => undefined);
     await run("groupdel", [name]).catch(() => undefined);
   }
+  usersMade.clear();
 });
 
 /** The assignment every session of the suite is prepared for, named as no log prefix may hold it. */
@@ -236,10 +239,19 @@ function checkoutOf(place, mirrors, log) {
 /**
  * A supervisor's sessions on a machine placed under `place`, run as
  * `uidCount` users from `uidFirst`, each answered the task `answers` holds
- * for its bearer.
+ * for its bearer. Each user the suite made is given the home a session run
+ * as it is handed there, as an image names it.
  */
+
 async function supervisorIn(place, uidCount = 2) {
   const { heads, credentials } = await machinePlaced(place);
+  for (const [uid, name] of usersMade)
+    await run("usermod", [
+      "--home",
+      chatSessionHome(place("sessions"), uid),
+      name,
+    ]);
+
   const logged = [];
   const log = (text) => logged.push(text);
   const mirrors = await chatMirrorsOpened({
@@ -257,6 +269,7 @@ async function supervisorIn(place, uidCount = 2) {
       supervisorMinted: place("supervisor"),
       freeBytesMin: 1,
       stopGraceMs: 300,
+      clearWaitMs: 60_000,
       node: process.execPath,
       entrypoint: place("probe.mjs"),
       environment: {
@@ -295,6 +308,13 @@ function placesOf(place, uid) {
     workspace: join(place("sessions"), id),
     minted: join(place("minted"), id),
   };
+}
+
+/** Asks the probe in `workspace` to try `targets`, a file it sees only once whole. */
+async function probeAsked(workspace, targets) {
+  const partial = join(workspace, "probe.json.partial");
+  await writeFile(partial, JSON.stringify(targets));
+  await rename(partial, join(workspace, "probe.json"));
 }
 
 /** What a session's probe is to try, against the session `other` and its own `mirror` and the other's. */
@@ -386,14 +406,11 @@ test(
       );
       for (const [index, own] of started.entries()) {
         const other = started[1 - index];
-        await writeFile(
-          join(own.workspace, "probe.json"),
-          JSON.stringify({
-            ...targetsOf(place, own, other, [own.mirror, other.mirror]),
-            ignoreStop: index === 1,
-            ...(index === 1 ? { privateTree } : {}),
-          }),
-        );
+        await probeAsked(own.workspace, {
+          ...targetsOf(place, own, other, [own.mirror, other.mirror]),
+          ignoreStop: index === 1,
+          ...(index === 1 ? { privateTree } : {}),
+        });
       }
       for (const [index, own] of started.entries())
         await isolationAsserted(
@@ -455,13 +472,11 @@ test(
         live,
       );
       await said(machine.logged, own.label, "hello");
-      await writeFile(
-        join(own.workspace, "probe.json"),
-        JSON.stringify(
-          targetsOf(place, own, placesOf(place, uidFirst + 1), [
-            await mirrorOf(own.workspace),
-          ]),
-        ),
+      await probeAsked(
+        own.workspace,
+        targetsOf(place, own, placesOf(place, uidFirst + 1), [
+          await mirrorOf(own.workspace),
+        ]),
       );
 
       assert.equal(
@@ -499,15 +514,13 @@ async function oneRun(place, machine, targets) {
     new globalThis.AbortController().signal,
   );
   await said(machine.logged, own.label, "hello");
-  await writeFile(
-    join(own.workspace, "probe.json"),
-    JSON.stringify({
-      ...targetsOf(place, own, placesOf(place, uidFirst + 1), [
-        await mirrorOf(own.workspace),
-      ]),
-      ...targets,
-    }),
-  );
+  await probeAsked(own.workspace, {
+    ...targetsOf(place, own, placesOf(place, uidFirst + 1), [
+      await mirrorOf(own.workspace),
+    ]),
+    ...targets,
+  });
+
   const probed = await said(machine.logged, own.label, "probed");
   machine.logged.length = 0;
   running.stop();

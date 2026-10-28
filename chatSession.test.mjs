@@ -22,6 +22,7 @@ import {
 } from "./chatChannel.mjs";
 import {
   chatSessionIpcCleared,
+  chatSessionHome,
   chatSessionLabel,
   chatSessionMountsWalked,
   chatSessionScratchListed,
@@ -50,6 +51,7 @@ const settings = {
   supervisorMinted: "/supervisor",
   freeBytesMin: 1_024,
   stopGraceMs: 10,
+  clearWaitMs: 60_000,
   node: "/usr/bin/node",
   entrypoint: "/core/entrypoint.mjs",
   environment: {
@@ -96,7 +98,10 @@ function systemOf(overrides = {}) {
   const recorded =
     (name) =>
     async (...args) => {
-      calls.push([name, ...args]);
+      calls.push([
+        name,
+        ...args.filter((arg) => !(arg instanceof globalThis.AbortSignal)),
+      ]);
     };
   const system = {
     calls,
@@ -127,7 +132,10 @@ function systemOf(overrides = {}) {
       calls.push(["scattered", uid]);
       system.scratched = roots;
     },
-    named: async (uids) => new Set(uids),
+    named: async (uids) =>
+      new Map(
+        uids.map((uid) => [uid, chatSessionHome(settings.sessionsRoot, uid)]),
+      ),
     scratchFound: async () => {
       calls.push(["scratchFound"]);
       return ["/tmp", "/run/lock"];
@@ -413,7 +421,38 @@ test("a session's user whose scattered leftovers could not be removed is not giv
   );
 });
 
+/** Catches a stop a host must wait on for as long as a session's directories take to empty. */
+test("a session's clear cut short by its bound still ends the session, and its user is not given out again", async () => {
+  const signals = [];
+  const system = systemOf({
+    emptied: (_path, _uid, signal) => {
+      signals.push(signal);
+      return new Promise((_resolve, reject) => {
+        if (signal.aborted) reject(signal.reason);
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        });
+      });
+    },
+  });
+  const { sessions, logged } = await sessionsOf(system, { clearWaitMs: 20 });
+  const running = await sessions.prepared(assignment, envelope, live());
+
+  system.children[0].child.emit("exit", 0, null);
+
+  assert.equal(await running.ended, "Succeeded");
+  assert.equal(signals.length, 2);
+  assert.match(
+    logged.join(""),
+    /\[assignment-1 session-20000\] the removal of \/sessions\/session-20000 failed: .*timeout/u,
+  );
+  assert.match(logged.join(""), /its user is not given out again/u);
+  await sessions.prepared(assignment, envelope, live());
+  assert.ok(system.children[1].args.includes("--reuid=20001"));
+});
+
 /** Catches scattered leftovers removed while a process of the user may still be making more. */
+
 test("what a session scattered is not looked for while its processes may outlive the sweep", async () => {
   const system = systemOf({
     swept: async (uid) => {
@@ -736,7 +775,12 @@ test("sessions opened sweep every session user and clear what a predecessor left
 /** Catches a supervisor that gives out a user its image does not name, whose session finds no name, home or identity. */
 test("a supervisor whose range holds a user the image does not name refuses to start, naming the range", async () => {
   const system = systemOf({
-    named: async (uids) => new Set(uids.filter((uid) => uid !== 20_001)),
+    named: async (uids) =>
+      new Map(
+        uids
+          .filter((uid) => uid !== 20_001)
+          .map((uid) => [uid, chatSessionHome(settings.sessionsRoot, uid)]),
+      ),
   });
 
   await assert.rejects(
@@ -744,6 +788,24 @@ test("a supervisor whose range holds a user the image does not name refuses to s
     /^Error: the users 20000 to 20001 a session may be run as are not all named in this image's passwd$/u,
   );
   assert.deepEqual(system.calls, []);
+});
+
+/** Catches a passwd whose home for a session's user is not the one the session is handed, where ssh would look for its keys. */
+test("a supervisor whose image names another home for a session's user refuses to start, naming the home it hands", async () => {
+  const system = systemOf({
+    named: async (uids) =>
+      new Map(uids.map((uid) => [uid, `/home/session-${String(uid)}`])),
+  });
+
+  await assert.rejects(
+    sessionsOf(system),
+    /^Error: this image's passwd names a home for user 20000 other than \/sessions\/session-20000\/home, the one a session run as it is handed$/u,
+  );
+  assert.deepEqual(system.calls, []);
+  assert.equal(
+    chatSessionHome("/sessions", 20_000),
+    "/sessions/session-20000/home",
+  );
 });
 
 /** Catches IPC objects matched by an owner a session may set to another user's, or one gone before its removal failing the clear. */

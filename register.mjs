@@ -1,11 +1,15 @@
 /**
- * Registering this machine as a pool, or as a member's personal runner: a
- * single-use token is redeemed for the pool file, which is written where `run`
- * reads it. A pool's token is a project's, minted in chuggy's console, and
- * names the pool it registers; a personal token is a member's in a tenant,
- * minted through chuggy's API at
+ * Registering this machine as a pool, as a member's personal runner, or as a
+ * member's chat host: a single-use token is redeemed for the pool file, which
+ * is written where `run` reads it. A pool's token is a project's, minted in
+ * chuggy's console, and names the pool it registers; a personal token is a
+ * member's in a tenant, minted through chuggy's API at
  * `/api/v1/tenants/:tenant/personal-runner-registration-tokens`, and registers
- * this machine as one of that member's runners there. What the operator
+ * this machine as one of that member's runners there; a chat host's is minted
+ * at `/api/v1/tenants/:tenant/chat-host-registration-tokens`, redeemed where a
+ * personal token is, and registers this machine as the member's one chat host
+ * there, declaring nothing. A member's token registers what it was minted
+ * for, and a file of another kind than the one asked for is refused. What the operator
  * could have asked wrongly is refused before the token is spent, and the
  * answer is checked whole before anything is written. The runner's secret is
  * never printed and never in an argv. What a runner advertises on each poll,
@@ -36,6 +40,7 @@ import {
   jobClaudeAgent,
 } from "./job.mjs";
 import {
+  poolIdentityChatHost,
   poolIdentityDigest,
   poolIdentityNames,
   poolIdentityPersonal,
@@ -45,12 +50,14 @@ import {
  * @typedef {import("./poolIdentity.mjs").PoolIdentity} PoolIdentity
  * @typedef {z.infer<typeof registeredPoolSchema>} RegisteredDedicatedPool
  * @typedef {z.infer<typeof registeredPersonalRunnerSchema>} RegisteredPersonalRunner
- * @typedef {(RegisteredDedicatedPool | RegisteredPersonalRunner) & {host?: true}} RegisteredPool
+ * @typedef {z.infer<typeof registeredChatHostSchema>} RegisteredChatHost
+ * @typedef {((RegisteredDedicatedPool | RegisteredPersonalRunner) & {host?: true}) | RegisteredChatHost} RegisteredPool
  *   what chuggy answered, and whether the operator runs work on the machine itself
  *
  * @typedef {{kind?: undefined, api: URL, token: string, pool: string, capabilities: readonly string[], host: boolean}
- *   | {kind: "Personal", api: URL, token: string, capabilities: readonly string[], host: boolean}} RegisterAskedRequest
- *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, what the operator declares beside the platforms, and whether a job that pins no image runs on the machine itself
+ *   | {kind: "Personal", api: URL, token: string, capabilities: readonly string[], host: boolean}
+ *   | {kind: "ChatHost", api: URL, token: string}} RegisterAskedRequest
+ *   chuggy's origin, the token, the name a pool takes, a personal runner taking none, what the operator declares beside the platforms, and whether a job that pins no image runs on the machine itself; a chat host declares nothing
  * @typedef {RegisterAskedRequest} RegisterRequest
  *   `capabilities` is whole: this machine's platforms first, then what the operator declared, then the agents the runner can run that the operator did not
  *
@@ -59,6 +66,7 @@ import {
  * @property {string | undefined} token
  * @property {string | undefined} pool
  * @property {boolean | undefined} [personal] the token is a member's personal one
+ * @property {boolean | undefined} [chat] the token is a member's chat host's
  * @property {readonly string[] | undefined} [capabilities] what the operator declares the machine meets, beside its platforms
  * @property {boolean | undefined} [host] a job that pins no image runs on the machine itself, which the pool file then says
  *
@@ -178,6 +186,15 @@ export const registeredPersonalRunnerSchema = registeredPoolSchema
   .extend({ kind: z.literal("Personal"), owner: registerNameSchema });
 
 /**
+ * A chat host's file, as chuggy answers a chat host's redemption with it: a
+ * personal runner's with no capabilities, since a chat host takes sessions
+ * alone.
+ */
+export const registeredChatHostSchema = registeredPersonalRunnerSchema
+  .omit({ capabilities: true })
+  .extend({ kind: z.literal("ChatHost") });
+
+/**
  * The pool name this machine's hostname makes: its first label, lowercase,
  * each run of other characters a hyphen. Nothing where it makes none.
  *
@@ -259,6 +276,7 @@ export function registerAskedChecked(asked, hostname) {
   if ("refused" in declared) return declared;
   const { declared: capabilities } = declared;
   const host = asked.host === true;
+  if (asked.chat === true) return registerChatHostChecked(asked, api);
   if (asked.personal === true) {
     if (asked.pool !== undefined)
       return {
@@ -289,6 +307,35 @@ export function registerAskedChecked(asked, hostname) {
   if (!registerTokenAllowed(asked.token))
     return { refused: "--token is not a registration token" };
   return { checked: { api, token: asked.token, pool, capabilities, host } };
+}
+
+/**
+ * A chat host's ask, checked, or why it cannot be redeemed: it names no pool
+ * and declares nothing, neither capabilities nor work on the machine itself.
+ *
+ * @param {RegisterAsked & {token: string}} asked
+ * @param {URL} api
+ * @returns {{checked: RegisterAskedRequest} | {refused: string}}
+ */
+function registerChatHostChecked(asked, api) {
+  if (asked.personal === true)
+    return {
+      refused:
+        "--chat registers a chat host and --personal a personal runner; name one of them",
+    };
+  if (asked.pool !== undefined)
+    return {
+      refused:
+        "--pool names a pool, and a chat host names none; register it without --pool",
+    };
+  if ((asked.capabilities ?? []).length > 0 || asked.host === true)
+    return {
+      refused:
+        "a chat host takes sessions alone and declares nothing; register it without --capability or --host",
+    };
+  if (!registerTokenAllowed(asked.token))
+    return { refused: "--token is not a registration token" };
+  return { checked: { kind: "ChatHost", api, token: asked.token } };
 }
 
 /**
@@ -330,6 +377,7 @@ export function registerRequest(asked, machine) {
   if ("refused" in answer) return answer;
   const found = registerPlatform(machine.arch);
   if ("refused" in found) return found;
+  if (answer.checked.kind === "ChatHost") return { request: answer.checked };
   const capabilities = [
     ...new Set([found.platform, ...(machine.hosted ?? [])]),
     ...new Set([...answer.checked.capabilities, ...(machine.agents ?? [])]),
@@ -480,6 +528,8 @@ function registerRefusal(status, body, request) {
     return "the registration token is unknown, spent or expired; mint another in chuggy's console";
   if (status === 409 && request.kind === "Personal")
     return "this member has as many runners in the tenant as chuggy allows, and the token is not spent; remove one in chuggy's console and run register again";
+  if (status === 409 && request.kind === "ChatHost")
+    return "the token registers a runner rather than a chat host, and this member has as many runners in the tenant as chuggy allows; the token is not spent, so mint a chat host's token and run register again with it";
   if (status === 400) {
     const reason = registerErrorReason(body);
     return `chuggy refused the registration as malformed${reason === "" ? "" : `: ${reason}`}`;
@@ -521,6 +571,9 @@ function registeredPool(body, request) {
       `chuggy answered the registration with no JSON; ${registeredSpent}`,
     );
   }
+  registeredMemberKindAsked(document, request);
+  if (request.kind === "ChatHost")
+    return registeredParsed(registeredChatHostSchema, document);
   const hosted = request.host ? { host: /** @type {const} */ (true) } : {};
   if (request.kind === "Personal") {
     const runner = registeredParsed(registeredPersonalRunnerSchema, document);
@@ -531,6 +584,34 @@ function registeredPool(body, request) {
   if (pool.pool !== request.pool) registeredAnotherAnswered();
   registeredCapabilityAsked(pool, request);
   return { ...pool, ...hosted };
+}
+
+/** What a member's token registers, by the `kind` its file names. */
+const registeredMemberKinds = /** @type {Record<string, string>} */ ({
+  Personal: "a personal runner",
+  ChatHost: "the member's chat host",
+});
+
+/**
+ * Refuses a member's file of the other member's kind than the one asked for,
+ * saying what the token registered: it registers what it was minted for,
+ * whatever the redemption asked.
+ *
+ * @param {unknown} document
+ * @param {RegisterRequest} request
+ */
+function registeredMemberKindAsked(document, request) {
+  if (request.kind === undefined) return;
+  const kind = /** @type {{kind?: unknown}} */ (document)?.kind;
+  if (
+    typeof kind !== "string" ||
+    kind === request.kind ||
+    !Object.hasOwn(registeredMemberKinds, kind)
+  )
+    return;
+  throw new Error(
+    `chuggy registered ${registeredMemberKinds[kind]}, which the token was minted for, rather than ${registeredMemberKinds[request.kind]} as asked; ${registeredSpent}`,
+  );
 }
 
 /**
@@ -579,12 +660,17 @@ function registeredAnotherAnswered() {
 }
 
 /**
- * Where a redemption is posted, and what with: a pool's names the pool, and a
- * personal runner's names none.
+ * Where a redemption is posted, and what with: a pool's names the pool, a
+ * personal runner's names none, and a chat host's declares no capability.
  *
  * @param {RegisterRequest} request
  */
 function registerPosted(request) {
+  if (request.kind === "ChatHost")
+    return {
+      path: registerPersonalPath,
+      body: { token: request.token, capabilities: [] },
+    };
   const capabilities = [...request.capabilities];
   return request.kind === "Personal"
     ? {
@@ -653,11 +739,13 @@ function registerPoolFileNamePart(name) {
 }
 
 /**
- * The pool file's name: a pool's tenant, project and pool, or a personal
- * runner's tenant and owner, joined by a `.` no part carries, so no two
- * runners share one and a pool's three parts are never a personal runner's
- * two. Names longer than the runner's service can be named for make a digest
- * of the identity instead, which has no `.` and leads with the runner's kind.
+ * The pool file's name: a pool's tenant, project and pool, a personal
+ * runner's tenant and owner, or a chat host's tenant and owner then `chat`
+ * and `host`, joined by a `.` no part carries, so no two runners share one
+ * and a pool's three parts are never a personal runner's two or a chat
+ * host's four. Names longer than the runner's service can be named for make
+ * a digest of the identity instead, which has no `.` and leads with the
+ * runner's kind.
  *
  * @param {PoolIdentity} identity
  * @param {number} nameCharsMax the longest name the runner's service manager takes in a pool's service's name
@@ -670,7 +758,11 @@ export function registerPoolFileName(identity, nameCharsMax) {
   const name = poolIdentityNames(identity)
     .map(registerPoolFileNamePart)
     .join(".");
-  const kind = poolIdentityPersonal(identity) ? "personal" : "pool";
+  const kind = poolIdentityChatHost(identity)
+    ? "chat-host"
+    : poolIdentityPersonal(identity)
+      ? "personal"
+      : "pool";
   return name.length <= nameCharsMax
     ? `${name}.json`
     : `${kind}-${poolIdentityDigest(identity)}.json`;

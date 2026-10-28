@@ -2,11 +2,13 @@
  * What a runner serves, in the forms this machine keys what it keeps by: the
  * label its containers carry, and a digest naming its runtime directory and
  * its containers. A pool is named by its tenant, project and name; a personal
- * runner by its tenant and the member it serves.
- * Each form is injective across both kinds, so two runners never share one
- * whatever their names hold: a pool's label has three names and a personal
- * runner's two, and a pool's digest is of a list of names where a personal
- * runner's leads with a list of its own. A job's project has a label and a
+ * runner by its tenant and the member it serves; a member's chat host by its
+ * tenant and member, then `chat` and `host`.
+ * Each form is injective across the kinds, so two runners never share one
+ * whatever their names hold: a pool's label has three names, a personal
+ * runner's two and a chat host's four, and a pool's digest is of a list of
+ * names where a personal runner's and a chat host's lead with a list of their
+ * own, each its own length. A job's project has a label and a
  * digest of its own, of its tenant and project alone: a pool's job is in the
  * pool's project, and a personal runner, serving no one project, has each job
  * in the project its assignment names, in its own tenant. So a pool's job and
@@ -27,7 +29,12 @@ import { createHash } from "node:crypto";
  * @property {string} tenant
  * @property {string} owner the principal of the member it serves
  *
- * @typedef {DedicatedPoolIdentity | PersonalRunnerIdentity} PoolIdentity
+ * @typedef {object} ChatHostIdentity
+ * @property {"ChatHost"} kind
+ * @property {string} tenant
+ * @property {string} owner the principal of the member it serves
+ *
+ * @typedef {DedicatedPoolIdentity | PersonalRunnerIdentity | ChatHostIdentity} PoolIdentity
  */
 
 /** How much of a digest a name carries. */
@@ -42,13 +49,37 @@ export function poolIdentityPersonal(identity) {
 }
 
 /**
+ * @param {PoolIdentity} identity
+ * @returns {identity is ChatHostIdentity}
+ */
+export function poolIdentityChatHost(identity) {
+  return identity.kind === "ChatHost";
+}
+
+/**
+ * Whether the identity is a member's, named by its tenant and owner and by no
+ * project: a personal runner's or a chat host's.
+ *
+ * @param {PoolIdentity} identity
+ * @returns {identity is PersonalRunnerIdentity | ChatHostIdentity}
+ */
+export function poolIdentityMember(identity) {
+  return poolIdentityPersonal(identity) || poolIdentityChatHost(identity);
+}
+
+/** The names that follow a chat host's tenant and owner. */
+const poolChatHostNames = ["chat", "host"];
+
+/**
  * The names that key the identity, in order: three of a pool's, two of a
- * personal runner's.
+ * personal runner's and four of a chat host's.
  *
  * @param {PoolIdentity} identity
  * @returns {string[]}
  */
 export function poolIdentityNames(identity) {
+  if (poolIdentityChatHost(identity))
+    return [identity.tenant, identity.owner, ...poolChatHostNames];
   return poolIdentityPersonal(identity)
     ? [identity.tenant, identity.owner]
     : [identity.tenant, identity.project, identity.pool];
@@ -61,7 +92,7 @@ export function poolIdentityNames(identity) {
 export function poolIdentitySame(one, other) {
   const names = poolIdentityNames(other);
   return (
-    poolIdentityPersonal(one) === poolIdentityPersonal(other) &&
+    one.kind === other.kind &&
     poolIdentityNames(one).every((name, index) => name === names[index])
   );
 }
@@ -92,7 +123,7 @@ function poolLabelValueJoined(names) {
 export function poolIdentityDigest(identity, ...more) {
   const names = poolIdentityNames(identity);
   return poolIdentityDigestHex([
-    ...(poolIdentityPersonal(identity) ? [names] : names),
+    ...(poolIdentityMember(identity) ? [names] : names),
     ...more,
   ]);
 }
@@ -107,15 +138,14 @@ function poolIdentityDigestHex(keyed) {
 
 /**
  * The tenant and project a job is in: a pool's own, whatever its assignment
- * names, and a personal runner's tenant with the project the assignment
+ * names, and a member's runner's tenant with the project the assignment
  * names, or none where it names none.
  *
  * @param {PoolIdentity} identity
  * @param {string} [assigned] the project the job's assignment names
  */
 function poolProjectNames(identity, assigned) {
-  if (!poolIdentityPersonal(identity))
-    return [identity.tenant, identity.project];
+  if (!poolIdentityMember(identity)) return [identity.tenant, identity.project];
   return assigned === undefined ? undefined : [identity.tenant, assigned];
 }
 

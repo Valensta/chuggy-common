@@ -190,3 +190,36 @@ test("a personal runner's file naming a project or pool, or no member, or a pool
   ])
     assert.match(await refusal(JSON.stringify(document)), named);
 });
+
+/** A chat host's file: a personal runner's with no capabilities, of its own kind. */
+const chatHost = {
+  kind: "ChatHost",
+  tenant: personal.tenant,
+  owner: personal.owner,
+  tokenUrl: registration.tokenUrl,
+  audience: registration.audience,
+  planeUrl: registration.planeUrl,
+  clientId: registration.clientId,
+  clientSecret: secret,
+};
+
+test("a chat host's file is read back whole", async () => {
+  assert.deepEqual(
+    await written(JSON.stringify(chatHost), 0o600, poolCredentials),
+    chatHost,
+  );
+});
+
+test("a chat host's file declaring capabilities or the machine's host, or naming a project or no member, is refused by name", async () => {
+  const { owner, ...ownerless } = chatHost;
+  assert.equal(owner, personal.owner);
+  for (const [document, named] of [
+    [{ ...chatHost, capabilities: [] }, /capabilities/u],
+    [{ ...chatHost, host: true }, /host/u],
+    [{ ...chatHost, project: "chuggy" }, /project/u],
+    [ownerless, /owner/u],
+    [{ ...personal, kind: "ChatHost" }, /capabilities/u],
+    [{ ...chatHost, kind: "Personal" }, /capabilities/u],
+  ])
+    assert.match(await refusal(JSON.stringify(document)), named);
+});

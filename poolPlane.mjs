@@ -24,6 +24,10 @@
  * gives only jobs that fit the room, and says whether one waits that would.
  * The client keeps whether the last answer said so, which is how its pool
  * knows to claim by room.
+ *
+ * A member's chat host names on every poll how long a session it claims may
+ * sit idle, where its client is given that, and the answer names it the
+ * image its sessions run in, which is passed on.
  */
 
 import { TextDecoder } from "node:util";
@@ -70,6 +74,7 @@ import { workerPlaneHeaders } from "./transport.mjs";
  * @property {number} settleTimeoutMs
  * @property {WorkerRunner} [runner] the runner's package and version, which each poll names
  * @property {readonly string[]} [capabilities] the runner's capabilities, which each poll names, each once
+ * @property {number} [idleSecs] how long a session a chat host claims may sit idle, which each poll names; the plane caps it, and reads it from a chat host alone
  */
 
 /** The most one reconciliation may weigh, orders above a bounded batch of assignments. */
@@ -137,6 +142,11 @@ export function checkedPoolPlaneClientSettings(input) {
     throw new RangeError(
       `pool plane capabilities must be at most ${String(workerPoolCapabilitiesMax)} tokens a pool can declare`,
     );
+  if (
+    input.idleSecs !== undefined &&
+    (!Number.isSafeInteger(input.idleSecs) || input.idleSecs < 1)
+  )
+    throw new RangeError("pool plane idleSecs must be a positive integer");
   return {
     ...input,
     baseUrl: url.toString(),
@@ -170,6 +180,11 @@ function poolPlaneAssignmentsUrl(settings, held, wanted, wantedSessions) {
     workerPoolPollQuery.wantedSessions,
     String(wantedSessions),
   );
+  if (settings.idleSecs !== undefined)
+    url.searchParams.set(
+      workerPoolPollQuery.idleSecs,
+      String(settings.idleSecs),
+    );
   return url;
 }
 
@@ -263,7 +278,8 @@ async function poolPlaneRefusal(answered) {
 
 /**
  * A reconciliation, saying whether a job waits only where the plane that gave
- * it claims by room and said.
+ * it claims by room and said, and the image a chat host's sessions run in
+ * where it names one.
  *
  * @param {Response} answered
  * @returns {Promise<WorkerPoolPolled>}
@@ -287,7 +303,7 @@ async function poolPlaneReconciled(answered) {
       polled: "Unavailable",
       evidence: "the plane answered no reconciliation this pool can read",
     };
-  const { release, jobsWaiting } = read.data;
+  const { release, jobsWaiting, chatImage } = read.data;
   const waiting = poolPlaneClaimsByRoom(answered) ? jobsWaiting : undefined;
   return {
     polled: "Reconciled",
@@ -296,6 +312,7 @@ async function poolPlaneReconciled(answered) {
     stop: read.data.stop,
     ...(release === undefined ? {} : { release }),
     ...(waiting === undefined ? {} : { jobsWaiting: waiting }),
+    ...(chatImage === undefined ? {} : { chatImage }),
   };
 }
 

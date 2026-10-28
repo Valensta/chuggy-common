@@ -105,8 +105,8 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  *
  * @typedef {{polled: "Reconciled", assignments: readonly WorkerPoolAssignment[],
  *   sessions: readonly WorkerPoolSessionAssignment[], stop: readonly string[], release?: WorkerRunnerRelease,
- *   jobsWaiting?: boolean}
- *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named
+ *   jobsWaiting?: boolean, chatImage?: string}
+ *   | {polled: "Stale"} | {polled: "Denied", evidence: string} | {polled: "Unavailable", evidence: string}} WorkerPoolPolled `jobsWaiting` where the plane claims by room: whether a job waits that fits what the poll named; `chatImage` the image a chat host's sessions run in, where the plane names one
  *
  * @typedef {object} WorkerPoolPollTerms what a poll names beside its query
  * @property {WorkerPoolMemoryRoom} [memory] the room it offers jobs, and its ceiling

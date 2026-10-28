@@ -684,6 +684,18 @@ test("a pool runs work on its host on the platforms of the host's system it decl
   );
 });
 
+/** Catches a CLI that runs a job on its host under a chat host's credentials. */
+test("a chat host's credentials run no job on its host", () => {
+  assert.throws(
+    () =>
+      hostPlatformsDeclared(
+        { kind: "ChatHost", capabilities: [], host: true },
+        "Linux",
+      ),
+    /^RangeError: a chat host runs no job, so its credentials run none on its host$/u,
+  );
+});
+
 test("a host beside a container backend takes its own jobs, and everything else goes to the containers", async () => {
   /** @type {string[]} */
   const calls = [];
