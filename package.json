@@ -28,6 +28,7 @@
     "boundedResponse.mjs",
     "chatChannel.mjs",
     "chatCheckout.mjs",
+    "chatHost.mjs",
     "chatHostBackend.mjs",
     "chatSession.mjs",
     "chatSupervisor.mjs",

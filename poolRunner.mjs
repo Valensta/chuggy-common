@@ -73,15 +73,27 @@ export function poolRunnerTokens(credentials) {
  * @param {PoolCredentials} credentials
  * @param {RunnerIdentity} [runner] the runner's package and version, which each poll names
  * @param {readonly string[]} [capabilities] the runner's capabilities, which each poll names; none, and the set its registration recorded stands
+ * @param {number} [idleSecs] how long a session a chat host claims may sit idle, which each poll names; a chat host's alone
+ * @param {typeof globalThis.fetch} [fetcher] the fetch the plane is reached by, when not the global one
  * @returns {WorkerPoolClient["plane"]}
  */
-export function poolRunnerPlane(credentials, runner, capabilities) {
-  return poolPlaneClient({
-    baseUrl: credentials.planeUrl,
-    ...planeSettings,
-    ...(runner === undefined ? {} : { runner }),
-    ...(capabilities === undefined ? {} : { capabilities }),
-  });
+export function poolRunnerPlane(
+  credentials,
+  runner,
+  capabilities,
+  idleSecs,
+  fetcher,
+) {
+  return poolPlaneClient(
+    {
+      baseUrl: credentials.planeUrl,
+      ...planeSettings,
+      ...(runner === undefined ? {} : { runner }),
+      ...(capabilities === undefined ? {} : { capabilities }),
+      ...(idleSecs === undefined ? {} : { idleSecs }),
+    },
+    fetcher,
+  );
 }
 
 /**
@@ -90,13 +102,19 @@ export function poolRunnerPlane(credentials, runner, capabilities) {
  * @param {PoolCredentials} credentials
  * @param {WorkerPoolBackend} backend
  * @param {PoolRunnerLimits} limits
- * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[]}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by when not the global one, and the runner and the capabilities each poll names
+ * @param {{tokens?: WorkerPoolClient["tokens"], fetch?: typeof globalThis.fetch, planeFetch?: typeof globalThis.fetch, runner?: RunnerIdentity, capabilities?: readonly string[], idleSecs?: number}} [seams] the token source when not the pool file's, the fetch a job's or a session's plane is reached by and the one the pool's plane is when not the global one, and the runner, the capabilities and a chat host's idle bound each poll names
  * @returns {WorkerPoolClient}
  */
 export function poolRunnerClient(credentials, backend, limits, seams = {}) {
   return {
     tokens: seams.tokens ?? poolRunnerTokens(credentials),
-    plane: poolRunnerPlane(credentials, seams.runner, seams.capabilities),
+    plane: poolRunnerPlane(
+      credentials,
+      seams.runner,
+      seams.capabilities,
+      seams.idleSecs,
+      seams.planeFetch,
+    ),
     jobs: poolJobPlaneClient(jobPlaneSettings, seams.fetch),
     sessions: poolSessionPlaneClient(sessionPlaneSettings, seams.fetch),
     backend,
