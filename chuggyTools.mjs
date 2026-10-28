@@ -59,6 +59,11 @@
  * what one landing weighs, and the suite holds the heaviest one inside an
  * answer.
  *
+ * TWO ARE ANSWERED RESHAPED, every other field as the route answered it.
+ * `list_repositories` adds to each row whether a ticket may be filed in it,
+ * read from that row alone, and `initialize_draft` leaves out the
+ * configuration's `canonical`, which `read_configuration` answers.
+ *
  * THE LAST IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
  * bytes. Its route answers them as base64, bounded by the largest upload rather
  * than by what one answer holds, so `fetch_image` writes them to a file of its
@@ -581,6 +586,72 @@ async function readTicketLandings(context, path) {
 }
 
 /**
+ * A read whose route's body is answered as `reshape` makes it, in place of
+ * verbatim: `undefined` from `reshape` is a body that is not `what` as the
+ * route answers it. A refusal is relayed as any read's is.
+ */
+async function readReshaped(context, path, what, reshape) {
+  const body = await drawn(context, path, chuggyToolResponseBytesMax, what);
+  if (body.refused !== undefined) return body.refused;
+  let parsed;
+  try {
+    parsed = JSON.parse(body.text);
+  } catch {
+    parsed = undefined;
+  }
+  const reshaped =
+    parsed !== null && typeof parsed === "object" ? reshape(parsed) : undefined;
+  return reshaped === undefined
+    ? answered(
+        `the route answered HTTP ${String(body.status)} with a body that is not ${what} as the contract answers it.`,
+        true,
+      )
+    : answered(`HTTP ${String(body.status)}\n${JSON.stringify(reshaped)}`);
+}
+
+/** Why a ticket filed in a listed binding would not run, or nothing where it would. */
+function listRepositoriesUnfileable({ retiredAt, workerReach }) {
+  if (retiredAt !== undefined)
+    return `Retired at ${String(retiredAt)}, so a draft naming it is refused.`;
+  if (workerReach === undefined) return undefined;
+  return workerReach?.reach === "Unknown"
+    ? "The forge could not say whether the worker app reaches it (workerReach Unknown), so a ticket in it may stop at its clone."
+    : `Not reached by the worker app (workerReach ${String(workerReach?.reach)}), so a ticket in it stops at its clone.`;
+}
+
+/** The listing with each row saying whether a ticket may be filed in it, and otherwise as the route answered it. */
+function listRepositoriesFileable(body) {
+  const { repositories } = body;
+  if (
+    !Array.isArray(repositories) ||
+    !repositories.every((row) => row !== null && typeof row === "object")
+  )
+    return undefined;
+  return {
+    ...body,
+    repositories: repositories.map((row) => {
+      const fileableReason = listRepositoriesUnfileable(row);
+      return fileableReason === undefined
+        ? { ...row, fileable: true }
+        : { ...row, fileable: false, fileableReason };
+    }),
+  };
+}
+
+/** A draft's initialization without its configuration's canonical document, which read_configuration answers. */
+function initializeDraftUncanonical(body) {
+  const { configuration } = body;
+  if (configuration === null || typeof configuration !== "object")
+    return undefined;
+  return {
+    ...body,
+    configuration: Object.fromEntries(
+      Object.entries(configuration).filter(([key]) => key !== "canonical"),
+    ),
+  };
+}
+
+/**
  * The version `ticket` is dispatched at, as its dispatch view entry names it,
  * or why there is none: the view is being rebuilt, or the ticket is no
  * candidate. A body that is no view as the contract answers one is undefined.
@@ -1092,10 +1163,15 @@ export const chuggyProjectTools = [
   {
     name: "list_repositories",
     description:
-      "Every repository this project binds, oldest first. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. A retired binding carries `retiredAt`, and a draft write naming it is refused.",
+      "Every repository this project binds, oldest first. `repository` is its clone URL, which is what a brief's `repository` names; `landing` is its landing default, the mode a ticket in it lands by where neither its brief nor its catalog finalizer names one; `configured` says whether the project holds configurations for it, and `configurationsHeld` what: Imported, with the `count` of names it declared, or Bootstrapped, the project's bootstrap `revision`, which a repository declaring none releases its tickets under. A retired binding carries `retiredAt`, and a draft write naming it is refused. `pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why. A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`, since a ticket in a repository the worker app does not reach stops at its clone.",
     shape: () => ({}),
     call: (context) =>
-      read(context, projectPath(context, "projectRepositories")),
+      readReshaped(
+        context,
+        projectPath(context, "projectRepositories"),
+        "this project's repositories",
+        listRepositoriesFileable,
+      ),
   },
   {
     name: "fetch_image",
@@ -1117,7 +1193,7 @@ export const chuggyProjectTools = [
   {
     name: "initialize_draft",
     description:
-      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would.",
+      "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would. `configuration` is answered without its `canonical`; read_configuration answers the document.",
     shape: (z) => ({
       revision: identity(z),
       work: identity(z).optional(),
@@ -1125,9 +1201,11 @@ export const chuggyProjectTools = [
       finalization: identity(z).optional(),
     }),
     call: (context, { revision, work, evaluation, finalization }) =>
-      read(
+      readReshaped(
         context,
         `${projectPath(context, "draftInitialization", { revision })}${search({ work, evaluation, finalization })}`,
+        "a draft's initialization",
+        initializeDraftUncanonical,
       ),
   },
   {

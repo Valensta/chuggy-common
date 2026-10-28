@@ -58,7 +58,7 @@ export const localToolRepeatDescription = `The same call again is a new operatio
 /** What the server tells an agent before it lists the tools. */
 export const localToolInstructions = `The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket:
-1. list_repositories: a repository that is configured and not retired.
+1. list_repositories: a repository that is configured and \`fileable\`.
 2. list_configurations: the newest revision for that repository.
 3. initialize_draft on that revision: the fence and the defaults.
 4. create_draft: the minimum brief, and \`authoring\` from the defaults.

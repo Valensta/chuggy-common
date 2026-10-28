@@ -1236,26 +1236,44 @@ test("each read reaches the route its roster names, and only it", async () => {
   }
 });
 
-test("the project's repositories are read from its own repositories route, and the answer is relayed whole", async () => {
-  const body = JSON.stringify({
-    repositories: [
-      {
-        repository: "https://github.com/vteng/chuggy.git",
-        boundAt: "2026-10-01T00:00:00.000Z",
-        landing: { mode: "PullRequest" },
-        configured: true,
-        configurationsHeld: { result: "Imported", count: 2 },
-      },
-      {
-        repository: "https://github.com/vteng/chuggy-common.git",
-        boundAt: "2026-10-02T00:00:00.000Z",
-        landing: { mode: "Push" },
-        retiredAt: "2026-10-03T00:00:00.000Z",
-        configured: false,
-      },
-    ],
-  });
-  const { api, call } = toolsOf({}, () => ({ status: 200, body }));
+/** A listing of one plain, one retired and one unreached binding, as the route answers it. */
+const repositoriesListed = [
+  {
+    repository: "https://github.com/vteng/chuggy.git",
+    boundAt: "2026-10-01T00:00:00.000Z",
+    landing: { mode: "PullRequest" },
+    pipelinesWritable: false,
+    configured: true,
+    configurationsHeld: { result: "Imported", count: 2 },
+  },
+  {
+    repository: "https://github.com/vteng/chuggy-common.git",
+    boundAt: "2026-10-02T00:00:00.000Z",
+    landing: { mode: "Push" },
+    pipelinesWritable: false,
+    retiredAt: "2026-10-03T00:00:00.000Z",
+    configured: false,
+  },
+  {
+    repository: "https://github.com/vteng/chuggy-docs.git",
+    boundAt: "2026-10-04T00:00:00.000Z",
+    landing: { mode: "PullRequest" },
+    pipelinesWritable: true,
+    configured: true,
+    configurationsHeld: { result: "Bootstrapped", revision: "r0" },
+    workerReach: {
+      reach: "Unselected",
+      installationId: "42",
+      settingsUrl: "https://github.com/settings/installations/42",
+    },
+  },
+];
+
+test("the project's repositories are read from its own repositories route, and each row says whether a ticket may be filed in it and is otherwise as answered", async () => {
+  const { api, call } = toolsOf({}, () => ({
+    status: 200,
+    body: JSON.stringify({ repositories: repositoriesListed }),
+  }));
 
   const answer = await call("list_repositories", {});
 
@@ -1263,8 +1281,116 @@ test("the project's repositories are read from its own repositories route, and t
     api.calls.map(({ path, method }) => [method, path]),
     [["GET", "/api/v1/tenants/vteng/projects/chuggy/repositories"]],
   );
-  assert.equal(textOf(answer), `HTTP 200\n${body}`);
   assert.ok(answer.isError === undefined);
+  const [status, body] = textOf(answer).split("\n");
+  assert.equal(status, "HTTP 200");
+  const [plain, retired, unreached] = JSON.parse(body).repositories;
+  assert.deepEqual(plain, { ...repositoriesListed[0], fileable: true });
+  assert.deepEqual(retired, {
+    ...repositoriesListed[1],
+    fileable: false,
+    fileableReason:
+      "Retired at 2026-10-03T00:00:00.000Z, so a draft naming it is refused.",
+  });
+  assert.deepEqual(unreached, {
+    ...repositoriesListed[2],
+    fileable: false,
+    fileableReason:
+      "Not reached by the worker app (workerReach Unselected), so a ticket in it stops at its clone.",
+  });
+});
+
+test("a binding the forge could not say the worker app reaches is not fileable, and says so", async () => {
+  const { call } = toolsOf({}, () => ({
+    status: 200,
+    body: JSON.stringify({
+      repositories: [
+        { ...repositoriesListed[0], workerReach: { reach: "Unknown" } },
+      ],
+    }),
+  }));
+
+  const [row] = JSON.parse(
+    textOf(await call("list_repositories", {})).split("\n")[1],
+  ).repositories;
+
+  assert.equal(row.fileable, false);
+  assert.match(
+    row.fileableReason,
+    /could not say whether the worker app reaches it/,
+  );
+});
+
+/** A draft's initialization as the route answers it, its configuration's canonical document included. */
+const draftInitialized = {
+  configuration: {
+    partition: "vteng/chuggy",
+    revision: "r1",
+    canonical: JSON.stringify({ version: 2, prompt: "x".repeat(4_096) }),
+    digest: "sha256:ab",
+    version: 2,
+  },
+  fence: { projectSequence: 12, configurationDigest: "sha256:ab" },
+  defaults: { program: { 1: { evaluators: [] } }, dependencies: [] },
+  choices: { programStagesMax: 4, evaluatorsMax: 8 },
+  dependencyCandidates: [3, 5],
+  dependencyCandidatesTruncated: false,
+  commandedCheckStage: 1,
+  commandedCheckStageNote: "stage 1",
+};
+
+test("a draft's initialization is answered without its configuration's canonical document, and otherwise as answered", async () => {
+  const { call } = toolsOf({}, () => ({
+    status: 200,
+    body: JSON.stringify(draftInitialized),
+  }));
+
+  const answer = await call("initialize_draft", { revision: "r1" });
+
+  assert.ok(answer.isError === undefined);
+  const [status, body] = textOf(answer).split("\n");
+  assert.equal(status, "HTTP 200");
+  const { canonical, ...identified } = draftInitialized.configuration;
+  assert.ok(canonical.length > 0);
+  assert.deepEqual(JSON.parse(body), {
+    ...draftInitialized,
+    configuration: identified,
+  });
+  assert.ok(!body.includes("canonical"), "the canonical document was answered");
+});
+
+test("a refused read of either reshaped tool is relayed as the refusal it is", async () => {
+  const refusal = JSON.stringify({ error: "NotFound" });
+  const { call } = toolsOf({}, () => ({ status: 404, body: refusal }));
+
+  for (const [name, args] of [
+    ["list_repositories", {}],
+    ["initialize_draft", { revision: "r1" }],
+  ]) {
+    const answer = await call(name, args);
+    assert.equal(answer.isError, true, name);
+    assert.equal(textOf(answer), `HTTP 404\n${refusal}`, name);
+  }
+});
+
+test("a body that is not the listing or the initialization the contract answers is refused rather than answered", async () => {
+  for (const body of [
+    "not json",
+    "null",
+    JSON.stringify({ repositories: [7] }),
+  ]) {
+    const { call } = toolsOf({}, () => ({ status: 200, body }));
+    const answer = await call("list_repositories", {});
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /not this project's repositories/, body);
+  }
+  const { call } = toolsOf({}, () => ({
+    status: 200,
+    body: JSON.stringify({ configuration: "r1" }),
+  }));
+  const answer = await call("initialize_draft", { revision: "r1" });
+  assert.equal(answer.isError, true);
+  assert.match(textOf(answer), /not a draft's initialization/);
 });
 
 /** An image's bytes, opening as a PNG does, and the route's answer carrying them. */
@@ -2231,6 +2357,7 @@ test("the descriptions say what the server does where a session reads it", () =>
       /`choices\.programStagesMax`/,
       /`commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults\.program` keys are/,
       /`commandedCheckStageNote` says it in words/,
+      /`configuration` is answered without its `canonical`; read_configuration answers the document/,
     ],
     read_ticket: [
       /`escalation\.failed`, which read_run_error takes to read the attempt's error text/,
@@ -2252,6 +2379,8 @@ test("the descriptions say what the server does where a session reads it", () =>
       /`configured` says whether the project holds configurations for it/,
       /Bootstrapped, the project's bootstrap `revision`/,
       /A retired binding carries `retiredAt`, and a draft write naming it is refused/,
+      /`pipelinesWritable` says whether its jobs may write its pipeline definitions, and `workerReach`, present only where the worker app cannot be said to reach it, says why/,
+      /A ticket may be filed in any binding not retired, and one holding no configurations releases its tickets under the project's bootstrap\. Each row's `fileable` says whether to file a ticket there: false, with `fileableReason` saying why, where it is retired or carries `workerReach`/,
     ],
     fetch_image: [
       /by the identity a message's images section or a brief names it by/,
@@ -2800,7 +2929,11 @@ test("every project tool a session holds asks its route, read_docs the docs host
               ? JSON.stringify({ landings: [], truncated: false })
               : path.includes("/dispatch-view")
                 ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
-                : "{}",
+                : path.endsWith("/repositories")
+                  ? JSON.stringify({ repositories: [] })
+                  : path.includes("/draft-initializations/")
+                    ? JSON.stringify(draftInitialized)
+                    : "{}",
       }),
     );
 

@@ -155,6 +155,10 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   for (const tool of recipe) assert.ok(tools.has(tool), tool);
   assert.match(
     localToolInstructions,
+    /^1\. list_repositories: [^\n]*`fileable`/mu,
+  );
+  assert.match(
+    localToolInstructions,
     /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
   );
 });
