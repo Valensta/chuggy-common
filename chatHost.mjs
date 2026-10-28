@@ -139,7 +139,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @typedef {object} ChatHostSeams
  * @property {Engine} engine
  * @property {PullSite} site
- * @property {(container: ChatSupervisorContainer) => ChatSupervisorHandle | Promise<ChatSupervisorHandle>} started the supervisor run as `container` says
+ * @property {(container: ChatSupervisorContainer, engineName: EngineName) => ChatSupervisorHandle | Promise<ChatSupervisorHandle>} started the supervisor run as `container` says, on the engine `site` names
  * @property {(line: string) => void} log
  * @property {(assignment: string) => (line: string) => void} logFor
  * @property {(ms: number) => Promise<void>} sleep
@@ -431,8 +431,7 @@ export function chatSupervisorNaming(identity, network) {
 
 /**
  * @typedef {object} ChatSupervisorRunSeams
- * @property {EngineName} engineName the engine's CLI, run as `engine` runs it
- * @property {Engine} engine
+ * @property {Engine} engine the CLI the host's site names, which runs the supervisor too
  * @property {ChatSupervisorNaming} naming
  * @property {typeof spawnDefault} [spawn] what starts the engine's `run`, when not Node's own
  */
@@ -445,15 +444,16 @@ export function chatSupervisorNaming(identity, network) {
  * removed, one still running among them, refuses the start, and is never
  * killed for it. The supervisor has exited once the child has, or could not
  * start. A kill ends the child and asks the engine to kill the container,
- * which a client's end alone does not.
+ * which a client's end alone does not. The engine is the one the host's
+ * site names, which its settings were checked against.
  *
  * @param {ChatSupervisorRunSeams} seams
- * @returns {(container: ChatSupervisorContainer) => Promise<ChatSupervisorHandle>}
+ * @returns {ChatHostSeams["started"]}
  */
 export function chatSupervisorStarted(seams) {
-  const { engineName, engine, naming } = seams;
+  const { engine, naming } = seams;
   const spawn = seams.spawn ?? spawnDefault;
-  return async (container) => {
+  return async (container, engineName) => {
     const { argv, environment } = chatSupervisorRunArgv(
       engineName,
       container,
@@ -584,6 +584,7 @@ async function chatHostStarted(state, image) {
         state.settings.places,
         chatHostMemoryBytes(state.settings),
       ),
+      seams.site.engine,
     );
     if (state.cut.signal.aborted) {
       handle.input.on("error", () => undefined);

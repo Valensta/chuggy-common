@@ -221,7 +221,8 @@ function engineOf(seen, { present, pulls, gate }) {
  * past them denied, and `present` the images the engine holds. A pull waits
  * on `gate`; a host's wait outlasts a start it is making unless `hasty`, so
  * a start takes no time of the host's clock. A start answers what `handed`
- * makes of each supervisor's handle, given what the host has logged.
+ * makes of each supervisor's handle, given what the host has logged. Its
+ * site's engine is `engine`.
  */
 async function hostOf(
   t,
@@ -234,6 +235,7 @@ async function hostOf(
     hasty = false,
     lingering = false,
     handed = (handle) => handle,
+    engine = "docker",
   },
 ) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
@@ -243,6 +245,7 @@ async function hostOf(
     ended: [],
     execs: [],
     started: [],
+    engines: [],
     startedMs: [],
     sleeps: [],
     events: [],
@@ -259,9 +262,10 @@ async function hostOf(
     { ...settings, ...given },
     {
       engine: engineOf(seen, { present, pulls, gate }),
-      site: { engine: "docker", runtimeDir, dockerHost: "unix:///docker.sock" },
-      started: (container) => {
+      site: { engine, runtimeDir, dockerHost: "unix:///docker.sock" },
+      started: (container, engineName) => {
         seen.started.push(container);
+        seen.engines.push(engineName);
         seen.startedMs.push(clock);
         seen.events.push(`started ${container.image}`);
         const supervisor = supervisorOf(3, lingering);
@@ -934,7 +938,6 @@ function startOf(removed) {
   const seen = { execs: [], spawned: [] };
   const child = childOf();
   const started = chatSupervisorStarted({
-    engineName: "docker",
     engine: {
       exec: async (argv) => {
         seen.execs.push([...argv]);
@@ -965,7 +968,7 @@ test("a supervisor is started once a container of its name that has exited is re
     { code: 1, stdout: "", stderr: `Error: No such container: ${name}` },
   ]) {
     const { started, seen } = startOf(removed);
-    await started(container);
+    await started(container, "docker");
     assert.deepEqual(seen.execs, [["rm", "-v", name]]);
     assert.equal(seen.spawned.length, 1);
     const [{ command, argv, env }] = seen.spawned;
@@ -985,16 +988,37 @@ test("a supervisor is started once a container of its name that has exited is re
     stderr: `Error response from daemon: cannot remove container "${name}": container is running: stop the container before removing or force remove`,
   });
   await assert.rejects(
-    started(container),
+    started(container, "docker"),
     /is still there, and no supervisor is started beside it/u,
   );
   assert.deepEqual(seen.execs, [["rm", "-v", name]]);
   assert.deepEqual(seen.spawned, []);
 });
 
+/**
+ * Catches a supervisor run on an engine other than the one its host's
+ * settings were checked against, which would run what that engine refuses.
+ */
+test("a host's supervisor is started on the engine its site names, which its settings are checked against", async (t) => {
+  const { started, seen } = startOf({ code: 0, stdout: "", stderr: "" });
+  await started(chatSupervisorContainer(one, places, gib), "podman");
+  assert.equal(seen.spawned[0].command, "podman");
+  assert.ok(seen.spawned[0].argv.includes("--userns=host"));
+
+  const run = await hostOf(t, {
+    answers: [{ chatImage: one }, {}],
+    engine: "podman",
+  });
+  await run.host.run();
+  assert.deepEqual(run.seen.engines, ["podman"]);
+});
+
 test("a started supervisor's kill ends its child and asks the engine to kill its container", async () => {
   const { started, seen, child } = startOf({ code: 0, stdout: "", stderr: "" });
-  const handle = await started(chatSupervisorContainer(one, places, gib));
+  const handle = await started(
+    chatSupervisorContainer(one, places, gib),
+    "docker",
+  );
   assert.equal(handle.input, child.stdin);
   handle.kill();
   await handle.exited;
