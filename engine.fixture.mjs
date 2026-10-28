@@ -45,6 +45,7 @@ import { dirname } from "node:path";
  * @property {string[]} [env] each `NAME=value`, as an inspection lists them
  * @property {number} [exitCode]
  * @property {string} [startedAt] when it started, which an inspection answers as docker's zero time where none
+ * @property {string} [finishedAt] when it finished, which an inspection answers as docker's zero time where none
  * @property {string[]} [volumes] each `--volume` it was run with
  * @property {string[]} [command] what it was run with after its image
  * @property {string} [entrypoint]
@@ -469,6 +470,7 @@ function inspected(state, references) {
               Status: container.status,
               ExitCode: container.exitCode,
               StartedAt: container.startedAt ?? "0001-01-01T00:00:00Z",
+              FinishedAt: container.finishedAt ?? "0001-01-01T00:00:00Z",
             },
           },
         ],

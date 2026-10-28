@@ -28,6 +28,12 @@
  * A member's chat host names on every poll how long a session it claims may
  * sit idle, where its client is given that, and the answer names it the
  * image its sessions run in, which is passed on.
+ *
+ * A runner's report of itself is posted under the token it is given, and is
+ * taken only where the plane answers 204; the client keeps the version the
+ * last poll's answer named, none where it named none, which is how its
+ * runner knows whether a poll reached the plane and whether the plane takes a
+ * report.
  */
 
 import { TextDecoder } from "node:util";
@@ -54,6 +60,7 @@ import {
   workerRunnerMemoryCeilingHeader,
   workerRunnerCountOf,
   workerRunnerMemoryRoomHeader,
+  workerRunnerReportRoute,
   workerRunnerSchema,
 } from "@chuggy/worker-contract/workerPool";
 
@@ -67,6 +74,8 @@ import { workerPlaneHeaders } from "./transport.mjs";
  * @typedef {import("./poolLoop.mjs").WorkerPoolPollTerms} WorkerPoolPollTerms
  * @typedef {import("./poolLoop.mjs").WorkerPoolPolled} WorkerPoolPolled
  * @typedef {import("./poolLoop.mjs").WorkerPoolSettled} WorkerPoolSettled
+ * @typedef {import("./poolLoop.mjs").WorkerPoolReported} WorkerPoolReported
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractVersion} WorkerContractVersion
  *
  * @typedef {object} PoolPlaneClientSettings
  * @property {string} baseUrl
@@ -324,7 +333,7 @@ async function poolPlaneReconciled(answered) {
  * @param {number} wanted
  * @param {number} wantedSessions
  * @param {WorkerPoolPollTerms} terms
- * @returns {Promise<WorkerPoolPolled>}
+ * @returns {Promise<{polled: WorkerPoolPolled, version: WorkerContractVersion | undefined}>}
  */
 async function poolPlanePolled(
   settings,
@@ -355,13 +364,19 @@ async function poolPlanePolled(
     });
   } catch {
     return {
-      polled: "Unavailable",
-      evidence: "the plane could not be reached",
+      polled: {
+        polled: "Unavailable",
+        evidence: "the plane could not be reached",
+      },
+      version: undefined,
     };
   }
-  return answered.status === 200
-    ? poolPlaneReconciled(answered)
-    : poolPlaneRefusal(answered);
+  return {
+    polled: await (answered.status === 200
+      ? poolPlaneReconciled(answered)
+      : poolPlaneRefusal(answered)),
+    version: poolPlaneVersion(answered),
+  };
 }
 
 /**
@@ -440,6 +455,39 @@ async function poolPlaneSettled(settings, fetcher, token, assignment, outcome) {
 }
 
 /**
+ * A runner's report, posted under the settlement's timeout, since nothing
+ * waits on it either.
+ *
+ * @param {PoolPlaneClientSettings} settings
+ * @param {typeof fetch} fetcher
+ * @param {string} token
+ * @param {string} body the report as JSON
+ * @returns {Promise<WorkerPoolReported>}
+ */
+async function poolPlaneReported(settings, fetcher, token, body) {
+  let answered;
+  try {
+    answered = await fetcher(poolPlaneUrl(settings, workerRunnerReportRoute), {
+      method: "POST",
+      signal: globalThis.AbortSignal.timeout(settings.settleTimeoutMs),
+      headers: workerPlaneHeaders(token, {
+        "content-type": "application/json",
+      }),
+      body,
+    });
+  } catch {
+    return { reported: "Failed", evidence: "the plane could not be reached" };
+  }
+  await answered.body?.cancel();
+  return answered.status === 204
+    ? { reported: "Reported" }
+    : {
+        reported: "Failed",
+        evidence: `the plane answered ${String(answered.status)}`,
+      };
+}
+
+/**
  * @param {PoolPlaneClientSettings} input
  * @param {typeof fetch} [fetcher]
  * @returns {WorkerPoolPlane}
@@ -448,9 +496,11 @@ export function poolPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolPlaneClientSettings(input);
   /** @type {boolean | undefined} */
   let byRoom;
+  /** @type {WorkerContractVersion | undefined} */
+  let polledVersion;
   return {
     poll: async (token, held, wanted, wantedSessions = 0, terms = {}) => {
-      const polled = await poolPlanePolled(
+      const { polled, version } = await poolPlanePolled(
         settings,
         fetcher,
         token,
@@ -459,12 +509,15 @@ export function poolPlaneClient(input, fetcher = globalThis.fetch) {
         wantedSessions,
         terms,
       );
+      polledVersion = version;
       if (polled.polled === "Reconciled")
         byRoom = polled.jobsWaiting !== undefined;
       return polled;
     },
     claimsByRoom: () => byRoom,
+    polledVersion: () => polledVersion,
     settle: (token, assignment, outcome) =>
       poolPlaneSettled(settings, fetcher, token, assignment, outcome),
+    report: (token, body) => poolPlaneReported(settings, fetcher, token, body),
   };
 }

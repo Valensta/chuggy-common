@@ -28,7 +28,9 @@
  * backend's own reason and never the job's output, which is written to the log
  * directory as it runs, can hold a secret, and is cut to its end as
  * `savedLog.mjs` bounds a saved log once the job ends. One this pool stopped
- * is never named.
+ * is never named. An end says how the job's process ended but where its
+ * deadline killed it, and every job's run, a stopped one's too, is measured
+ * from its spawn to its process closing.
  */
 
 import { spawn as spawnDefault } from "node:child_process";
@@ -50,6 +52,7 @@ import {
   jobHostPlaces,
   reservedJobVariables,
 } from "./job.mjs";
+import { runnerMeasures, runnerMeasuredSum } from "./runnerReport.mjs";
 import { savedLogTrimmed } from "./savedLog.mjs";
 
 /**
@@ -89,6 +92,7 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {string} assignment
  * @property {string} name what its log is kept under
  * @property {number} deadlineEpochSecs
+ * @property {number} startedMs
  * @property {{assignment: string, callbackUrl: string, bearer: string}} attempt
  * @property {ChildProcess} child
  * @property {string} directory
@@ -122,6 +126,7 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {WorkerPoolEnded[]} pending ends `held` has not yet stopped naming
  * @property {WorkerPoolEnded[]} ready ends `ended` names next
  * @property {boolean} swept whether a predecessor's directories were removed
+ * @property {import("./runnerReport.mjs").RunnerMeasures} measures
  */
 
 /** How long a job asked to stop is given before its group is killed outright. */
@@ -493,6 +498,10 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
       clearTimeout(deadline);
       signalled(state, job, "SIGKILL");
       job.reaped = true;
+      state.measures.ran(
+        "Job",
+        ((state.seams.nowMs ?? Date.now)() - job.startedMs) / 1000,
+      );
       void (async () => {
         try {
           await log.close().catch(() => undefined);
@@ -514,7 +523,11 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
               kind: "Job",
               job: job.attempt,
               why,
-              ...(job.expired ? { killed: "Deadline" } : {}),
+              ...(job.expired
+                ? { killed: "Deadline" }
+                : {
+                    ran: signal === null && code === 0 ? "Succeeded" : "Failed",
+                  }),
             });
           }
           settle();
@@ -551,12 +564,13 @@ async function hostPlaced(state, assignment, kind) {
     assignment.deadlineSecs,
     settings.timeoutSecsMax,
   );
+  const startedMs = (seams.nowMs ?? Date.now)();
   /** @type {HostJob} */
   const job = {
     assignment: assignment.assignment,
     name,
-    deadlineEpochSecs:
-      Math.floor((seams.nowMs ?? Date.now)() / 1000) + deadlineSecs,
+    deadlineEpochSecs: Math.floor(startedMs / 1000) + deadlineSecs,
+    startedMs,
     attempt: {
       assignment: assignment.assignment,
       callbackUrl: assignment.callbackUrl,
@@ -640,6 +654,7 @@ export function hostBackend(settings, seams) {
     pending: [],
     ready: [],
     swept: false,
+    measures: runnerMeasures(),
   };
   (seams.atExit ?? hostExitWatched)(() => {
     for (const job of state.jobs.values()) signalled(state, job, "SIGKILL");
@@ -656,6 +671,7 @@ export function hostBackend(settings, seams) {
     held: () => hostHeld(state),
     ended: async () => state.ready.splice(0),
     holds: (assignment) => state.jobs.has(assignment),
+    measured: () => state.measures.measured(),
     inFlight: () =>
       [...state.jobs.values()].map((job) => ({
         assignment: job.assignment,
@@ -674,8 +690,8 @@ export function hostBackend(settings, seams) {
 /**
  * A container backend with a host beside it: a job that pins no image and
  * names a platform the host is runs there, and every other workload in a
- * container. What either holds, is placing or ended is read of both, and the
- * container backend's own reads are kept.
+ * container. What either holds, is placing, ended or measured is read of
+ * both, and the container backend's own reads are kept.
  *
  * @template {WorkerPoolBackend & {inFlight: () => readonly unknown[], settled: () => Promise<void>}} Container
  * @param {Container} container
@@ -703,6 +719,10 @@ export function hostRoutedBackend(container, host, platforms) {
     held: async () => [...(await container.held()), ...(await host.held())],
     ended: async () => [...(await container.ended()), ...(await host.ended())],
     inFlight: () => [...container.inFlight(), ...host.inFlight()],
+    measured: () =>
+      runnerMeasuredSum(
+        [container, host].flatMap((backend) => backend.measured?.() ?? []),
+      ),
     settled: async () => {
       await Promise.all([container.settled(), host.settled()]);
     },

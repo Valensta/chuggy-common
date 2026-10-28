@@ -35,7 +35,14 @@
  * reason, never the job's log, which can hold a secret, and a session's with
  * its phase, `Succeeded` only for a container that exited 0. A failed
  * placement's attempt is the one it held; a container's is read back from the
- * envelope it was run with. One this pool stopped is never named.
+ * envelope it was run with. One this pool stopped is never named. A job's end
+ * says how its process ended where its container was started and ended of
+ * itself.
+ *
+ * `measured` IS EACH PULL THIS PROCESS MADE, from its first try to the image
+ * being here, and each run whose container it removed, however it ended, from
+ * the start the engine names to its finish, or to the removal where it names
+ * none.
  *
  * A JOB WHOSE ASSIGNMENT NAMES A RUNTIME STARTS THROUGH IT, whatever image it
  * names, as chuggy's cluster starts one: once the job's image is here, the
@@ -224,6 +231,7 @@ import {
   memoryStartDecided,
 } from "./memoryBudget.mjs";
 import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
+import { runnerMeasures } from "./runnerReport.mjs";
 import { runtimeScratch } from "./runtimeScratch.mjs";
 import {
   savedLogBytesMax,
@@ -331,6 +339,7 @@ import {
  * @property {number | undefined} exitCode
  * @property {number | undefined} deadlineEpochSecs
  * @property {number | undefined} startedMs where the engine says it started
+ * @property {number | undefined} finishedMs where the engine says it finished, which before it has is a time before it started
  * @property {string | undefined} runtimeVolume the volume holding its copy of chuggy's runtime, where it was started through one
  * @property {string | undefined} workspaceVolume the volume its workspace is, where it was started through chuggy's runtime
  *
@@ -351,6 +360,7 @@ import {
  * @typedef {object} ContainerEnd how a workload's container ended
  * @property {string} why in this backend's words, which a job's end carries
  * @property {boolean} succeeded whether it exited 0, which a session's end carries
+ * @property {true} [ran] where its workload ran to an end of its own, which a job's end carries as `succeeded` says; none for one never started
  * @property {WorkerPoolJobRefusal} [refusal] where this site refused the job for its image's fault rather than ran it, which a job's end carries
  * @property {"Deadline" | "DiskLow"} [killed] where `held` killed it, at its deadline or for low disk, which a job's end carries
  *
@@ -366,6 +376,7 @@ import {
  * @property {import("./diskFloor.mjs").DiskFloor | undefined} disk
  * @property {import("./memoryBudget.mjs").MemoryBudget | undefined} memory
  * @property {Map<string, Promise<unknown>>} runtimeTurns the turn last queued at each runtime image, which `runtimeTurnTaken` gives one placement at a time
+ * @property {import("./runnerReport.mjs").RunnerMeasures} measures the pulls it made and the runs whose containers it removed
  *
  * @typedef {z.infer<typeof inspectedSchema>[number]} InspectedContainer
  */
@@ -378,6 +389,9 @@ const endedStatuses = new Set([
   "stopped",
   "configured",
 ]);
+
+/** The ended states of a container that was never started. */
+const unstartedStatuses = new Set(["created", "configured"]);
 
 /** The ended states a container ran to an exit status in. */
 const exitedStatuses = new Set(["exited", "stopped"]);
@@ -486,6 +500,7 @@ const inspectedSchema = z.array(
       Status: z.string(),
       ExitCode: z.number().optional(),
       StartedAt: z.string().optional(),
+      FinishedAt: z.string().optional(),
     }),
   }),
 );
@@ -580,6 +595,7 @@ function poolContainer(inspected) {
   const labels = inspected.Config.Labels ?? {};
   const deadline = Number(labels[deadlineLabel]);
   const started = Date.parse(inspected.State.StartedAt ?? "");
+  const finished = Date.parse(inspected.State.FinishedAt ?? "");
   return {
     id: inspected.Id,
     name: inspected.Name.replace(/^\//u, ""),
@@ -589,6 +605,7 @@ function poolContainer(inspected) {
     exitCode: inspected.State.ExitCode,
     deadlineEpochSecs: Number.isSafeInteger(deadline) ? deadline : undefined,
     startedMs: Number.isNaN(started) ? undefined : started,
+    finishedMs: Number.isNaN(finished) ? undefined : finished,
     runtimeVolume: labels[runtimeLabel],
     workspaceVolume: labels[workspaceLabel],
   };
@@ -876,11 +893,31 @@ async function retired(state, container, why) {
       ? `${container.name} ${why}; ${kept}, container removed`
       : `${container.name} ${why}; ${kept}, not removed: ${engineFailureLine(removed)}`,
   );
+  if (removed.code === 0) retiredRan(state, container);
   if (removed.code === 0)
     await runtimeVolumesRemoved(state, container.name, [
       container.runtimeVolume,
       container.workspaceVolume,
     ]);
+}
+
+/**
+ * Measures the run of a container removed, from its start to its finish, or
+ * to now where the engine names no finish after its start: one killed since
+ * it was listed. One the engine names no start for, or the zero time it names
+ * for one never started, is not measured.
+ *
+ * @param {State} state
+ * @param {PoolContainer} container
+ */
+function retiredRan(state, container) {
+  const { startedMs, finishedMs } = container;
+  if (startedMs === undefined || startedMs <= 0) return;
+  const endMs =
+    finishedMs !== undefined && finishedMs >= startedMs
+      ? finishedMs
+      : state.seams.nowMs();
+  state.measures.ran(container.kind, (endMs - startedMs) / 1000);
 }
 
 /**
@@ -923,6 +960,7 @@ function containerEnded(container) {
       ? `its container exited with status ${String(container.exitCode)}`
       : `its container was left ${container.status}`,
     succeeded: exited && container.exitCode === 0,
+    ...(unstartedStatuses.has(container.status) ? {} : { ran: true }),
   };
 }
 
@@ -954,6 +992,9 @@ function workloadEnd(kind, attempt, end) {
     why: end.why,
     ...(end.refusal === undefined ? {} : { refusal: end.refusal }),
     ...(end.killed === undefined ? {} : { killed: end.killed }),
+    ...(end.ran === undefined
+      ? {}
+      : { ran: end.succeeded ? "Succeeded" : "Failed" }),
   };
 }
 
@@ -1521,9 +1562,18 @@ function placementSignal(state, placement, late) {
  * @param {string} image
  * @param {string} named how a failure names the image: `its image` for the job's own
  * @param {string} [platform] the one variant pulled; none, and the engine's own
+ * @param {number} [startedMs] when the first try at this pull was made; none, and this is it
  */
-async function pulled(state, placement, image, named, platform) {
+async function pulled(
+  state,
+  placement,
+  image,
+  named,
+  platform,
+  startedMs = state.seams.nowMs(),
+) {
   await pullMade(state, placement, image, named, platform);
+  state.measures.pulled((state.seams.nowMs() - startedMs) / 1000);
   const id = await state.images.pulledId(image);
   if (id !== undefined) placement.pulled.set(image, id);
 }
@@ -1615,7 +1665,14 @@ async function jobImagePulled(state, placement) {
   const firstPullMs = seams.nowMs();
   for (;;) {
     try {
-      await pulled(state, placement, placement.image, "its image");
+      await pulled(
+        state,
+        placement,
+        placement.image,
+        "its image",
+        undefined,
+        firstPullMs,
+      );
       return;
     } catch (failure) {
       if (
@@ -2908,6 +2965,7 @@ export function containerBackend(settings, seams) {
       claimLockFile: checked.memoryClaimLock,
     }),
     runtimeTurns: new Map(),
+    measures: runnerMeasures(),
   };
   const claimLock = state.memory?.claimLockFile;
   return {
@@ -2935,6 +2993,7 @@ export function containerBackend(settings, seams) {
       (state.memory === undefined || memoryBudgetTakes(state.memory, byRoom)),
     memoryRoom: () =>
       state.memory === undefined ? undefined : memoryRoom(state.memory),
+    measured: () => state.measures.measured(),
     ...(claimLock === undefined
       ? {}
       : { claimed: () => memoryClaimTaken(claimLock) }),
