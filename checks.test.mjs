@@ -8,7 +8,9 @@
 
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { EventEmitter } from "node:events";
 import test from "node:test";
+import { setImmediate } from "node:timers";
 
 import { resultReportCharsMax } from "@chuggy/worker-contract/workerDocuments";
 import {
@@ -240,6 +242,104 @@ test("both streams are captured and a chatty command is bounded", async () => {
   assert.equal(output.checks[0].truncated, false);
   assert.equal(output.checks[1].output.length, workerCheckOutputCharsMax);
   assert.equal(output.checks[1].truncated, true);
+});
+
+test("a chatty command's capture keeps its start and its real ending", async () => {
+  const command = `${chatty}; echo FINAL LINE; exit 1`;
+  const { result, output } = await ran([command]);
+  const [check] = output.checks;
+
+  assert.equal(check.truncated, true);
+  assert.ok(check.output.length <= workerCheckOutputCharsMax);
+  assert.ok(check.output.startsWith("chatter\n"));
+  assert.ok(check.output.endsWith("chatter\nFINAL LINE\n"));
+  assert.ok(result.summary.endsWith("chatter FINAL LINE"), result.summary);
+});
+
+test("a command's output exactly at the bound is captured whole", async () => {
+  const command = `yes x | head -c ${String(workerCheckOutputCharsMax)}`;
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, false);
+  const whole = "x\n".repeat(workerCheckOutputCharsMax);
+  assert.equal(
+    output.checks[0].output,
+    whole.slice(0, workerCheckOutputCharsMax),
+  );
+});
+
+test("a command's output at the bound with a code point across the head's limit is captured whole", async () => {
+  const marker = "\n[capture dropped output here]\n".length;
+  const limit = Math.floor((workerCheckOutputCharsMax - marker) / 2) + marker;
+  const after = workerCheckOutputCharsMax - limit - 1;
+  const command = [
+    `head -c ${String(limit - 1)} /dev/zero | tr '\\0' a`,
+    "printf '\\360\\237\\230\\200'",
+    `head -c ${String(after)} /dev/zero | tr '\\0' b`,
+  ].join("; ");
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, false);
+  assert.equal(
+    output.checks[0].output,
+    `${"a".repeat(limit - 1)}\u{1F600}${"b".repeat(after)}`,
+  );
+});
+
+/** A child that writes each of `chunks` to its stdout as one read, then exits zero. */
+function spawnWriting(chunks) {
+  return () => {
+    const stream = () =>
+      Object.assign(new EventEmitter(), { setEncoding() {} });
+    const child = Object.assign(new EventEmitter(), {
+      stdout: stream(),
+      stderr: stream(),
+    });
+    setImmediate(() => {
+      for (const chunk of chunks) child.stdout.emit("data", chunk);
+      child.emit("close", 0, null);
+    });
+    return child;
+  };
+}
+
+test("a rolling tail cut on a code point keeps nothing from before the cut", async () => {
+  const marker = "\n[capture dropped output here]\n";
+  const headUnits = Math.floor((workerCheckOutputCharsMax - marker.length) / 2);
+  const tailUnits = workerCheckOutputCharsMax - marker.length - headUnits;
+  const chunks = [
+    "a".repeat(workerCheckOutputCharsMax + 1),
+    `b\u{1F600}${"c".repeat(tailUnits - 1)}`,
+  ];
+  const { output } = await ran(["writes"], {
+    spawnProcess: spawnWriting(chunks),
+  });
+
+  assert.equal(output.checks[0].truncated, true);
+  assert.equal(
+    output.checks[0].output,
+    `${"a".repeat(headUnits)}${marker}${"c".repeat(tailUnits - 1)}`,
+  );
+});
+
+test("a command's output just past the bound is marked and still bounded", async () => {
+  const command = `yes x | head -c ${String(workerCheckOutputCharsMax)}; echo END`;
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, true);
+  assert.ok(output.checks[0].output.length <= workerCheckOutputCharsMax);
+  assert.ok(output.checks[0].output.includes("[capture dropped output here]"));
+  assert.ok(output.checks[0].output.endsWith("x\nEND\n"));
+});
+
+test("a capture cut through astral output lands on code points", async () => {
+  const wide = "\u{1F600}";
+  const command = `yes ${wide} | head -c ${String(workerCheckOutputCharsMax * 8)}`;
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, true);
+  assert.ok(output.checks[0].output.isWellFormed());
+  assert.ok(output.checks[0].output.length <= workerCheckOutputCharsMax);
 });
 
 test("what a stage captures across its commands is bounded as one total", async () => {

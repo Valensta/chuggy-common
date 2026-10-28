@@ -73,7 +73,8 @@
  * WHAT A COMMAND WRITES GOES TWO PLACES. It is streamed to the worker's own
  * stdout as it arrives, so a stage that dies mid-run leaves the pod log the
  * account it reached; and it is captured, bounded, for the diagnostic artifact
- * the plane keeps.
+ * the plane keeps: all of it where it fits, and otherwise its start and its
+ * end, marked where output between them was dropped.
  *
  * THE CAPTURE IS BOUNDED AGAINST THE UPLOAD AND NOT AGAINST MEMORY. The
  * artifact the plane refuses is the one that turns a stage's Fail into a
@@ -138,6 +139,9 @@ export const workerSummaryCharsMax = Math.floor(
 
 /** What the report says before the failing command's output, which is what makes the excerpt readable as one. */
 const checkReportExcerptLabel = "; last output of ";
+
+/** What a capture holds where it dropped output, between the head it kept and the end. */
+const checkCaptureMarker = "\n[capture dropped output here]\n";
 
 /** What a scrub is where the caller hands none, which is the suite's case and never the worker's. */
 const checkNoScrub = (text) => text;
@@ -413,17 +417,13 @@ async function runCheckCommand(command, room, services) {
     env: services.environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  let output = "";
-  let truncated = false;
-  const capture = (chunk) => {
-    services.write(chunk);
-    const left = Math.min(workerCheckOutputCharsMax, room) - output.length;
-    if (chunk.length > left) truncated = true;
-    output += chunk.slice(0, Math.max(left, 0));
-  };
+  const capture = checkCapture(Math.min(workerCheckOutputCharsMax, room));
   for (const stream of [child.stdout, child.stderr]) {
     stream.setEncoding("utf8");
-    stream.on("data", capture);
+    stream.on("data", (chunk) => {
+      services.write(chunk);
+      capture.take(chunk);
+    });
   }
   const [code, signal] = await new Promise((settle, refuse) => {
     child.once("error", refuse);
@@ -431,7 +431,53 @@ async function runCheckCommand(command, room, services) {
       settle([exitCode, exitSignal]),
     );
   });
-  return { command, ...checkExit(code, signal), truncated, output };
+  return { command, ...checkExit(code, signal), ...capture.kept() };
+}
+
+/**
+ * A command's output within `units` code units: everything, while it fits, and
+ * otherwise its head and a rolling tail of what came last, joined by the
+ * dropped marker where the marker fits, so the capture still ends where the
+ * command did. Until output is dropped the tail holds whatever room the head
+ * left, and at the first drop the head is cut to its half and the tail to the
+ * other. The tail is cut before it is added to, so the two together never hold
+ * more than `units`, and keeps none of itself where what came last was cut, so
+ * what is dropped is one stretch.
+ */
+function checkCapture(units) {
+  const marker = units >= checkCaptureMarker.length ? checkCaptureMarker : "";
+  const headUnits = Math.floor((units - marker.length) / 2);
+  const tailUnits = units - marker.length - headUnits;
+  let head = "";
+  let headOpen = true;
+  let tail = "";
+  let truncated = false;
+  return {
+    take(chunk) {
+      const taken = headOpen
+        ? checkHead(chunk, units - tailUnits - head.length)
+        : "";
+      head += taken;
+      if (taken.length === chunk.length) return;
+      headOpen = false;
+      const rest = chunk.slice(taken.length);
+      const dropped =
+        tail.length + rest.length >
+        (truncated ? tailUnits : units - head.length);
+      if (dropped && !truncated) head = checkHead(head, headUnits);
+      truncated ||= dropped;
+      const room = truncated ? tailUnits : units - head.length;
+      const end = checkTail(rest, room);
+      tail =
+        end.length < rest.length
+          ? end
+          : checkTail(tail, room - end.length) + end;
+    },
+    kept: () => ({
+      truncated,
+      output: truncated ? `${head}${marker}${tail}` : `${head}${tail}`,
+    }),
+  };
 }
 
 /** How one command's end reads in the stage's report. */
@@ -484,12 +530,10 @@ function checkHead(text, units) {
 
 /** The longest tail of a well-formed text within this many code units that starts on a code point. */
 function checkTail(text, units) {
-  let tail = "";
-  for (const point of [...text].reverse()) {
-    if (tail.length + point.length > units) break;
-    tail = point + tail;
-  }
-  return tail;
+  if (text.length <= units) return text;
+  const start = text.length - units;
+  const lowSurrogate = /^[\uDC00-\uDFFF]$/u.test(text[start]);
+  return text.slice(lowSurrogate ? start + 1 : start);
 }
 
 /**
