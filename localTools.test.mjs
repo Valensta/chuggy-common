@@ -185,7 +185,7 @@ test("the server's instructions name the filing recipe's tools in order, then wh
   );
   assert.match(
     instructions,
-    /^2\. list_configurations: the newest revision for that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
+    /^2\. list_configurations: a revision whose `repository` is that repository, or, where its list_repositories row's `configurationsHeld\.result` is Bootstrapped, the `configurationsHeld\.revision` that row carries\.$/mu,
   );
 });
 
