@@ -64,6 +64,10 @@
  * than by what one answer holds, so `fetch_image` writes them to a file of its
  * own and answers where, and the agent's own Read opens it.
  *
+ * ONE READ IS NOT THE API'S. `read_docs` reads chuggy's public docs, from a
+ * host that is not chuggy's API, so it goes through `context.docsFetch` and
+ * carries no bearer and no header of chuggy's.
+ *
  * AN ANSWER IS BOUNDED BY WHAT THE TRANSCRIPT HOLDS, and that is a much tighter
  * bound than the body drawn off the wire. Every answer becomes one `tool_result`
  * entry, `./sessionStore.mjs` mirrors an entry as one line it never splits, and
@@ -113,7 +117,8 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { URLSearchParams } from "node:url";
+import { URL, URLSearchParams } from "node:url";
+import { TextDecoder } from "node:util";
 
 import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane";
 import {
@@ -122,7 +127,9 @@ import {
   allDependentRelations,
   briefLineCharsMax,
   builtInToolCapabilities,
+  chuggyDocsIndex,
   chuggyToolCapabilities,
+  chuggyToolDocsResponseBytesMax,
   chuggyToolDispatchViewResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolNames,
@@ -144,6 +151,7 @@ import {
   ticketLandingsAnsweredMax,
 } from "@chuggy/worker-contract/sessionTools";
 
+import { boundedResponseBytes } from "./boundedResponse.mjs";
 import { chuggyBoundedBody, chuggyRequest } from "./chuggyApi.mjs";
 import { workerTemporaryFile } from "./checks.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
@@ -692,6 +700,72 @@ async function readImage(context, path) {
   );
 }
 
+/** The chunks one docs answer may arrive in, which is what ends a body yielding empty chunks forever. */
+const chuggyDocsReadsMax = 4_096;
+
+/** The longest docs page URL `read_docs` takes. */
+const chuggyDocsPageCharsMax = 2_048;
+
+/** The directory the docs index is in, which every page it lists is under. */
+const chuggyDocsDirectory = new URL(".", chuggyDocsIndex);
+
+/** `page` as the URL it names, or nothing where it is not one under the index's own directory. */
+function readDocsPage(page) {
+  let url;
+  try {
+    url = new URL(page);
+  } catch {
+    return undefined;
+  }
+  return url.origin === chuggyDocsDirectory.origin &&
+    url.pathname.startsWith(chuggyDocsDirectory.pathname)
+    ? url
+    : undefined;
+}
+
+/**
+ * The docs index, or with `page` one page of the docs, answered verbatim. A
+ * URL outside the index's directory is refused before anything is fetched; a
+ * redirect is not followed, since it could leave that directory, and is
+ * answered as the refusal any other status but a 2xx is. A body past the
+ * contract's bound is refused rather than cut.
+ */
+async function readDocs(context, page) {
+  const url =
+    page === undefined ? new URL(chuggyDocsIndex) : readDocsPage(page);
+  if (url === undefined)
+    return answered(
+      `${page} is not under ${chuggyDocsDirectory.href}, where the index lists every page, so nothing was fetched.`,
+      true,
+    );
+  const response = await context.docsFetch(url, {
+    redirect: "manual",
+    signal: globalThis.AbortSignal.timeout(chuggyToolTimeoutMs),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    return answered(
+      `the docs host answered HTTP ${String(response.status)} for ${url.href}.`,
+      true,
+    );
+  }
+  let bytes;
+  try {
+    bytes = await boundedResponseBytes(
+      response,
+      chuggyToolDocsResponseBytesMax,
+      chuggyDocsReadsMax,
+    );
+  } catch (failure) {
+    if (!(failure instanceof RangeError)) throw failure;
+    return answered(
+      `${url.href} is larger than the ${String(chuggyToolDocsResponseBytesMax)} bytes one read_docs answer may weigh, so it cannot be answered.`,
+      true,
+    );
+  }
+  return answered(new TextDecoder().decode(bytes));
+}
+
 function write(context, path, method, body, headers = {}) {
   return relay(
     context,
@@ -1015,6 +1089,15 @@ export const chuggyProjectTools = [
       readImage(context, projectPath(context, "projectArtifact", { artifact })),
   },
   {
+    name: "read_docs",
+    description:
+      "chuggy's own documentation, as Markdown, verbatim. Call it first with no `page`: that answers the index, which lists each page by its URL. Then call it with `page`, one of those URLs, for that page. A URL outside the index's own directory is refused.",
+    shape: (z) => ({
+      page: z.string().min(1).max(chuggyDocsPageCharsMax).optional(),
+    }),
+    call: (context, { page }) => readDocs(context, page),
+  },
+  {
     name: "initialize_draft",
     description:
       "The defaults, the dependency candidates and the fence a new draft is filed against, for one configuration revision. A draft's `authoring.program` is its evaluation: stage N runs under the configuration's Nth `evaluations` entry, or its `review` where it lists none, the stages run in that order, and a failed stage ends evaluation. `defaults.program` is the program to start from, and `choices.programStagesMax` is the most stages a program may have against this configuration. For a catalog, pass the `work`, `evaluation` and `finalization` the draft will select: stage N then runs the selected plan's Nth stage, and `defaults` and `choices` are those of that selection. `commandedCheckStage` is the stage a brief's `checks` join, by its program stage key, counted from one as `defaults.program` keys are, and absent where none takes them, and `commandedCheckStageNote` says it in words: the same stage and, for a catalog, the plan and the stage's name, or that none does and which plans would.",
@@ -1330,7 +1413,7 @@ export function chuggyToolServer(context, sdk) {
   });
 }
 
-/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, and the scrub of what they send. */
+/** What one session's tools are held in: its task, its bearer, this turn's staging, where its images are written, how the public docs are fetched, and the scrub of what they send. */
 export function chuggyToolContext(task, bearer, services = {}) {
   return {
     task,
@@ -1342,5 +1425,6 @@ export function chuggyToolContext(task, bearer, services = {}) {
     turn: services.turn ?? (() => undefined),
     staging: services.staging ?? leadDecisionStaging(),
     imageFile: services.imageFile ?? chuggyToolImageFiles(),
+    docsFetch: services.docsFetch ?? globalThis.fetch,
   };
 }
