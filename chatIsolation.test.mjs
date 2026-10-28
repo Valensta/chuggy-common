@@ -114,10 +114,10 @@ function envelopeOf(bearer) {
 }
 
 /** The task the plane answers a session bound to `reference`, granted that repository's credential. */
-function answerOf(reference, slot = "claude-code") {
+function answerOf(reference) {
   return {
     ...poolHeldSessionAnswer,
-    credentialSlot: slot,
+    credentialSlot: "claude-code",
     repository: { reference },
     authority: {
       ...poolHeldSessionAnswer.authority,
@@ -182,19 +182,29 @@ async function inMachine(body) {
   }
 }
 
-/** A file `credentialOwner` owns, holding `text`, in a directory made with `mode`. */
-async function ownedCredential(directory, mode, text) {
+/**
+ * A file holding `text`, owned by `owner` and made with `fileMode`, in a
+ * directory made with `mode` that `credentialOwner` owns, or root where
+ * `rootsDirectory`.
+ */
+async function ownedCredential(directory, mode, text, options = {}) {
+  const { owner = credentialOwner, fileMode = 0o600 } = options;
   await mkdir(directory, { mode });
+  await chmod(directory, mode);
+  if (options.rootsDirectory !== true)
+    await chown(directory, credentialOwner, credentialOwner);
   const file = join(directory, "claude-code");
-  await writeFile(file, text, { mode: 0o600 });
-  await chown(file, credentialOwner, credentialOwner);
+  await writeFile(file, text, { mode: fileMode });
+  await chown(file, owner, owner);
   return file;
 }
 
 /**
  * What a machine holds before its supervisor starts: two remotes only root
- * reads, the provider credential its owner reads and one its owner cannot,
- * and the probe every session user reads.
+ * reads; the provider credential its owner reads, one its owner cannot, and
+ * one in a directory only its owner opens whose file a session's user owns,
+ * as a share that reports a file's owner as whoever last looked at it shows
+ * one; and the probe every session user reads.
  */
 async function machinePlaced(place) {
   await mkdir(place("remotes"), { mode: 0o700 });
@@ -204,7 +214,13 @@ async function machinePlaced(place) {
   };
   const credentials = {
     "claude-code": await ownedCredential(place("credentials"), 0o755, "x"),
-    locked: await ownedCredential(place("locked"), 0o700, "y"),
+    locked: await ownedCredential(place("locked"), 0o700, "y", {
+      rootsDirectory: true,
+    }),
+    misreported: await ownedCredential(place("misreported"), 0o700, "z", {
+      owner: uidFirst,
+      fileMode: 0o644,
+    }),
   };
   await copyFile(join(here, "chatIsolation.fixture.mjs"), place("probe.mjs"));
   await chmod(place("probe.mjs"), 0o644);
@@ -243,7 +259,7 @@ function checkoutOf(place, mirrors, log) {
  * as it is handed there, as an image names it.
  */
 
-async function supervisorIn(place, uidCount = 2) {
+async function supervisorIn(place, uidCount = 2, credential = "claude-code") {
   const { heads, credentials } = await machinePlaced(place);
   for (const [uid, name] of usersMade)
     await run("usermod", [
@@ -272,10 +288,9 @@ async function supervisorIn(place, uidCount = 2) {
       clearWaitMs: 60_000,
       node: process.execPath,
       entrypoint: place("probe.mjs"),
-      environment: {
-        PATH: process.env["PATH"] ?? "/usr/bin:/bin",
-        [workerCredentialFilesVariable]: JSON.stringify(credentials),
-      },
+      credentialFile: credentials[credential],
+      credentialOwner: { uid: credentialOwner, gid: credentialOwner },
+      environment: { PATH: process.env["PATH"] ?? "/usr/bin:/bin" },
     },
     {
       system: chatSystem(),
@@ -595,8 +610,8 @@ test(
   { skip: skipped },
   () =>
     inMachine(async (place) => {
-      const machine = await supervisorIn(place);
-      machine.answers.set(bearers[0], answerOf("a", "locked"));
+      const machine = await supervisorIn(place, 2, "locked");
+      machine.answers.set(bearers[0], answerOf("a"));
 
       await assert.rejects(
         machine.sessions.prepared(
@@ -605,5 +620,39 @@ test(
           new globalThis.AbortController().signal,
         ),
       );
+    }),
+);
+
+/**
+ * Catches a provider credential read as the owner a look at its file
+ * reports, which a share from another machine can report as a session's
+ * user that last looked, who cannot enter where it is, failing the session.
+ */
+test(
+  "a provider credential is read as the owner the supervisor is told, whoever a look at its file reports",
+  { skip: skipped },
+  () =>
+    inMachine(async (place) => {
+      const machine = await supervisorIn(place, 1, "misreported");
+      machine.answers.set(bearers[0], answerOf("a"));
+      const own = placesOf(place, uidFirst);
+      assert.equal(
+        (await stat(join(place("misreported"), "claude-code"))).uid,
+        uidFirst,
+      );
+
+      const running = await machine.sessions.prepared(
+        assignment,
+        envelopeOf(bearers[0]),
+        new globalThis.AbortController().signal,
+      );
+      await said(machine.logged, own.label, "hello");
+
+      assert.equal(
+        await readFile(join(own.minted, "provider-credential"), "utf8"),
+        "z",
+      );
+      running.stop();
+      await running.ended;
     }),
 );

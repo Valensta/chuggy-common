@@ -59,7 +59,7 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  * @property {Promise<unknown>} exited settles once its process has ended, however it did
  * @property {() => void} kill ends its process now
  *
- * @typedef {"Absent" | "Starting" | "Ready" | "Draining" | "Ended"} ChatSupervisorPhase
+ * @typedef {(typeof chatSupervisorPhases)[number]} ChatSupervisorPhase
  *
  * @typedef {object} ChatHostBackendSettings
  * @property {number} outputBytesMax what a session may write of its output, which its envelope names
@@ -95,6 +95,15 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  *   closed: () => Promise<void>,
  * }} ChatHostBackend
  */
+
+/** Where a host's supervisor is: none, started, ready, taking no session more, or ended. */
+export const chatSupervisorPhases = /** @type {const} */ ([
+  "Absent",
+  "Starting",
+  "Ready",
+  "Draining",
+  "Ended",
+]);
 
 /** The longest line of the supervisor's log that is kept, above a session's own line and its label. */
 export const chatHostLogLineBytesMax = 32 * 1024;

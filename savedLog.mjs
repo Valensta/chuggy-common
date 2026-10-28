@@ -82,6 +82,24 @@ function lastLinesStart(text) {
 }
 
 /**
+ * What is kept of a log whose last bytes are `tail`, more having come
+ * before them where `bytesCut`: those bytes cut further to their last
+ * `savedLogLinesMax` lines, after the line saying the log was cut, or
+ * nothing where nothing was cut.
+ *
+ * @param {Buffer} tail
+ * @param {boolean} bytesCut
+ * @returns {Buffer | undefined}
+ */
+export function savedLogKept(tail, bytesCut) {
+  const start = lastLinesStart(tail);
+  if (start === 0 && !bytesCut) return undefined;
+  return start === 0
+    ? savedLogText(tail, true)
+    : Buffer.concat([Buffer.from(savedLogCutLine), tail.subarray(start)]);
+}
+
+/**
  * Cuts a log a workload wrote whole to the bounds `savedLogWritten` saves
  * one to, answering whether it was cut. The cut log is written beside it and
  * renamed over it.
@@ -101,12 +119,8 @@ export async function savedLogTrimmed(file) {
   } finally {
     await handle.close();
   }
-  const start = lastLinesStart(tail);
-  if (start === 0 && !bytesCut) return false;
-  const text =
-    start === 0
-      ? savedLogText(tail, true)
-      : Buffer.concat([Buffer.from(savedLogCutLine), tail.subarray(start)]);
+  const text = savedLogKept(tail, bytesCut);
+  if (text === undefined) return false;
   const staged = `${file}.${randomUUID()}`;
   try {
     await savedLogFile(staged, text);

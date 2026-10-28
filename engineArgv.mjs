@@ -24,6 +24,12 @@ import {
 /**
  * @typedef {"docker" | "podman"} EngineName
  * @typedef {import("./poolLoop.mjs").WorkerPoolWorkloadKind} WorkerPoolWorkloadKind
+ * @typedef {import("./chatHost.mjs").ChatSupervisorContainer} ChatSupervisorContainer
+ *
+ * @typedef {object} ChatSupervisorNaming what a chat supervisor's container is called, carries and joins
+ * @property {string} name one per host
+ * @property {string} label the pool label's value, of the host
+ * @property {string} network
  *
  * @typedef {object} WorkloadContainer
  * @property {string} name
@@ -465,6 +471,105 @@ export function runArgv(engine, workload) {
     workload.image,
     ...(runtime === undefined ? [] : command),
   ];
+}
+
+/**
+ * One tmpfs of a chat supervisor's. Docker takes its owner as `uid` and
+ * `gid`; podman refuses those and leaves it the container's user's, root, so
+ * a tmpfs to be anyone else's is refused there, and it copies nothing of the
+ * image's directory into it, as docker does not.
+ *
+ * @param {EngineName} engine
+ * @param {ChatSupervisorContainer["tmpfs"][number]} tmpfs
+ */
+function chatSupervisorTmpfs(engine, tmpfs) {
+  const options = [
+    "rw",
+    ...tmpfs.flags,
+    `size=${String(tmpfs.sizeBytes)}`,
+    `mode=0${tmpfs.mode.toString(8)}`,
+  ];
+  if (engine === "docker")
+    options.push(`uid=${String(tmpfs.uid)}`, `gid=${String(tmpfs.gid)}`);
+  else if (tmpfs.uid !== 0 || tmpfs.gid !== 0)
+    throw new RangeError(
+      `podman leaves a tmpfs root's, and ${tmpfs.target} is to be ${String(tmpfs.uid)}:${String(tmpfs.gid)}'s`,
+    );
+  else options.push("notmpcopyup");
+  return `${tmpfs.target}:${options.join(",")}`;
+}
+
+/**
+ * A chat supervisor's `run`, attached and removed once it exits, from the
+ * container `./chatHost.mjs` states: its input held open, its image never
+ * pulled here, since the host has pulled it, its memory capped with no swap
+ * past the cap, and no log kept by the engine, since every line is the
+ * host's to route. Its environment is named in the argv and carried in the
+ * engine's own, so no value of it is in an argv. On podman the container
+ * runs in the namespace of the user running podman whatever containers.conf
+ * says, so root inside is that user.
+ *
+ * @param {EngineName} engine
+ * @param {ChatSupervisorContainer} container
+ * @param {ChatSupervisorNaming} naming
+ * @returns {{argv: string[], environment: Record<string, string>}}
+ */
+export function chatSupervisorRunArgv(engine, container, naming) {
+  if (container.interactive !== true)
+    throw new RangeError("a chat supervisor's input is held open");
+  for (const { source } of container.binds)
+    if (!bindMountNameable(source))
+      throw new RangeError(`${source} cannot be named in a bind mount`);
+  const [entrypoint, ...command] = container.command;
+  const { drop, add } = container.capabilities;
+  const memory = `${String(container.memoryBytes)}b`;
+  return {
+    argv: [
+      "run",
+      "-i",
+      "--rm",
+      "--pull=never",
+      "--name",
+      naming.name,
+      "--label",
+      `${poolLabel}=${naming.label}`,
+      "--log-driver",
+      "none",
+      "--user",
+      container.user,
+      ...(engine === "podman" ? ["--userns=host"] : []),
+      ...drop.flatMap((capability) => ["--cap-drop", capability]),
+      ...add.flatMap((capability) => ["--cap-add", capability]),
+      ...container.securityOptions.flatMap((option) => [
+        "--security-opt",
+        option,
+      ]),
+      "--memory",
+      memory,
+      "--memory-swap",
+      memory,
+      ...container.volumes.flatMap(({ volume, target }) => [
+        "--volume",
+        `${volume}:${target}`,
+      ]),
+      ...container.tmpfs.flatMap((tmpfs) => [
+        "--tmpfs",
+        chatSupervisorTmpfs(engine, tmpfs),
+      ]),
+      ...container.binds.flatMap(({ source, target }) => [
+        "--mount",
+        `type=bind,source=${source},target=${target},readonly`,
+      ]),
+      ...Object.keys(container.environment).flatMap((name) => ["--env", name]),
+      "--network",
+      naming.network,
+      "--entrypoint",
+      entrypoint,
+      container.image,
+      ...command,
+    ],
+    environment: { ...container.environment },
+  };
 }
 
 /**

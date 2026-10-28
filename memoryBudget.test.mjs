@@ -5,6 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 
+import {
+  chatHostMemoryBytes,
+  chatSupervisorContainer,
+  chatSupervisorName,
+} from "./chatHost.mjs";
 import { fakeEngine } from "./engine.fixture.mjs";
 import { heldCreateArgv } from "./engineArgv.mjs";
 import {
@@ -25,6 +30,7 @@ import {
   memoryStartDecided,
   memoryStartMsMin,
 } from "./memoryBudget.mjs";
+import { poolLabelValue } from "./poolIdentity.mjs";
 
 const gib = 2 ** 30;
 const mib = 2 ** 20;
@@ -385,6 +391,30 @@ test("a job whose container starts and whose hold goes while the engine is count
   assert.equal(listings, 2);
   assert.ok("holds" in between);
   assert.equal(memoryRoomBytes(0, between), 11 * gib);
+});
+
+/** Catches a chat host's supervisor counted at what it uses, which leaves a runner beside it room its sessions may yet take. */
+test("a chat host's supervisor is counted at its cap, as no session and starting no job", async () => {
+  const { engine, state } = fakeEngine();
+  const identity = { kind: "ChatHost", tenant: "vteng", owner: "geoff" };
+  const container = chatSupervisorContainer(
+    "registry.example/chat",
+    {
+      volumes: { sessions: "s", mirrors: "m" },
+      credentialFile: "/home/geoff/.chuggy/claude/claude.json",
+      credentialOwner: { uid: 501, gid: 20 },
+    },
+    chatHostMemoryBytes({ sessionsMax: 4, sessionMemoryBytes: 2 * gib }),
+  );
+  running(state, chatSupervisorName(identity), {
+    labels: { "io.chuggy.pool": poolLabelValue(identity) },
+    memoryBytes: container.memoryBytes,
+    usedBytes: 1 * gib,
+  });
+
+  const { counted: found } = await counted(engine);
+
+  assert.deepEqual(found, count({ cappedBytes: 8 * gib }));
 });
 
 test("no stats are asked while every running container is a capped workload", async () => {

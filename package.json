@@ -30,6 +30,7 @@
     "chatCheckout.mjs",
     "chatHost.mjs",
     "chatHostBackend.mjs",
+    "chatHostLog.mjs",
     "chatSession.mjs",
     "chatSupervisor.mjs",
     "check.sh",

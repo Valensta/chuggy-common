@@ -14,12 +14,15 @@
  * its own, and with an environment that carries none of the supervisor's
  * secrets: its bearer crosses on its channel (`./chatChannel.mjs`).
  *
- * ITS PROVIDER CREDENTIAL IS READ AGAIN FOR EACH SESSION, from the file the
- * supervisor's credential map names for the task's slot, as that file's own
- * owner, so a credential renewed in place is the next session's and the
- * supervisor reads nothing its owner could not. It is checked as the session
- * would check it and copied into the session's minted directory, where only
- * the session reads it; every kind that names a file names the copy.
+ * ITS PROVIDER CREDENTIAL IS READ AGAIN FOR EACH SESSION, from the one file
+ * the supervisor is handed, whatever slot the session's task names it by, as
+ * the owner the supervisor is told it has, so a credential renewed in place
+ * is the next session's and the supervisor reads nothing that owner could
+ * not. The owner is never the one a look at the file reports, which a share
+ * from another machine can report as whoever last looked. It is checked as
+ * the session would check it and copied into the session's minted
+ * directory, where only the session reads it; every kind that names a file
+ * names the copy, which the session maps under its task's slot.
  *
  * A STOP ENDS THE CHANNEL AND THEN THE USER. The session is given
  * `stopGraceMs` to end its turn as a plane's stop ends one; then every process
@@ -76,7 +79,6 @@ import {
   readdir,
   rm,
   rmdir,
-  stat,
   statfs,
   writeFile,
 } from "node:fs/promises";
@@ -85,7 +87,6 @@ import { URL, fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
-  workerCredentialFilesVariable,
   workerRepositoriesVariable,
   workerWorkspaceVariable,
 } from "@chuggy/worker-contract/workerEnvironment";
@@ -239,14 +240,19 @@ const chatSessionPassedVariables = [
 ];
 
 /**
- * The program, and its arguments, that runs `command` as `uid` and its own
- * group, with `groups` beside it or none, with no capability and none to gain.
+ * The program, and its arguments, that runs `command` as `user`'s uid and
+ * gid, with `groups` beside them or none, with no capability and none to
+ * gain. A session's user is its own group.
+ *
+ * @param {{uid: number, gid: number}} user
+ * @param {readonly number[]} groups
+ * @param {readonly string[]} command
  */
-export function chatSessionAsUser(uid, groups, command) {
+export function chatSessionAsUser(user, groups, command) {
   return [
     "setpriv",
-    `--reuid=${String(uid)}`,
-    `--regid=${String(uid)}`,
+    `--reuid=${String(user.uid)}`,
+    `--regid=${String(user.gid)}`,
     groups.length === 0
       ? "--clear-groups"
       : `--groups=${groups.map(String).join(",")}`,
@@ -268,7 +274,7 @@ export function chatSessionCommand(settings, uid, groups) {
     "prlimit",
     `--nproc=${String(jobPidsMax)}`,
     "--",
-    ...chatSessionAsUser(uid, groups, [
+    ...chatSessionAsUser({ uid, gid: uid }, groups, [
       "/bin/sh",
       "-c",
       'umask 077 && exec "$@"',
@@ -302,10 +308,12 @@ export async function chatUserProcesses(uid) {
  * it touches users, files and processes, so a suite can stand in for it.
  */
 export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
-  const asUser = (uid, command, options = {}) => {
-    const [program, ...args] = chatSessionAsUser(uid, [], command);
+  const asOwner = (owner, command, options = {}) => {
+    const [program, ...args] = chatSessionAsUser(owner, [], command);
     return executeFile(program, args, options);
   };
+  const asUser = (uid, command, options = {}) =>
+    asOwner({ uid, gid: uid }, command, options);
   return {
     spawn,
     freeBytes: async (path) => {
@@ -329,9 +337,8 @@ export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
           uid: (await lstat(join(path, name))).uid,
         })),
       ),
-    credentialRead: async (path) => {
-      const { uid } = await stat(path);
-      const { stdout } = await asUser(uid, ["cat", "--", path], {
+    credentialRead: async (path, owner) => {
+      const { stdout } = await asOwner(owner, ["cat", "--", path], {
         maxBuffer: chatSessionCredentialBytesMax,
       });
       return stdout;
@@ -778,18 +785,16 @@ async function chatSessionDirectories(state, place) {
 }
 
 /**
- * The session's copy of the provider credential the supervisor's map names
- * for `slot`, read as its file's owner and checked as the session will check
- * it, and every secret it holds.
+ * The session's copy of the provider credential the supervisor is handed,
+ * read as the owner it is told the file has and checked as the session will
+ * check it, and every secret it holds.
  */
-async function chatSessionCredential(state, slot, place) {
-  const files = JSON.parse(
-    state.settings.environment[workerCredentialFilesVariable] ?? "{}",
+async function chatSessionCredential(state, place) {
+  const { credentialFile, credentialOwner } = state.settings;
+  const text = await state.system.credentialRead(
+    credentialFile,
+    credentialOwner,
   );
-  const path = files[slot];
-  if (typeof path !== "string")
-    throw new Error(`the session credential ${slot} is not mounted`);
-  const text = await state.system.credentialRead(path);
   const file = join(place.minted, chatSessionCredentialName);
   const prepared = claudeCredentialPrepared(text.trim(), {
     path: file,
@@ -910,11 +915,7 @@ async function chatSessionMade(state, place, envelope, signal) {
   const fetched = await chatAbortable(signal, state.task(envelope));
   if (fetched.mode !== "Session")
     throw new Error("the worker plane answered a task that is not a session's");
-  const credential = await chatSessionCredential(
-    state,
-    fetched.answer.credentialSlot,
-    place,
-  );
+  const credential = await chatSessionCredential(state, place);
   signal.throwIfAborted();
   const { checkout, group } = await state.checkout(
     { ...fetched.answer, workerPlane: { url: envelope.callbackUrl } },
