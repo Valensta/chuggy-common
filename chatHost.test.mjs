@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { URL } from "node:url";
 
@@ -217,11 +217,11 @@ function engineOf(seen, { present, pulls, gate }) {
 }
 
 /**
- * A chat host over fakes:
- `answers` is each poll's answer in turn, a poll
+ * A chat host over fakes: `answers` is each poll's answer in turn, a poll
  * past them denied, and `present` the images the engine holds. A pull waits
  * on `gate`; a host's wait outlasts a start it is making unless `hasty`, so
- * a start takes no time of the host's clock.
+ * a start takes no time of the host's clock. A start answers what `handed`
+ * makes of each supervisor's handle, given what the host has logged.
  */
 async function hostOf(
   t,
@@ -233,6 +233,7 @@ async function hostOf(
     gate,
     hasty = false,
     lingering = false,
+    handed = (handle) => handle,
   },
 ) {
   const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-host-"));
@@ -265,7 +266,7 @@ async function hostOf(
         seen.events.push(`started ${container.image}`);
         const supervisor = supervisorOf(3, lingering);
         supervisors.push(supervisor);
-        return supervisor.handle;
+        return handed(supervisor.handle, logged);
       },
       log: (line) => logged.push(line),
       logFor: (assignment) => (line) => logged.push(`${assignment}: ${line}`),
@@ -477,6 +478,42 @@ test("a host goes on polling while its image is pulled, and a pull the host's en
   assert.equal(cut.seen.started.length, 0);
   assert.equal(cut.seen.polls.length, 4);
   assert.equal(cut.host.status().starting, false);
+});
+
+/**
+ * Catches a host that ends the input of a supervisor started after the host
+ * ended with nothing listening for its error, which, the supervisor already
+ * gone, ends the host's process.
+ */
+test("a supervisor started once the host has ended is killed, its input's failure to end taken", async (t) => {
+  const killed = [];
+  const run = await hostOf(t, {
+    answers: [{ chatImage: one }, { chatImage: one }],
+    present: [one],
+    hasty: true,
+    handed: async (handle, logged) => {
+      while (!logged.some((line) => line.startsWith("the plane denied")))
+        await moment();
+      const input = new Writable({
+        write: (_chunk, _encoding, done) => done(),
+        final: (done) =>
+          done(Object.assign(new Error("write EPIPE"), { code: "EPIPE" })),
+      });
+      return {
+        ...handle,
+        input,
+        kill: () => {
+          killed.push("killed");
+          handle.kill();
+        },
+      };
+    },
+  });
+  assert.equal((await run.host.run()).passed, "Denied");
+  await moment();
+  assert.equal(run.seen.started.length, 1);
+  assert.deepEqual(killed, ["killed"]);
+  assert.equal(run.host.status().used, undefined);
 });
 
 test("an image of the pool's registry is pulled under the pool's token, once more under a fresh one where it was refused, and one already here is not pulled", async (t) => {

@@ -569,7 +569,9 @@ function chatHostWanted(state) {
 
 /**
  * A supervisor started in `image` and spoken to, or why it was not, the next
- * start put off; none is started once the host ends.
+ * start put off; none is started once the host ends, and one whose start
+ * outlasted the host is killed, its input ended with its failure to end
+ * taken, since one already gone answers that end with an error.
  */
 async function chatHostStarted(state, image) {
   const { seams } = state;
@@ -584,6 +586,7 @@ async function chatHostStarted(state, image) {
       ),
     );
     if (state.cut.signal.aborted) {
+      handle.input.on("error", () => undefined);
       handle.input.end();
       handle.kill();
       return;
