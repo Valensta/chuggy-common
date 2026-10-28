@@ -284,6 +284,57 @@ test("a job's env file carries the envelope and the environment, and is gone onc
   assert.deepEqual(await readdir(settings.runtimeDir), []);
 });
 
+test("measured is each pull made, timed from its first try, and each run whose container was removed, by its kind", async (t) => {
+  const { backend, state, clock } = await harness(t);
+  state.pull = (pulledImage) => {
+    clock.nowMs += 20_000;
+    state.images.add(pulledImage);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  const exited = seeded(state, "asg-exited", "exited", startMs / 1000 + 3600);
+  const late = seeded(state, "asg-late", "running", startMs / 1000);
+  const session = seeded(
+    state,
+    "asg-session",
+    "exited",
+    startMs / 1000 + 3600,
+    undefined,
+    "Session",
+  );
+  for (const [name, startedMs, finishedMs] of [
+    [exited, startMs - 90_000, startMs - 10_000],
+    [late, startMs - 600_000, undefined],
+    [session, startMs - 5_000_000, startMs],
+  ]) {
+    const container =
+      /** @type {import("./engine.fixture.mjs").FakeContainer} */ (
+        state.containers.get(/** @type {string} */ (name))
+      );
+    container.exitCode = 0;
+    container.startedAt = new Date(
+      /** @type {number} */ (startedMs),
+    ).toISOString();
+    if (finishedMs !== undefined)
+      container.finishedAt = new Date(finishedMs).toISOString();
+  }
+  await backend.held();
+  assert.deepEqual(backend.measured(), {
+    imagePullSecs: { bucketCounts: [0, 0, 0, 1, 0, 0, 0, 0, 0], sumSecs: 20 },
+    runSecs: {
+      Job: {
+        bucketCounts: [0, 0, 1, 0, 0, 1, 0, 0, 0, 0],
+        sumSecs: 80 + 620,
+      },
+      Session: {
+        bucketCounts: [0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        sumSecs: 5_000,
+      },
+    },
+  });
+});
+
 test("a present image is not pulled", async (t) => {
   const { backend, state } = await harness(t);
   state.images.add(image);
@@ -836,11 +887,11 @@ test("a running container past its deadline is killed, its logs saved, removed, 
   ]);
 });
 
-for (const [status, exitCode, why] of [
-  ["exited", 3, "its container exited with status 3"],
-  ["exited", undefined, "its container was left exited"],
-  ["dead", 3, "its container was left dead"],
-  ["created", 0, "its container was left created"],
+for (const [status, exitCode, why, ran] of [
+  ["exited", 3, "its container exited with status 3", { ran: "Failed" }],
+  ["exited", undefined, "its container was left exited", { ran: "Failed" }],
+  ["dead", 3, "its container was left dead", { ran: "Failed" }],
+  ["created", 0, "its container was left created", {}],
 ])
   test(`a container left ${status}, exit status ${String(exitCode ?? "none")}, has its logs saved, is removed, and has its end named once`, async (t) => {
     const { backend, state, settings } = await harness(t);
@@ -858,7 +909,7 @@ for (const [status, exitCode, why] of [
       `the log of ${name}\n`,
     );
     assert.deepEqual(await backend.ended(), [
-      { kind: "Job", job: seededAttempt("asg-done"), why },
+      { kind: "Job", job: seededAttempt("asg-done"), why, ...ran },
     ]);
     assert.deepEqual(await backend.ended(), []);
   });
@@ -892,6 +943,7 @@ test("a job that exited of itself is named once, with its status and the attempt
         bearer: "attempt-bearer-secret",
       },
       why: "its container exited with status 1",
+      ran: "Failed",
     },
   ]);
   assert.deepEqual(await backend.held(), []);
@@ -1027,6 +1079,7 @@ test("a placement whose run failed after its container started answers through t
         bearer: "attempt-bearer-secret",
       },
       why: "its container exited with status 1",
+      ran: "Failed",
     },
   ]);
   assert.deepEqual(await backend.ended(), []);
@@ -1637,6 +1690,7 @@ test("held and ended name each workload by the kind it was placed as, and a cont
       kind: "Job",
       job: seededAttempt("asg-done"),
       why: "its container exited with status 0",
+      ran: "Succeeded",
     },
   ]);
   pull.resolve({ code: 1, stdout: "", stderr: "Error: manifest unknown\n" });
@@ -1988,6 +2042,7 @@ test("a job started through a runtime that exited otherwise, or one started with
       kind: "Job",
       job: heldAttempt,
       why: "its container exited with status 1",
+      ran: "Failed",
     },
   ]);
   assert.equal(through.state.volumes.size, 0);
@@ -2004,6 +2059,7 @@ test("a job started through a runtime that exited otherwise, or one started with
       kind: "Job",
       job: heldAttempt,
       why: `its container exited with status ${String(workerImageFaultStatuses.ImageLacksGit)}`,
+      ran: "Failed",
     },
   ]);
 });
@@ -2192,6 +2248,30 @@ test("a job's image whose pull can still pass is pulled again through a runtime,
   assert.match(
     passing.log.join("\n"),
     /its image could not be pulled yet, and is pulled again: .*no such host/u,
+  );
+});
+
+test("a pull tried again is measured once, from its first try to the image being here", async (t) => {
+  const { backend, state, clock, settings } = await harness(t);
+  state.images.add(runtime);
+  let pulls = 0;
+  state.pull = (pulled) => {
+    pulls += 1;
+    clock.nowMs += 1_000;
+    if (pulls < 3) return failedWith("Error response from daemon: i/o timeout");
+    state.images.add(pulled);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  const { imagePullSecs } = backend.measured();
+  assert.equal(
+    imagePullSecs.bucketCounts.reduce((sum, count) => sum + count, 0),
+    1,
+  );
+  assert.equal(
+    imagePullSecs.sumSecs,
+    (3 * 1_000 + 2 * settings.pullRetryMs) / 1000,
   );
 });
 
