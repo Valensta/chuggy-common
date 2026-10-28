@@ -17,7 +17,10 @@
  * no claim of this tenant's covers, both answer not found; an attempt then
  * resolves what its launcher mounted for the repository it works in, which is
  * what it did before this plane minted anything, and holds nothing for one it
- * named. Any other refusal or outage reaches the caller as the transport
+ * named. A not found that says which way the plane's app does not reach the
+ * repository is answered as that, so the pod says it before it tries the
+ * mount: a person reading a missing mapping would not look at the app's
+ * installation. Any other refusal or outage reaches the caller as the transport
  * reports one, because a credential the plane meant to mint and could not is
  * no reason to reach a remote with something else.
  *
@@ -42,6 +45,7 @@ import {
 import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnvironment";
 import {
   workerCredentialAbsentSchema,
+  workerCredentialUnreachedSchema,
   workerPlaneAnswers,
   workerPlaneRoutes,
 } from "@chuggy/worker-contract/workerPlane";
@@ -89,10 +93,44 @@ function planeCredentialChecked(minted) {
 }
 
 /**
- * The username and password the plane minted at `path` for `repository`, or
- * nothing where it mints none for it. An attempt names no `repository` for
- * what its task kind needs of its own. `request` is the seam each mode reaches
- * the plane through.
+ * What a not found carries of which way the app does not reach the
+ * repository, where it carries any.
+ */
+async function planeCredentialUnreached(response) {
+  const body = await response.json().catch(() => undefined);
+  const absent = workerCredentialAbsentSchema.safeParse(body);
+  return absent.success ? absent.data.unreached : undefined;
+}
+
+/**
+ * What a person reads of `unreached`: the repository, the app, the
+ * installation where there is one, and what the operator does about it. Each
+ * is an identity and never a credential.
+ */
+export function planeCredentialUnreachedText(unreached) {
+  const parsed = workerCredentialUnreachedSchema.parse(unreached);
+  const { repository, app } = parsed;
+  const minted = `the worker plane mints no credential for ${repository}`;
+  switch (parsed.reach) {
+    case "Unselected":
+      return `${minted}: the ${app} app's installation ${parsed.installation} does not select it; add it to that installation's repository selection`;
+    case "Refused":
+      return `${minted}: the forge refused the ${app} app's installation ${parsed.installation}, for its key, a suspension or a permission not accepted; go to the ${app} app's installation page`;
+    case "Unclaimed":
+      return `${minted}: no installation of the ${app} app is claimed on its owner; install the ${app} app there`;
+    default:
+      throw new Error(
+        `no text for a repository unreached as ${String(parsed.reach)}`,
+      );
+  }
+}
+
+/**
+ * The username and password the plane minted at `path` for `repository`;
+ * `{unreached}` where it mints none and says which way its app does not reach
+ * it; or nothing where it mints none and says no more. An attempt names no
+ * `repository` for what its task kind needs of its own. `request` is the seam
+ * each mode reaches the plane through.
  */
 export async function planeCredentialAnswered({
   task,
@@ -117,7 +155,10 @@ export async function planeCredentialAnswered({
         },
     { settled: notMinted },
   );
-  if (notMinted.includes(response.status)) return undefined;
+  if (notMinted.includes(response.status)) {
+    const unreached = await planeCredentialUnreached(response);
+    return unreached === undefined ? undefined : { unreached };
+  }
   if (!response.ok)
     throw new Error(
       `the worker plane answered ${String(response.status)} for a credential`,
@@ -127,15 +168,16 @@ export async function planeCredentialAnswered({
 
 /**
  * The credential the plane minted for this pod, written where the askpass
- * reads it, with the username the askpass answers beside it; or nothing where
- * it mints none for this repository and the pod falls back to what its
- * launcher mounted. The caller presents it with `workerCredentialEnvironment`
- * for the URL it reaches, which is the host the askpass answers. `write` is the
- * seam a suite reads the password back from.
+ * reads it, with the username the askpass answers beside it; `{unreached}`
+ * where the plane says which way its app does not reach the repository; or
+ * nothing where it mints none and the pod falls back to what its launcher
+ * mounted. The caller presents it with `workerCredentialEnvironment` for the
+ * URL it reaches, which is the host the askpass answers. `write` is the seam a
+ * suite reads the password back from.
  */
 export async function planeCredential({ write = writeFile, ...asked }) {
   const minted = await planeCredentialAnswered(asked);
-  if (minted === undefined) return undefined;
+  if (minted === undefined || minted.unreached !== undefined) return minted;
   const file = join(mintedCredentialDirectory, planeCredentialFileName);
   await write(file, minted.password, { mode: planeCredentialFileMode });
   return { file, username: minted.username, password: minted.password };

@@ -105,6 +105,7 @@ import { keepWorkerLease } from "./lease.mjs";
 import {
   planeCredential,
   planeCredentialAnswered,
+  planeCredentialUnreachedText,
   workerCredentialPath,
 } from "./planeCredential.mjs";
 import { projectReadsServed } from "./projectReads.mjs";
@@ -554,7 +555,8 @@ async function workSource(context, workspace, verdict) {
  * before anything reaches a remote with it: a read of `repository` where it is
  * named, and what the attempt's task kind needs of its own where nothing is.
  * Nothing where this deployment mints no credential for the attempt's
- * repository.
+ * repository, and the attempt's failure where the plane says which way its app
+ * does not reach it, before anything falls back to the mount.
  */
 async function workerMinted({
   task,
@@ -572,6 +574,8 @@ async function workerMinted({
     ...(request === undefined ? {} : { request }),
     ...(write === undefined ? {} : { write }),
   });
+  if (minted?.unreached !== undefined)
+    throw new Error(planeCredentialUnreachedText(minted.unreached));
   if (minted !== undefined)
     keepSecret({ kind: workerSecretKinds.minted, value: minted.password });
   return minted;

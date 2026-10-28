@@ -6,10 +6,14 @@ import {
   workerContractRelease,
 } from "@chuggy/worker-contract/workerContract";
 import { mintedCredentialDirectory } from "@chuggy/worker-contract/workerEnvironment";
+import { workerCredentialAbsentSchema } from "@chuggy/worker-contract/workerPlane";
+
+import { credentialUnreachedCases } from "./credentialUnreached.fixture.mjs";
 
 import {
   planeCredential,
   planeCredentialAnswered,
+  planeCredentialUnreachedText,
   sessionCredentialPath,
   workerCredentialPath,
 } from "./planeCredential.mjs";
@@ -161,6 +165,82 @@ test("another repository the plane mints nothing for is answered nothing", async
     undefined,
   );
   assert.deepEqual(plane.asked[0].transport.settled, [404]);
+});
+
+/**
+ * Catches the plane's word on which way its app does not reach a repository
+ * dropped, which leaves a person reading the mounted map's refusal instead.
+ */
+test("a not minted that says which way the app does not reach the repository is answered that, as the contract reads it", async () => {
+  for (const { unreached } of credentialUnreachedCases) {
+    const body = { reason: "NotMinted", unreached };
+    const writer = writerOf();
+    for (const path of [workerCredentialPath, sessionCredentialPath]) {
+      const asked = {
+        task,
+        bearer: "capability",
+        path,
+        repository: unreached.repository,
+        request: planeOf({ status: 404, ok: false, json: async () => body })
+          .request,
+      };
+
+      assert.deepEqual(await planeCredentialAnswered(asked), {
+        unreached: workerCredentialAbsentSchema.parse(body).unreached,
+      });
+      assert.deepEqual(
+        await planeCredential({ ...asked, write: writer.write }),
+        { unreached },
+      );
+    }
+    assert.deepEqual(writer.written, []);
+  }
+});
+
+test("a not minted that says no more, or that the contract cannot read, is answered nothing", async () => {
+  const [{ unreached }] = credentialUnreachedCases;
+  for (const body of [
+    { reason: "NotMinted" },
+    { reason: "NotMinted", unreached: { ...unreached, reach: "Elsewhere" } },
+  ]) {
+    assert.equal(
+      workerCredentialAbsentSchema.safeParse(body).success,
+      body.unreached === undefined,
+    );
+    assert.equal(
+      await planeCredentialAnswered({
+        task,
+        bearer: "capability",
+        path: workerCredentialPath,
+        request: planeOf({ status: 404, ok: false, json: async () => body })
+          .request,
+      }),
+      undefined,
+    );
+  }
+});
+
+test("each way the app does not reach a repository is told with its identities and its remedy", () => {
+  for (const { unreached, told } of credentialUnreachedCases) {
+    const text = planeCredentialUnreachedText(unreached);
+    for (const phrase of told) assert.ok(text.includes(phrase), text);
+  }
+});
+
+/**
+ * Catches a field the contract does not name reaching the text, which is where
+ * a token in a refusal's body would leak from.
+ */
+test("the text carries only what the contract names of the answer", () => {
+  const [{ unreached }] = credentialUnreachedCases;
+  const text = planeCredentialUnreachedText({
+    ...unreached,
+    token: password,
+    authorization: `Bearer ${password}`,
+  });
+
+  assert.ok(!text.includes(password), text);
+  assert.equal(text, planeCredentialUnreachedText(unreached));
 });
 
 /**

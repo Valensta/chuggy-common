@@ -185,7 +185,7 @@ async function projectReadsAnswer(read, fields) {
     read.warn(`a read of ${repository} could not be minted: ${error.message}`);
     return "";
   }
-  if (minted === undefined) return "";
+  if (minted === undefined || minted.unreached !== undefined) return "";
   if (!projectReadsLine(minted.username) || !projectReadsLine(minted.password))
     return "";
   read.keep(minted.password);
@@ -225,9 +225,9 @@ function projectReadsListening(server, socket) {
  * The reads served under `directory` for a job whose own repository is
  * `repositoryId`, and `git`, the entries that send every git the attempt runs
  * to them. `mint(repository)` is the plane's answer for a repository on the
- * forge, nothing where it mints none; `keep` holds each password answered,
- * once; `gitVersion` answers what the job's git prints for `git --version`.
- * `close` drops every client and removes the socket.
+ * forge, nothing or `{unreached}` where it mints none; `keep` holds each
+ * password answered, once; `gitVersion` answers what the job's git prints for
+ * `git --version`. `close` drops every client and removes the socket.
  */
 export async function projectReadsServed({
   repositoryId,

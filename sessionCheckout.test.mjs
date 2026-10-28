@@ -14,6 +14,10 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
+  credentialUnreachedCases,
+  credentialUnreadMap,
+} from "./credentialUnreached.fixture.mjs";
+import {
   sessionCheckout,
   sessionCheckoutTimeoutMs,
 } from "./sessionCheckout.mjs";
@@ -216,6 +220,25 @@ test("a reference the site's map does not carry is refused, not raised", async (
   );
 
   assert.match(checkout.refused, /no repository configuration for elsewhere/u);
+});
+
+test("a repository the plane says its app does not reach is refused with which way, before the map is read", async () => {
+  for (const { unreached, told } of credentialUnreachedCases) {
+    const checkout = await sessionCheckout(
+      taskOf({ repository: { reference: unreached.repository } }),
+      credentialUnreadMap,
+      credentialFiles,
+      "/workspace",
+      {
+        run: async () => assert.fail("a clone ran with no credential"),
+        log: () => undefined,
+        unreached,
+      },
+    );
+
+    for (const phrase of told)
+      assert.ok(checkout.refused.includes(phrase), checkout.refused);
+  }
 });
 
 test("a refusal is scrubbed like every other line this pod would print", async () => {

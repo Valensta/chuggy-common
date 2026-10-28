@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { credentialUnreachedCases } from "./credentialUnreached.fixture.mjs";
 import { forgeGitIsolated } from "./gitForge.fixture.mjs";
 import { workerGitEnvironment } from "./checks.mjs";
 import {
@@ -237,6 +238,18 @@ test("a repository the plane mints nothing for is answered nothing", async (t) =
 
   assert.equal(await filled(reads.git, lib), undefined);
   assert.deepEqual(reads.asked, [lib]);
+  assert.deepEqual(reads.kept, []);
+});
+
+/**
+ * Catches a not minted that says which way the app does not reach the
+ * repository answered as a credential.
+ */
+test("a repository the plane's app does not reach is answered nothing", async (t) => {
+  const [{ unreached }] = credentialUnreachedCases;
+  const reads = await served(t, () => ({ unreached }));
+
+  assert.equal(await filled(reads.git, lib), undefined);
   assert.deepEqual(reads.kept, []);
 });
 

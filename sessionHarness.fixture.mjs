@@ -121,7 +121,7 @@ export function heldUntilLetGo(signal) {
 /**
  * The plane a case drives. `minted` is what the session credential route
  * answers, or what it answers for each repository named, nothing where it
- * mints none; without one the plane mints nothing, which is the deployment
+ * mints none, and a not found where it carries a `reason`; without one the plane mints nothing, which is the deployment
  * every case that is about something else runs under. `refuse(path)` names a
  * status to answer a path with instead, which must be one its route answers.
  * `stopped(turn, signal)` answers the watch on a turn, which without one is
@@ -152,9 +152,12 @@ export function planeOf(
       case "credential": {
         const answered =
           typeof minted === "function" ? minted(body.repository) : minted;
-        return answered === undefined
-          ? { status: 404, body: { reason: "ForgeNotConfigured" } }
-          : { status: 200, body: answered };
+        if (answered === undefined)
+          return { status: 404, body: { reason: "ForgeNotConfigured" } };
+        return {
+          status: answered.reason === undefined ? 200 : 404,
+          body: answered,
+        };
       }
       case "turn": {
         const turn = turns[claims];

@@ -96,6 +96,11 @@ import { agentResultSchema } from "./result.mjs";
 import { workerCredentialPath } from "./planeCredential.mjs";
 import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
 import {
+  credentialUnmappedText,
+  credentialUnreachedCases,
+  credentialUnreadMap,
+} from "./credentialUnreached.fixture.mjs";
+import {
   RunStepFailure,
   credentialScrub,
   runCloneFailed,
@@ -2456,6 +2461,93 @@ test("an outage at the clone fails the attempt rather than falling back", async 
     /answered 503 for a credential/u,
   );
   assert.deepEqual(written, []);
+});
+
+/**
+ * Catches the plane's word on which way its app does not reach the attempt's
+ * repository dropped for the mounted map's refusal, which names neither the
+ * app nor its installation.
+ */
+test("a clone the plane says its app does not reach fails with which way, before the mount is read", async () => {
+  for (const { unreached, told } of credentialUnreachedCases) {
+    const { asked, kept, written } = askedFor({
+      status: 404,
+      json: async () => ({ reason: "NotMinted", unreached }),
+    });
+
+    const failure = await workerWorkspace(
+      asked.task,
+      credentialUnreadMap,
+      credentialFiles,
+      "capability",
+      asked.keepSecret,
+      {
+        request: async (_task, _bearer, path) =>
+          path === "/v1/input"
+            ? {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                  references: [
+                    { kind: "Repository", reference: unreached.repository },
+                    { kind: "TargetCommit", reference: "0".repeat(40) },
+                  ],
+                }),
+              }
+            : asked.request(_task, _bearer, path),
+        clone: async () => assert.fail("a clone ran with no credential"),
+        write: asked.write,
+        workspace: "/workspace",
+      },
+    ).catch((error) => error);
+
+    assert.ok(failure instanceof RunStepFailure, String(failure));
+    assert.equal(failure.evidence, runCloneFailed);
+    for (const phrase of told)
+      assert.ok(failure.message.includes(phrase), failure.message);
+    assert.doesNotMatch(failure.message, credentialUnmappedText);
+    assert.deepEqual(written, []);
+    assert.deepEqual(kept, []);
+  }
+});
+
+test("a not minted that says no more still falls back to the mount, and its refusal is what is read", async () => {
+  const { asked } = askedFor({
+    status: 404,
+    json: async () => ({ reason: "NotMinted" }),
+  });
+
+  await assert.rejects(
+    workerCredential({
+      ...asked,
+      repositories: {},
+      repositoryId: "https://github.com/kasofsk/chuggy-common.git",
+    }),
+    {
+      message:
+        "no repository configuration for https://github.com/kasofsk/chuggy-common.git",
+    },
+  );
+});
+
+test("a push the plane says its app does not reach fails with which way", async () => {
+  const [{ unreached, told }] = credentialUnreachedCases;
+  let mints = 0;
+  const { asked } = askedFor(() => {
+    mints += 1;
+    return mints === 1
+      ? { status: 200, ok: true, json: async () => minted }
+      : {
+          status: 404,
+          json: async () => ({ reason: "NotMinted", unreached }),
+        };
+  });
+
+  const resolved = await workerCredential(asked);
+
+  await assert.rejects(resolved.refresh(), ({ message }) =>
+    told.every((phrase) => message.includes(phrase)),
+  );
 });
 
 /**
