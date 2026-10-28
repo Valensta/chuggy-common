@@ -1562,9 +1562,16 @@ function placementSignal(state, placement, late) {
  * @param {string} image
  * @param {string} named how a failure names the image: `its image` for the job's own
  * @param {string} [platform] the one variant pulled; none, and the engine's own
+ * @param {number} [startedMs] when the first try at this pull was made; none, and this is it
  */
-async function pulled(state, placement, image, named, platform) {
-  const startedMs = state.seams.nowMs();
+async function pulled(
+  state,
+  placement,
+  image,
+  named,
+  platform,
+  startedMs = state.seams.nowMs(),
+) {
   await pullMade(state, placement, image, named, platform);
   state.measures.pulled((state.seams.nowMs() - startedMs) / 1000);
   const id = await state.images.pulledId(image);
@@ -1658,7 +1665,14 @@ async function jobImagePulled(state, placement) {
   const firstPullMs = seams.nowMs();
   for (;;) {
     try {
-      await pulled(state, placement, placement.image, "its image");
+      await pulled(
+        state,
+        placement,
+        placement.image,
+        "its image",
+        undefined,
+        firstPullMs,
+      );
       return;
     } catch (failure) {
       if (

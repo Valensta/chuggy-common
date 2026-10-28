@@ -284,7 +284,7 @@ test("a job's env file carries the envelope and the environment, and is gone onc
   assert.deepEqual(await readdir(settings.runtimeDir), []);
 });
 
-test("measured is each pull made, timed from its start, and each run whose container was removed, by its kind", async (t) => {
+test("measured is each pull made, timed from its first try, and each run whose container was removed, by its kind", async (t) => {
   const { backend, state, clock } = await harness(t);
   state.pull = (pulledImage) => {
     clock.nowMs += 20_000;
@@ -2248,6 +2248,30 @@ test("a job's image whose pull can still pass is pulled again through a runtime,
   assert.match(
     passing.log.join("\n"),
     /its image could not be pulled yet, and is pulled again: .*no such host/u,
+  );
+});
+
+test("a pull tried again is measured once, from its first try to the image being here", async (t) => {
+  const { backend, state, clock, settings } = await harness(t);
+  state.images.add(runtime);
+  let pulls = 0;
+  state.pull = (pulled) => {
+    pulls += 1;
+    clock.nowMs += 1_000;
+    if (pulls < 3) return failedWith("Error response from daemon: i/o timeout");
+    state.images.add(pulled);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  const { imagePullSecs } = backend.measured();
+  assert.equal(
+    imagePullSecs.bucketCounts.reduce((sum, count) => sum + count, 0),
+    1,
+  );
+  assert.equal(
+    imagePullSecs.sumSecs,
+    (3 * 1_000 + 2 * settings.pullRetryMs) / 1000,
   );
 });
 
