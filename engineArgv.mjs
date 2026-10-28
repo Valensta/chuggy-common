@@ -151,6 +151,17 @@ export function imageInspectManyArgv(images) {
 }
 
 /**
+ * An image's variant for one platform, which docker answers from 28.1, and
+ * podman never.
+ *
+ * @param {string} image
+ * @param {string} platform
+ */
+export function imageInspectPlatformArgv(image, platform) {
+  return ["image", "inspect", "--platform", platform, image];
+}
+
+/**
  * A removal of one name of an image, never forced: an engine refuses it
  * while a container uses the image.
  *

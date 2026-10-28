@@ -38,6 +38,7 @@ import {
 import {
   deferred,
   fakeEngine,
+  fakeImageHeldFor,
   fakeImageId,
   fakeImagePlatformDefault,
   unstartedEntrypoint,
@@ -2326,8 +2327,13 @@ test("a job whose image and runtime both cannot be got is refused for its image,
   ]);
 });
 
-test("two jobs whose images are for different platforms each copy the runtime's variant for their own, on an engine holding one variant by a name", async (t) => {
-  const { backend, state } = await harness(t);
+/**
+ * An engine holding `image` for amd64 and `imageArm` for arm64, whose every
+ * pull waits on one the suite ends, each in the order they were made.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>["state"]} state
+ */
+function platformsMixed(state) {
   state.imagePlatforms.set(fakeImageId(state, imageArm), "linux/arm64");
   state.images.add(image);
   state.images.add(imageArm);
@@ -2340,6 +2346,12 @@ test("two jobs whose images are for different platforms each copy the runtime's 
     pulls.push(pull);
     return pull.promise;
   };
+  return pulls;
+}
+
+test("two jobs whose images are for different platforms each copy the runtime's variant for their own, on an engine holding one variant by a name", async (t) => {
+  const { backend, state } = await harness(t);
+  const pulls = platformsMixed(state);
   await backend.place(assignment({ runtime }), "Job");
   await backend.place(
     assignment({ assignment: "asg-2", image: imageArm, runtime }),
@@ -2397,6 +2409,153 @@ test("a job waiting its turn at the runtime fails at its deadline, and the job a
   );
   assert.equal(platformsNamed(state, isPull).length, 1);
   assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+/** @param {string[]} argv */
+const isPlatformInspect = (argv) =>
+  argv[0] === "image" && argv[2] === "--platform";
+
+test("on docker's containerd store, a runtime held for the job's image's platform beside the one an inspection answers is asked for at that platform, and not pulled", async (t) => {
+  const { backend, state } = await harness(t, {
+    engine: "docker",
+    dockerHost: "unix:///var/run/docker.sock",
+  });
+  state.containerdStore = true;
+  const runtimeId = fakeImageId(state, runtime);
+  state.imagePlatforms.set(runtimeId, "linux/arm64");
+  state.imageVariants.set(runtimeId, [fakeImagePlatformDefault]);
+  state.images.add(image);
+  state.images.add(runtime);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.deepEqual(platformsNamed(state, isPlatformInspect), [
+    [fakeImagePlatformDefault, runtime],
+  ]);
+  assert.ok(!verbs(state).includes("pull"));
+  assert.deepEqual(platformsNamed(state, isFill), [
+    [fakeImagePlatformDefault, "/workspace"],
+  ]);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+test("on docker's containerd store, a runtime held for no variant of the job's image's platform is pulled for it, beside the one it held", async (t) => {
+  const { backend, state } = await harness(t, {
+    engine: "docker",
+    dockerHost: "unix:///var/run/docker.sock",
+  });
+  state.containerdStore = true;
+  state.imagePlatforms.set(fakeImageId(state, runtime), "linux/arm64");
+  state.images.add(image);
+  state.images.add(runtime);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.deepEqual(platformsNamed(state, isPull), [
+    [fakeImagePlatformDefault, runtime],
+  ]);
+  assert.ok(fakeImageHeldFor(state, runtime, "linux/arm64"));
+  assert.deepEqual(platformsNamed(state, isFill), [
+    [fakeImagePlatformDefault, "/workspace"],
+  ]);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+test("a docker whose inspection takes no platform holds the runtime for none but the one it answers, and the runtime is pulled for the job's image's", async (t) => {
+  const { backend, state } = await harness(t, {
+    engine: "docker",
+    dockerHost: "unix:///var/run/docker.sock",
+  });
+  state.inspectPlatformUnknown = true;
+  state.imagePlatforms.set(fakeImageId(state, runtime), "linux/arm64");
+  state.images.add(image);
+  state.images.add(runtime);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.equal(platformsNamed(state, isPlatformInspect).length, 1);
+  assert.deepEqual(platformsNamed(state, isPull), [
+    [fakeImagePlatformDefault, runtime],
+  ]);
+  assert.deepEqual(platformsNamed(state, isFill), [
+    [fakeImagePlatformDefault, "/workspace"],
+  ]);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+test("two runners sharing a runtime lock on an engine holding one variant by a name get and copy the runtime one at a time, each its own image's platform", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-runtime-lock-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runtimeLock = join(directory, "locks", "runtime.lock");
+  /** @type {Partial<import("./containerBackend.mjs").ContainerBackendSeams>} */
+  const polled = {
+    sleep: (_ms, signal) => waited(5, undefined, { signal }),
+  };
+  const first = await harness(t, { runtimeLock }, polled);
+  const { state } = first;
+  const second = await harness(
+    t,
+    { runtimeLock, pool: { ...pool, pool: "other" } },
+    { ...polled, engine: first.engine },
+  );
+  const pulls = platformsMixed(state);
+  const named = () =>
+    state.calls.filter(({ argv }) => argv.includes(runtime)).length;
+  await first.backend.place(assignment({ runtime }), "Job");
+  await calledFor(state, ({ argv }) => isPull(argv));
+  await second.backend.place(
+    assignment({ assignment: "asg-2", image: imageArm, runtime }),
+    "Job",
+  );
+  await waited(50);
+  assert.equal(named(), 2);
+  await stat(runtimeLock);
+  pulls[0].resolve({ code: 0, stdout: "", stderr: "" });
+  for (let wait = 0; pulls.length === 1 && wait < 1000; wait += 1)
+    await waited(1);
+  pulls[1].resolve({ code: 0, stdout: "", stderr: "" });
+  await first.backend.settled();
+  await second.backend.settled();
+  assert.deepEqual(
+    state.calls
+      .filter(({ argv }) => argv.includes(runtime) || isFill(argv))
+      .map(({ argv }) => [
+        isPull(argv) ? "pull" : isFill(argv) ? "fill" : "inspect",
+        argv.includes("--platform")
+          ? argv[argv.indexOf("--platform") + 1]
+          : undefined,
+      ]),
+    [
+      ["inspect", undefined],
+      ["pull", fakeImagePlatformDefault],
+      ["fill", fakeImagePlatformDefault],
+      ["inspect", undefined],
+      ["pull", "linux/arm64"],
+      ["fill", "linux/arm64"],
+    ],
+  );
+  assert.deepEqual(await endsNamed(first.backend), []);
+  assert.deepEqual(await endsNamed(second.backend), []);
+  assert.deepEqual(await first.backend.held(), listedJobs("asg-1"));
+  assert.deepEqual(await second.backend.held(), listedJobs("asg-2"));
+  await assert.rejects(stat(runtimeLock), { code: "ENOENT" });
+});
+
+test("a job waiting at a runtime lock another runner holds fails at its deadline as the runner's, and leaves the lock", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "chuggy-runtime-lock-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const runtimeLock = join(directory, "runtime.lock");
+  writeFileSync(runtimeLock, `${String(process.pid)}\n`);
+  const { backend, state } = await harness(t, { runtimeLock });
+  state.images.add(image);
+  await backend.place(assignment({ runtime, deadlineSecs: 5 }), "Job");
+  await backend.settled();
+  const [ended] = await endsNamed(backend);
+  assert.ok(ended.kind === "Job");
+  assert.equal(ended.refusal, undefined);
+  assert.equal(
+    ended.why,
+    `its container was not started: this runner could not get chuggy's runtime ${runtime}: the runtime lock was not taken by the assignment's deadline`,
+  );
+  assert.ok(!state.calls.some(({ argv }) => argv.includes(runtime)));
+  assert.equal(readFileSync(runtimeLock, "utf8"), `${String(process.pid)}\n`);
 });
 
 /**
@@ -3370,7 +3529,7 @@ test("a backend given no record holds, records and sweeps nothing, and a reclaim
   );
 });
 
-test("a record or a retention that names nothing a backend can keep is refused", () => {
+test("a record, a retention or a runtime lock that names nothing a backend can keep is refused", () => {
   const settings = {
     engine: /** @type {const} */ ("podman"),
     pool,
@@ -3388,6 +3547,10 @@ test("a record or a retention that names nothing a backend can keep is refused",
   assert.throws(
     () => checkedContainerBackendSettings({ ...settings, imageRecord: "" }),
     /^RangeError: imageRecord must name a file$/u,
+  );
+  assert.throws(
+    () => checkedContainerBackendSettings({ ...settings, runtimeLock: "" }),
+    /^RangeError: runtimeLock must name a file$/u,
   );
   for (const imageUnusedSecsMax of [-1, 1.5, Number.NaN])
     assert.throws(

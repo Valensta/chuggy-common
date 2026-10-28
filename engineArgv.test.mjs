@@ -11,6 +11,7 @@ import {
   heldListArgv,
   imageInspectArgv,
   imageInspectManyArgv,
+  imageInspectPlatformArgv,
   imageListArgv,
   imageContainersArgv,
   imageRemoveArgv,
@@ -519,6 +520,7 @@ test("every other call is handed to either engine as this argv", () => {
       imageInspectArgv(image),
       imageListArgv(),
       imageInspectManyArgv(["sha256:1", "sha256:2"]),
+      imageInspectPlatformArgv(image, "linux/arm64/v8"),
       imageRemoveArgv(image),
       listArgv("vteng/chuggy/shame"),
       listArgv("vteng/chuggy/shame", "asg-1"),
@@ -538,6 +540,7 @@ test("every other call is handed to either engine as this argv", () => {
       ["image", "inspect", "--format", "{{.Id}}", image],
       ["image", "ls", "--quiet", "--no-trunc"],
       ["image", "inspect", "sha256:1", "sha256:2"],
+      ["image", "inspect", "--platform", "linux/arm64/v8", image],
       ["image", "rm", image],
       [
         "ps",

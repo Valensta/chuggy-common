@@ -44,16 +44,17 @@
  * of it, and the job's container mounts that volume read-only and runs the
  * runtime's check of the image before the core, in a workspace volume of its
  * own that every user can write, as a cluster's emptyDir is. One placement at
- * a time gets and copies a runtime image, as `runtimeTurnTaken` says. A job
- * whose image cannot be got, started or pass that check is named refused
- * rather than ended, with the image's fault in one fixed text a fault. A
- * runtime this runner cannot get or copy is the site's failure and never the
- * image's, so that job's placement fails as any does. The volumes go with the
- * job's container, or with its placement where the job never starts in them,
- * the container filling them first. Any a runner left, stopped mid-placement
- * or refused a removal, are removed by a later `held`, which never takes one
- * of a placement in flight or of a container it lists. An assignment naming
- * no runtime runs its image's own entrypoint.
+ * a time gets and copies a runtime image, of all the runners sharing a
+ * `runtimeLock` or of this one where none is set, as `runtimeTurnTaken` says.
+ * A job whose image cannot be got, started or pass that check is named
+ * refused rather than ended, with the image's fault in one fixed text a
+ * fault. A runtime this runner cannot get or copy is the site's failure and
+ * never the image's, so that job's placement fails as any does. The volumes
+ * go with the job's container, or with its placement where the job never
+ * starts in them, the container filling them first. Any a runner left,
+ * stopped mid-placement or refused a removal, are removed by a later `held`,
+ * which never takes one of a placement in flight or of a container it lists.
+ * An assignment naming no runtime runs its image's own entrypoint.
  *
  * A JOB IS HANDED THIS MACHINE'S ENGINE where its runner hands jobs one: the
  * engine's socket, mounted into its container, and the variables that tell
@@ -120,7 +121,7 @@
 
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 
 import {
   workerImageFaults,
@@ -145,6 +146,7 @@ import {
   heldCreateArgv,
   imageInspectArgv,
   imageInspectManyArgv,
+  imageInspectPlatformArgv,
   inspectArgv,
   killArgv,
   kindLabel,
@@ -197,7 +199,7 @@ import {
   diskFloorHeld,
   dockerDiskUsage,
 } from "./diskFloor.mjs";
-import { fileLockHolderAlive } from "./fileLock.mjs";
+import { fileLockHolderAlive, fileLockTaken } from "./fileLock.mjs";
 import {
   imageCleanup,
   imageCleanupNone,
@@ -269,6 +271,7 @@ import {
  * @property {string} [memoryLock] the file every runner using this engine as this user takes the memory lock at, which a budget needs; none, and no budget is kept
  * @property {number} [memoryReservedBytes] what the budget reserves from jobs, which no job may ask past the rest of; none or 0, and a job may ask the whole budget
  * @property {string} [memoryClaimLock] the file every runner using this engine as this user takes the claim lock at, to ask a plane that claims by room for jobs; none, and the runner asks it as it asks any plane
+ * @property {string} [runtimeLock] the file every runner using this engine as this user takes the runtime lock at, to get and copy chuggy's runtime; none, and only this runner's placements take turns at it
  *
  * @typedef {z.infer<typeof ownerVolumesSchema>[number]} OwnerVolumeListed a volume as its owner lists it, which `ownerVolumesServed` makes one a job mounts
  *
@@ -284,7 +287,7 @@ import {
  * @property {(ms: number, signal: AbortSignal) => Promise<void>} sleep
  * @property {(line: string) => void} log
  * @property {() => Promise<import("./diskFloor.mjs").DiskFree>} [diskFree] the bytes free where the engine stores what it holds, the runner's to measure, since an engine in a VM answers for the VM's disk; none, and no floor is kept
- * @property {(pid: number) => boolean} [holderAlive] whether the process a memory hold names is running; `fileLockHolderAlive` where none
+ * @property {(pid: number) => boolean} [holderAlive] whether the process a memory hold or the runtime lock names is running; `fileLockHolderAlive` where none
  *
  * @typedef {object} InFlightPlacement
  * @property {string} assignment
@@ -548,7 +551,11 @@ export function checkedContainerBackendSettings(settings) {
     if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 0))
       throw new RangeError(`${key} must be a whole number of bytes, 0 or more`);
   }
-  for (const key of /** @type {const} */ (["memoryLock", "memoryClaimLock"]))
+  for (const key of /** @type {const} */ ([
+    "memoryLock",
+    "memoryClaimLock",
+    "runtimeLock",
+  ]))
     if (settings[key] !== undefined && settings[key].length === 0)
       throw new RangeError(`${key} must name a file`);
   return settings;
@@ -1679,14 +1686,86 @@ function runtimeFailure(failure, what) {
 }
 
 /**
- * Waits until no other placement is getting or copying a runtime image, or
- * the placement's signal aborts, and returns what ends its own turn at it:
+ * Whether the engine holds an image for `platform`. Where `imagePlatform`
+ * answers another, docker's containerd store can still hold one for it, so
+ * docker is asked at `platform`, and one before 28.1, which cannot answer, is
+ * taken to hold none.
+ *
+ * @param {State} state
+ * @param {string} image
+ * @param {string} platform
+ * @param {string} named how a failure names the image
+ */
+async function imageHeldFor(state, image, platform, named) {
+  const held = await imagePlatform(state, image, named);
+  if (held === undefined) return false;
+  if (imagePlatformMatched(held, platform)) return true;
+  if (state.settings.engine !== "docker") return false;
+  const answer = await state.seams.engine.exec(
+    imageInspectPlatformArgv(image, platform),
+  );
+  if (answer.code === 0) return true;
+  if (
+    ["PlatformAbsent", "FlagUnknown", "NotFound"].includes(
+      engineFailure(answer),
+    )
+  )
+    return false;
+  throw new ImageCallFailed(
+    `${named} could not be inspected for ${platform}: ${engineFailureLine(answer)}`,
+    answer,
+  );
+}
+
+/** Between two looks at a runtime lock another runner holds. */
+const runtimeLockPollMs = 500;
+
+/**
+ * The runtime lock, taken once no other runner holds it, or failing where the
+ * placement's signal aborts first: what lets it go, or nothing where no lock
+ * is set. A lock is abandoned once its holder's process is gone or it is
+ * older than this runner's longest placement, so two runners whose holds
+ * outlast that can both hold it, and a copy of either can then fail as a pull
+ * of the other's platform takes its variant.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @returns {Promise<(() => Promise<void>) | undefined>}
+ */
+async function runtimeLockTaken(state, placement) {
+  const { settings, seams } = state;
+  if (settings.runtimeLock === undefined) return undefined;
+  await mkdir(dirname(settings.runtimeLock), { recursive: true, mode: 0o700 });
+  for (;;) {
+    const release = await fileLockTaken(
+      settings.runtimeLock,
+      { heldMsMax: settings.timeoutSecsMax * 1000 },
+      {
+        pid: process.pid,
+        nowMs: Date.now,
+        wait: (ms) => seams.sleep(ms, placement.controller.signal),
+        holderAlive: seams.holderAlive ?? fileLockHolderAlive,
+      },
+    );
+    if (release !== undefined) return release;
+    await seams.sleep(
+      runtimeLockPollMs,
+      placementSignal(state, placement, "the runtime lock was not taken"),
+    );
+  }
+}
+
+/**
+ * Waits until no other placement of this runner is getting or copying a
+ * runtime image, then takes the runtime lock where one is set, or fails where
+ * the placement's signal aborts first, and returns what ends its own turn:
  * where an engine holds one variant of an image by its name, a pull of it for
  * one platform would take the name from another's about to be copied.
  *
  * @param {State} state
  * @param {Placement} placement
  * @param {string} image
+ * @returns {Promise<() => Promise<void>>}
  */
 async function runtimeTurnTaken(state, placement, image) {
   const ahead = state.runtimeTurns.get(image) ?? Promise.resolve();
@@ -1714,11 +1793,18 @@ async function runtimeTurnTaken(state, placement, image) {
       );
     });
     await Promise.race([ahead, aborted]);
+    const release = await runtimeLockTaken(state, placement);
+    return async () => {
+      try {
+        await release?.();
+      } finally {
+        ended();
+      }
+    };
   } catch (failure) {
     ended();
     throw failure;
   }
-  return ended;
 }
 
 /**
@@ -1732,17 +1818,16 @@ async function runtimeTurnTaken(state, placement, image) {
  * @param {string} platform the job's image's
  */
 async function runtimeHere(state, placement, runtime, platform) {
-  let turnEnded = () => undefined;
+  let turnEnded = async () => undefined;
   try {
     turnEnded = await runtimeTurnTaken(state, placement, runtime.image);
-    const held = await imagePlatform(state, runtime.image, "the runtime");
-    if (held === undefined || !imagePlatformMatched(held, platform)) {
+    if (!(await imageHeldFor(state, runtime.image, platform, "the runtime"))) {
       placement.phase = "Pulling";
       await pulled(state, placement, runtime.image, "the runtime", platform);
     }
     return turnEnded;
   } catch (failure) {
-    turnEnded();
+    await turnEnded();
     throw runtimeFailure(
       failure,
       `this runner could not get chuggy's runtime ${runtime.image}`,
@@ -2498,7 +2583,7 @@ async function runtimeReady(state, placement, runtime) {
     placement.phase = "Starting";
     await runtimeFilled(state, placement, runtime, platform);
   } finally {
-    turnEnded();
+    await turnEnded();
   }
 }
 
