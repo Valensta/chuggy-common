@@ -59,7 +59,7 @@ export function localToolInstructions(task) {
 The chuggy docs are behind read_docs: call it with no page for the index first, then with a page the index lists.
 To file a ticket:
 1. list_repositories: a repository that is configured and \`fileable\`.
-2. list_configurations: the newest revision for that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
+2. list_configurations: a revision whose \`repository\` is that repository, or, where its list_repositories row's \`configurationsHeld.result\` is Bootstrapped, the \`configurationsHeld.revision\` that row carries.
 3. initialize_draft on that revision: the fence and the defaults.
 4. create_draft: the minimum brief, and \`authoring\` from the defaults.
 5. read_draft: the draft as filed.

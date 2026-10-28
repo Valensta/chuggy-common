@@ -1177,7 +1177,14 @@ test("each read reaches the route its roster names, and only it", async () => {
     [["read_ticket", { ticket: 7 }], "/tickets/7"],
     [["read_draft", { ticket: 7 }], "/drafts/7"],
     [["list_drafts", { limit: 5 }], "/drafts?limit=5"],
-    [["list_configurations", { limit: 5 }], "/configurations?limit=5"],
+    [
+      ["list_configurations", { limit: 5 }],
+      "/configurations?latest=true&limit=5",
+    ],
+    [
+      ["list_configurations", { limit: 5, latest: false }],
+      "/configurations?latest=false&limit=5",
+    ],
     [["read_configuration", { revision: "r/1" }], "/configurations/r%2F1"],
     [
       ["read_decision_log", { after: 3, limit: 2 }],
@@ -1323,6 +1330,96 @@ test("a binding the forge could not say the worker app reaches is not fileable, 
   );
 });
 
+/** A page of a Ready catalog revision, an Incomplete one and an Authored one, as the route answers it. */
+const configurationsListed = {
+  configurations: [
+    {
+      readiness: "Ready",
+      revision: "r3",
+      parent: "r2",
+      digest: "sha256:cd",
+      createdAt: "2026-10-05T00:00:00.000Z",
+      provenance: {
+        source: "Repository",
+        repository: "https://github.com/vteng/chuggy.git",
+        commit: "c3",
+        path: "main.json",
+        name: "main",
+      },
+      version: { name: "main", number: 3 },
+      image: "registry.example/worker@sha256:ef",
+      worker: { name: "chuggy-worker", version: "1" },
+      practices: ["review"],
+      finalization: { approvalRequired: false },
+      evaluationStagesCount: 2,
+      catalog: {
+        workloads: ["build"],
+        plans: ["full"],
+        finalizers: ["merge"],
+        defaults: { work: "build", evaluation: "full", finalization: "merge" },
+      },
+    },
+    {
+      readiness: "Incomplete",
+      revision: "r2",
+      digest: "sha256:ab",
+      createdAt: "2026-10-04T00:00:00.000Z",
+      provenance: {
+        source: "Repository",
+        repository: "https://github.com/vteng/chuggy-docs.git",
+        commit: "c2",
+        path: "docs.json",
+        name: "docs",
+      },
+    },
+    {
+      readiness: "Ready",
+      revision: "r0",
+      digest: "sha256:00",
+      createdAt: "2026-10-01T00:00:00.000Z",
+      provenance: { source: "Authored" },
+      version: { name: "bootstrap", number: 1 },
+      image: "registry.example/worker@sha256:01",
+      practices: [],
+      finalization: { approvalRequired: true },
+      evaluationStagesCount: 1,
+    },
+  ],
+  nextCursor: "page-2",
+};
+
+test("a page of configuration revisions is answered as each one's revision, name, repository, readiness and catalog, and its cursor", async () => {
+  const { call } = toolsOf({}, () => ({
+    status: 200,
+    body: JSON.stringify(configurationsListed),
+  }));
+
+  const answer = await call("list_configurations", {});
+
+  assert.ok(answer.isError === undefined);
+  const [status, body] = textOf(answer).split("\n");
+  assert.equal(status, "HTTP 200");
+  assert.deepEqual(JSON.parse(body), {
+    configurations: [
+      {
+        revision: "r3",
+        name: "main",
+        repository: "https://github.com/vteng/chuggy.git",
+        readiness: "Ready",
+        catalog: configurationsListed.configurations[0].catalog,
+      },
+      {
+        revision: "r2",
+        name: "docs",
+        repository: "https://github.com/vteng/chuggy-docs.git",
+        readiness: "Incomplete",
+      },
+      { revision: "r0", name: "bootstrap", readiness: "Ready" },
+    ],
+    nextCursor: "page-2",
+  });
+});
+
 /** A draft's initialization as the route answers it, its configuration's canonical document included. */
 const draftInitialized = {
   configuration: {
@@ -1433,12 +1530,13 @@ test("a call that raises anything but its timeout answers the raise itself", asy
   assert.equal(textOf(answer), "connect ECONNREFUSED");
 });
 
-test("a refused read of either reshaped tool is relayed as the refusal it is", async () => {
+test("a refused read of each reshaped tool is relayed as the refusal it is", async () => {
   const refusal = JSON.stringify({ error: "NotFound" });
   const { call } = toolsOf({}, () => ({ status: 404, body: refusal }));
 
   for (const [name, args] of [
     ["list_repositories", {}],
+    ["list_configurations", {}],
     ["initialize_draft", { revision: "r1" }],
   ]) {
     const answer = await call(name, args);
@@ -1447,7 +1545,7 @@ test("a refused read of either reshaped tool is relayed as the refusal it is", a
   }
 });
 
-test("a body that is not the listing or the initialization the contract answers is refused rather than answered", async () => {
+test("a body that is not the listing, the page or the initialization the contract answers is refused rather than answered", async () => {
   for (const body of [
     "not json",
     "null",
@@ -1457,6 +1555,16 @@ test("a body that is not the listing or the initialization the contract answers 
     const answer = await call("list_repositories", {});
     assert.equal(answer.isError, true, body);
     assert.match(textOf(answer), /not this project's repositories/, body);
+  }
+  for (const body of [
+    "not json",
+    "null",
+    JSON.stringify({ configurations: [7] }),
+  ]) {
+    const { call } = toolsOf({}, () => ({ status: 200, body }));
+    const answer = await call("list_configurations", {});
+    assert.equal(answer.isError, true, body);
+    assert.match(textOf(answer), /not a page of configuration revisions/, body);
   }
   const { call } = toolsOf({}, () => ({
     status: 200,
@@ -3051,9 +3159,11 @@ test("every project tool a session holds asks its route, read_docs the docs host
                 ? dispatchViewPage([{ ticket: 26, ticketVersion: 41 }])
                 : path.endsWith("/repositories")
                   ? JSON.stringify({ repositories: [] })
-                  : path.includes("/draft-initializations/")
-                    ? JSON.stringify(draftInitialized)
-                    : "{}",
+                  : path.includes("/configurations?")
+                    ? JSON.stringify({ configurations: [] })
+                    : path.includes("/draft-initializations/")
+                      ? JSON.stringify(draftInitialized)
+                      : "{}",
       }),
     );
 
@@ -3108,20 +3218,40 @@ test("a page too large is asked for again at half its limit until one fits, and 
   assert.equal(page.nextCursor, "c-12");
 });
 
+/** A page as `name`'s route answers one, empty or holding `bytes` in one item; list_configurations parses its page, so its item is a revision. */
+function pageBodyOf(name, bytes) {
+  if (name !== "list_configurations")
+    return bytes === undefined ? "{}" : "x".repeat(bytes);
+  return JSON.stringify({
+    configurations:
+      bytes === undefined
+        ? []
+        : [
+            {
+              readiness: "Incomplete",
+              revision: "x".repeat(bytes),
+              provenance: { source: "Authored" },
+            },
+          ],
+  });
+}
+
 test("a call that gave no limit asks again from half the largest its shape admits", async () => {
   for (const [name, max] of Object.entries(pageBounds)) {
     const { api, call } = toolsOf({}, (path) => ({
       status: 200,
-      body:
+      body: pageBodyOf(
+        name,
         limitAsked({ path }) === undefined
-          ? "x".repeat(chuggyToolAnswerBytesMax)
-          : "{}",
+          ? chuggyToolAnswerBytesMax
+          : undefined,
+      ),
     }));
 
     const answer = await call(name, projectToolArguments[name]);
 
     assert.ok(answer.isError === undefined, name);
-    assert.equal(textOf(answer), "HTTP 200\n{}", name);
+    assert.equal(textOf(answer), `HTTP 200\n${pageBodyOf(name)}`, name);
     assert.deepEqual(
       api.calls.map(limitAsked),
       [undefined, Math.floor(max / 2)],
@@ -3141,7 +3271,7 @@ test("an item too large alone is refused once one is asked for, inside what a to
   for (const [name, max] of Object.entries(pageBounds)) {
     const { api, call } = toolsOf({}, () => ({
       status: 200,
-      body: "x".repeat(chuggyToolAnswerBytesMax),
+      body: pageBodyOf(name, chuggyToolAnswerBytesMax),
     }));
 
     const answer = await call(name, {

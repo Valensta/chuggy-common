@@ -59,11 +59,12 @@
  * what one landing weighs, and the suite holds the heaviest one inside an
  * answer.
  *
- * TWO ARE ANSWERED RESHAPED, every other field as the route answered it.
- * `list_repositories` adds to each row whether a ticket may be filed in it,
- * read from that row alone, and `initialize_draft` leaves out the
- * configuration's `canonical`, which `read_configuration` answers, and its
- * dependency candidates, which are chosen from `list_tickets`.
+ * THREE ARE ANSWERED RESHAPED. `list_repositories` adds to each row whether a
+ * ticket may be filed in it, read from that row alone, and `initialize_draft`
+ * leaves out the configuration's `canonical`, which `read_configuration`
+ * answers, and its dependency candidates, which are chosen from `list_tickets`;
+ * every other field of theirs is as the route answered it. `list_configurations`
+ * answers only what a draft is filed against.
  *
  * THE LAST IS AN IMAGE, ANSWERED AS THE FILE IT WAS WRITTEN TO, never as its
  * bytes. Its route answers them as base64, bounded by the largest upload rather
@@ -174,7 +175,7 @@ const chuggySelectionDescription = `\`selection\` is for a configuration that is
  * describes the `brief` parameter rather than each tool, since it is longer
  * than the part of a tool's description Claude Code passes an agent.
  */
-const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`images\` are this project's images the work is handed, each by the identity fetch_image takes; \`checks\` are command lines added to the first Check stage the configuration runs as commands, each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it, and initialize_draft answers that stage as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would), and a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
+const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations answers as an imported configuration's \`repository\`, and a draft carrying none is refused when it is released; \`images\` are this project's images the work is handed, each by the identity fetch_image takes; \`checks\` are command lines added to the first Check stage the configuration runs as commands, each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it, and initialize_draft answers that stage as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would), and a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
 
 /** What a draft's brief is first told: the least a ticket can be filed with, ahead of everything a brief may carry. */
 const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.
@@ -647,6 +648,49 @@ function listRepositoriesFileable(body) {
   };
 }
 
+/** One revision as list_configurations answers it: what a draft is filed against, and nothing read_configuration or initialize_draft answers. */
+function listConfigurationsEntry({
+  revision,
+  readiness,
+  provenance,
+  version,
+  catalog,
+}) {
+  const imported = provenance?.source === "Repository";
+  const name = imported ? provenance.name : version?.name;
+  return {
+    revision,
+    ...(name === undefined ? {} : { name }),
+    ...(imported ? { repository: provenance.repository } : {}),
+    readiness,
+    ...(catalog === undefined
+      ? {}
+      : {
+          catalog: {
+            workloads: catalog.workloads,
+            plans: catalog.plans,
+            finalizers: catalog.finalizers,
+            defaults: catalog.defaults,
+          },
+        }),
+  };
+}
+
+/** A page of configuration revisions, each as `listConfigurationsEntry` answers it. */
+function listConfigurationsPage({ configurations, nextCursor }) {
+  if (
+    !Array.isArray(configurations) ||
+    !configurations.every(
+      (entry) => entry !== null && typeof entry === "object",
+    )
+  )
+    return undefined;
+  return {
+    configurations: configurations.map(listConfigurationsEntry),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
 /** The fields of a draft's initialization initialize_draft leaves out. */
 const initializeDraftUnanswered = [
   "dependencyCandidates",
@@ -1072,15 +1116,23 @@ export const chuggyProjectTools = [
   {
     name: "list_configurations",
     description:
-      "One page of this project's configuration revisions, newest first. Call it for the revision a draft is filed against. One imported from a repository carries its configuration's name in `provenance.name`; who does the work under it is read_configuration's to answer.",
+      "One page of this project's configuration revisions, newest first: by default the newest of each configuration, `latest: false` for every revision. Call it for the revision a draft is filed against. Each answers its `revision`, its `name`, the `repository` it was imported from, its `readiness` and, for a catalog, its `catalog`; read_configuration answers the rest.",
     shape: (z) => ({
       cursor: cursor(z),
       limit: limit(z, nativeHttpPageItemsMax),
+      latest: z
+        .boolean()
+        .describe(
+          "false lists every revision; left out, only the newest of each configuration.",
+        )
+        .optional(),
     }),
-    call: (context, { cursor, limit: pageLimit }) =>
-      read(
+    call: (context, { cursor, limit: pageLimit, latest }) =>
+      readReshaped(
         context,
-        `${projectPath(context, "configurations")}${search({ cursor, limit: pageLimit })}`,
+        `${projectPath(context, "configurations")}${search({ cursor, latest: latest ?? true, limit: pageLimit })}`,
+        "a page of configuration revisions",
+        listConfigurationsPage,
       ),
   },
   {
