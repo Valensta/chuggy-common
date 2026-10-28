@@ -44,19 +44,22 @@ export function workerCredentialHost(remote) {
  * the value behind the file was mounted by the launcher or minted by the plane:
  * what the image's own programs are handed, and the askpass beside it, which
  * answers only a prompt naming the host of `remote`, the URL git reaches with
- * the credential.
+ * the credential. What the image's programs are handed is made of
+ * `environment`, the process's own where it names none.
  *
  * @param {string} credentialFile
  * @param {string} credentialUsername
  * @param {string} remote
+ * @param {Readonly<Record<string, string | undefined>>} [environment]
  */
 export function workerCredentialEnvironment(
   credentialFile,
   credentialUsername,
   remote,
+  environment = process.env,
 ) {
   return {
-    ...workerStageEnvironment(process.env),
+    ...workerStageEnvironment(environment),
     CHUG_WORKER_GIT_CREDENTIAL_FILE: credentialFile,
     CHUG_WORKER_GIT_CREDENTIAL_USERNAME: credentialUsername,
     CHUG_WORKER_GIT_CREDENTIAL_HOST: workerCredentialHost(remote),
@@ -115,8 +118,14 @@ export function workerRepositoryUrl(repositories, repositoryId) {
  * @param {Record<string, WorkerRepositoryConfiguration>} repositories
  * @param {Record<string, unknown>} credentialFiles
  * @param {string} repositoryId
+ * @param {Readonly<Record<string, string | undefined>>} [environment] what the askpass environment is made of, as `workerCredentialEnvironment` takes it
  */
-export function workerRepository(repositories, credentialFiles, repositoryId) {
+export function workerRepository(
+  repositories,
+  credentialFiles,
+  repositoryId,
+  environment = process.env,
+) {
   const configured = workerRepositoryConfiguration(repositories, repositoryId);
   const repository = requiredText(configured.url, "URL", repositoryId);
   const credential = requiredText(
@@ -147,6 +156,7 @@ export function workerRepository(repositories, credentialFiles, repositoryId) {
       credentialFile,
       credentialUsername,
       repository,
+      environment,
     ),
   };
 }

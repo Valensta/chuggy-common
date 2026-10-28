@@ -895,12 +895,12 @@ async function sessionTree(take, task, environment, credentialFiles, logging) {
 
 /**
  * The credential the plane mints for the repository this session was placed
- * against, or nothing where the session has no repository or the plane mints
- * none for it — a mirror the project does not bind among them, which is the
- * mounted credential's case exactly as before; or `{unreached}` where the
- * plane says which way its app does not reach it.
+ * against, written under `minted`, or nothing where the session has no
+ * repository or the plane mints none for it — a mirror the project does not
+ * bind among them, which is the mounted credential's case exactly as before;
+ * or `{unreached}` where the plane says which way its app does not reach it.
  */
-async function sessionMintedCredential(task, bearer, request, write) {
+async function sessionMintedCredential(task, bearer, request, write, minted) {
   if (task.repository === undefined) return undefined;
   return planeCredential({
     task,
@@ -908,6 +908,7 @@ async function sessionMintedCredential(task, bearer, request, write) {
     path: sessionCredentialPath,
     repository: task.repository.reference,
     request,
+    directory: minted,
     ...(write === undefined ? {} : { write }),
   });
 }
@@ -934,14 +935,14 @@ function sessionHeldCheckout(answered) {
  * has.
  */
 async function sessionHeld(context, environment, read, write, facts) {
-  const { task, bearer, request } = context;
+  const { task, bearer, request, minted } = context;
   const { files, text, credential } = await sessionCredentials(
     environment,
     read,
     facts.credentialSlot,
   );
   const checkout = sessionHeldCheckout(
-    await sessionMintedCredential(task, bearer, request, write),
+    await sessionMintedCredential(task, bearer, request, write, minted),
   );
   const { scrub, scrubHead, keepSecret } = credentialScrubbing([
     ...credential.secrets.map((value) => ({
@@ -1074,18 +1075,18 @@ async function sessionGitVersion(environment) {
 /**
  * The reads every git this session's shell runs makes of the repositories its
  * project binds, its own among them, served as a job's are
- * (`./projectReads.mjs`) under `services.minted`, asked of the plane's session
+ * (`./projectReads.mjs`) under the session's minted directory, asked of the plane's session
  * route under the session's own bearer, and each password kept in the scrub.
  * A session whose agent has no shell, or that has no repository to name the
  * forge, is served none.
  */
-async function sessionReads(context, facts, { environment, services, warn }) {
+async function sessionReads(context, facts, { environment, warn }) {
   const repository = context.task.repository?.reference;
   if (repository === undefined || !sessionRunsCommands(facts))
     return { git: [], close: async () => undefined };
   return projectReadsServed({
     repositoryId: repository,
-    directory: services.minted ?? mintedCredentialDirectory,
+    directory: context.minted,
     mint: (named) =>
       planeCredentialAnswered({
         task: context.task,
@@ -1141,6 +1142,20 @@ function sessionStops(context, facts, { services, pause, warn }) {
 }
 
 /**
+ * A stop its launcher asks for, which ends the mailbox as the plane's own stop
+ * does: the turn being answered runs to its result, no further turn is
+ * claimed, and the runtime's input ends. One asked before the mailbox was
+ * opened ends it at once.
+ */
+function sessionStopHeard(context, stopped) {
+  if (stopped === undefined) return;
+  if (stopped.aborted) return context.mailbox.stop();
+  stopped.addEventListener("abort", () => context.mailbox.stop(), {
+    once: true,
+  });
+}
+
+/**
  * The session once everything it runs on is in hand: the store its kind decides
  * the mode of, the mailbox its turns arrive through, and either the runtime it
  * speaks with or one of the refusals that stands in place of one. Both
@@ -1162,6 +1177,7 @@ async function sessionRun(context, facts, opened) {
     wait: pause,
     now: context.now,
   });
+  sessionStopHeard(context, opened.services.stopped);
   if (context.inquiry && sessionForkFrom(facts) === undefined)
     return await refuseSession(
       context,
@@ -1257,6 +1273,7 @@ export async function sessionMain(services = {}) {
       bearer,
       request,
       now,
+      minted: services.minted ?? mintedCredentialDirectory,
       scrub,
       mirrored: false,
       sightings: rateLimitSightings(),

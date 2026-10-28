@@ -161,6 +161,36 @@ test("the askpass environment is what the image's programs are handed, and the a
   assert.equal(environment.GIT_ASKPASS, askpass);
 });
 
+test("the askpass environment is made of the environment it is handed, where one is", () => {
+  const session = { PATH: "/usr/bin", SESSION_VARIABLE: "the session's" };
+
+  const environment = workerCredentialEnvironment(
+    "/credentials/github",
+    "x",
+    "https://github.com/kasofsk/chuggy.git",
+    session,
+  );
+  const repository = workerRepository(
+    {
+      chuggy: {
+        url: "https://github.com/kasofsk/chuggy.git",
+        credential: "github",
+        credentialUsername: "x",
+      },
+    },
+    { github: "/credentials/github" },
+    "chuggy",
+    session,
+  );
+
+  for (const handed of [environment, repository.environment]) {
+    assert.equal(handed.SESSION_VARIABLE, "the session's");
+    assert.equal(handed.PATH, "/usr/bin");
+    assert.equal(handed.HOME, undefined);
+    assert.equal(handed.GIT_ASKPASS, askpass);
+  }
+});
+
 test("a worker repository refuses incomplete credential configuration", () => {
   assert.throws(
     () => workerRepository({}, {}, "missing"),
