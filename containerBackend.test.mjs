@@ -2573,13 +2573,15 @@ test("a job waiting at a runtime lock another runner holds fails at its deadline
 
 /**
  * Waits until the engine has been made a call, failing the test where it
- * never is.
+ * never is. It waits by the clock and not by turns, since a call that follows
+ * real file I/O, such as taking the runtime lock, can take any number of turns
+ * on a loaded host.
  *
  * @param {Awaited<ReturnType<typeof harness>>["state"]} state
  * @param {(call: import("./engine.fixture.mjs").FakeCall) => boolean} wanted
  */
 async function calledFor(state, wanted) {
-  for (let turn = 0; turn < 1000; turn += 1) {
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline;) {
     if (state.calls.some(wanted)) return;
     await setImmediate();
   }
