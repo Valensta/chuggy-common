@@ -3,9 +3,15 @@
  *
  * THE CARRIER IS THE MODE AND THE CANDIDATE IS THE TASK KIND. Whether an agent
  * or a list of commands runs the attempt is the worker mode the task carries;
- * whether what ran leaves a branch behind is the task's kind and its verdict.
- * Neither is read from the other, so a Work task carrying commands runs them
- * with no agent and still pushes the candidate a passing run leaves.
+ * whether what ran leaves a candidate behind is the task's kind and its
+ * verdict. Neither is read from the other, so a Work task carrying commands
+ * runs them with no agent and still pushes the candidate a passing run leaves.
+ *
+ * A FAILED WORK ATTEMPT KEEPS WHAT IT CHANGED on the branch a pass would have
+ * pushed, named in the run's log and its report and never as its source, so
+ * nothing reads it as a candidate. Keeping it is never the attempt's failure:
+ * a commit or push that fails, or a commit carrying a held secret, is logged
+ * and the attempt still reports the Fail it ran to.
  *
  * THE COMMANDS' EXIT STATUS IS THE WORK'S SUCCESS. Where an agent ran the
  * attempt there is an account of the run to take a verdict from; where commands
@@ -547,15 +553,44 @@ async function upload(task, bearer, path, content, request = workerRequest) {
   return artifact(path, content);
 }
 
+/**
+ * What a work attempt leaves on its branch: a passing one's `source`, and what
+ * a failing one changed as `kept`, where it changed anything and keeping it
+ * did not fail.
+ */
 async function workSource(context, workspace, verdict) {
-  if (context.task.taskKind !== "Work" || verdict !== "Pass") return undefined;
-  return commitAndPushSource({
-    task: context.task,
-    ...workspace,
-    command: context.command ?? command,
-    secrets: context.held(),
-    git: context.git,
-  });
+  if (context.task.taskKind !== "Work") return {};
+  const pushed = () =>
+    commitAndPushSource({
+      task: context.task,
+      ...workspace,
+      command: context.command ?? command,
+      secrets: context.held(),
+      git: context.git,
+      emptyDeclared: verdict === "Pass",
+    });
+  if (verdict === "Pass") return { source: await pushed() };
+  try {
+    const kept = await pushed();
+    process.stderr.write(
+      kept === undefined
+        ? "the failed attempt changed nothing, so nothing is kept\n"
+        : `${workSourceKept(kept)}\n`,
+    );
+    return { kept };
+  } catch (failure) {
+    process.stderr.write(
+      `the failed attempt's changes could not be kept: ${context.scrub(
+        failure instanceof Error ? failure.message : String(failure),
+      )}\n`,
+    );
+    return {};
+  }
+}
+
+/** Where a failed attempt's changes are kept, as its log and its report say it. */
+function workSourceKept({ ref, commit }) {
+  return `The failed attempt's changes are kept on ${ref} at ${commit}.`;
 }
 
 /**
@@ -741,9 +776,16 @@ async function report(context, manifest) {
 /** What a report says of an agent whose summary left nothing printable. */
 const reportSummaryBlank = "the agent's summary held no printable text";
 
-/** A run's summary as the report row accepts it, or a note that an agent's summary had nothing printable. */
-function reportSummary(summary, scrub) {
-  return workerReportText(summary, scrub) || reportSummaryBlank;
+/**
+ * A run's summary as the report row accepts it, or a note that an agent's
+ * summary had nothing printable, led by where a failed attempt's changes are
+ * kept so that no length of summary cuts it.
+ */
+function reportSummary(summary, scrub, kept) {
+  const text = workerReportText(summary, scrub) || reportSummaryBlank;
+  return kept === undefined
+    ? text
+    : workerReportText(`${workSourceKept(kept)} ${text}`, scrub);
 }
 
 async function credentialValues(mounted) {
@@ -1170,7 +1212,7 @@ export async function workerAttempt(launch, seams = {}) {
  * What a finished run leaves behind, in the order it has to leave it: the run's
  * totals reach the plane before the report that terminalizes the execution, so
  * a settled task never carries figures nothing wrote. `context.command` is the
- * seam a passing work attempt's push runs through, this module's own where it
+ * seam a work attempt's push runs through, this module's own where it
  * is absent; `context.held` answers the secrets that push is checked for; and
  * `context.git` is the attempt's git configuration, which its commit is handed
  * with the hooks it runs.
@@ -1181,7 +1223,7 @@ export async function publishWorkerResult(
   { output, result, diagnosticPath, summaryPath },
 ) {
   await context.evidence.finish();
-  const source = await workSource(context, workspace, result.verdict);
+  const { source, kept } = await workSource(context, workspace, result.verdict);
   const diagnostics = [
     await diagnostic(context, diagnosticPath, output),
     ...(await summaryDiagnostics(context, summaryPath, result.summary)),
@@ -1189,7 +1231,7 @@ export async function publishWorkerResult(
   await context.stopLease();
   await report(context, {
     verdict: result.verdict,
-    report: reportSummary(result.summary, context.scrub),
+    report: reportSummary(result.summary, context.scrub, kept),
     handoffs: [],
     ...(source === undefined ? {} : { source }),
     diagnostics,

@@ -223,7 +223,9 @@ async function sourceSecretCarried(directory, base, head, secrets) {
 }
 
 /**
- * The branch one passing work attempt leaves behind.
+ * The branch one work attempt leaves behind: a passing attempt's candidate, or
+ * what a failing one changed, kept for whoever reads the attempt. Nothing
+ * where `emptyDeclared` is false and the attempt changed nothing.
  *
  * NOTHING HELD IS PUSHED. `secrets` is every `{ kind, value }` the pod scrubs
  * from what it uploads, and a commit carrying one of them is refused before the
@@ -281,14 +283,25 @@ export async function commitAndPushSource({
   secrets,
   git = [],
   pause,
+  emptyDeclared = true,
 }) {
   if (!Array.isArray(secrets))
     throw new Error("a push is checked against the secrets the pod holds");
   const commit = await runStep(
     runCommitFailed,
-    () => sourceCommitted({ task, base, directory, command, secrets, git }),
+    () =>
+      sourceCommitted({
+        task,
+        base,
+        directory,
+        command,
+        secrets,
+        git,
+        emptyDeclared,
+      }),
     gitFailureLine,
   );
+  if (commit === undefined) return undefined;
   const ref = ticketBranch(task);
   await runStep(
     runPushFailed,
@@ -421,8 +434,8 @@ async function sourcePushDiscarded(made) {
  * The commit everything the attempt changed is in, refused where it carries a
  * held secret. What is left staged is committed on top of `HEAD`; where
  * nothing is, a `HEAD` past `base` is that commit as it stands, and a `HEAD`
- * still at `base` gets an empty one, declaring that the attempt found nothing
- * left to do.
+ * still at `base` gets an empty one where `emptyDeclared`, declaring that the
+ * attempt found nothing left to do, and is nothing where not.
  */
 async function sourceCommitted({
   task,
@@ -431,6 +444,7 @@ async function sourceCommitted({
   command,
   secrets,
   git,
+  emptyDeclared,
 }) {
   const local = {
     cwd: directory,
@@ -454,7 +468,9 @@ async function sourceCommitted({
     local,
   );
   const [authored, tree] = head.trim().split("\n");
-  if (staged.trim() !== tree || authored === base)
+  const unchanged = staged.trim() === tree;
+  if (unchanged && authored === base && !emptyDeclared) return undefined;
+  if (!unchanged || authored === base)
     await command(
       "git",
       [
