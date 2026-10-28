@@ -27,6 +27,7 @@ import {
   hostRoutedBackend,
   hostRuns,
 } from "./hostBackend.mjs";
+import { runnerMeasures } from "./runnerReport.mjs";
 import { savedLogCutLine, savedLogLinesMax } from "./savedLog.mjs";
 
 /**
@@ -216,9 +217,15 @@ test("a job that ended of itself is named once, after held stops naming it, its 
       kind: "Job",
       job: { assignment: "asg-1", callbackUrl, bearer },
       why: "the job's process exited 3",
+      ran: "Failed",
     },
   ]);
   assert.deepEqual(await backend.ended(), []);
+  const { Job: ran } = backend.measured().runSecs;
+  assert.equal(
+    ran.bucketCounts.reduce((sum, count) => sum + count, 0),
+    1,
+  );
   await assert.rejects(access(directory));
   assert.equal(
     await readFile(
@@ -746,4 +753,41 @@ test("a host beside a container backend takes its own jobs, and everything else 
   calls.splice(0);
   await routed.settled();
   assert.deepEqual(calls, ["container.settled", "host.settled"]);
+});
+
+test("a job whose process exited 0 is named as one that succeeded", async (t) => {
+  const { backend } = await harness(t, "exit:0");
+  await backend.place(assignment(), "Job");
+  await backend.settled();
+  await backend.held();
+  assert.deepEqual(
+    (await backend.ended()).map((ended) => ended.kind === "Job" && ended.ran),
+    ["Succeeded"],
+  );
+});
+
+test("a host beside a container backend measures what both measured", () => {
+  const container = runnerMeasures();
+  const host = runnerMeasures();
+  container.pulled(3);
+  container.ran("Session", 40);
+  host.ran("Job", 40);
+  const routed = hostRoutedBackend(
+    /** @type {never} */ ({
+      ...recording([], "container"),
+      measured: container.measured,
+    }),
+    /** @type {never} */ ({
+      ...recording([], "host"),
+      measured: host.measured,
+    }),
+    ["Platform:MacOS:Arm64"],
+  );
+  const measured = routed.measured?.();
+  assert.equal(measured?.imagePullSecs.sumSecs, 3);
+  assert.deepEqual(measured?.runSecs.Job, host.measured().runSecs.Job);
+  assert.deepEqual(
+    measured?.runSecs.Session,
+    container.measured().runSecs.Session,
+  );
 });

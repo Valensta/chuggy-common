@@ -630,3 +630,61 @@ test("an answer naming a chat image the contract cannot read is an outage", asyn
       "Unavailable",
     );
 });
+
+test("a report is posted to its route as JSON under the token it is given, naming this client's release, and is taken only where the plane answers 204", async () => {
+  const seen = [];
+  let status = 204;
+  const plane = poolPlaneClient(planeSettings, async (input, init) => {
+    seen.push({ url: String(input), init });
+    return answered(status, "{}");
+  });
+  assert.deepEqual(await plane.report("pool-token", '{"host":"a"}'), {
+    reported: "Reported",
+  });
+  assert.equal(seen[0].url, "https://pool-plane.invalid/v1/runner-report");
+  assert.equal(seen[0].init.method, "POST");
+  assert.equal(seen[0].init.body, '{"host":"a"}');
+  assert.equal(seen[0].init.headers.authorization, "Bearer pool-token");
+  assert.equal(seen[0].init.headers["content-type"], "application/json");
+  assert.equal(
+    seen[0].init.headers[workerContractHeader],
+    workerContractRelease,
+  );
+  for (status of [200, 400, 401, 404, 500])
+    assert.deepEqual(await plane.report("pool-token", "{}"), {
+      reported: "Failed",
+      evidence: `the plane answered ${String(status)}`,
+    });
+  const unreached = poolPlaneClient(planeSettings, async () => {
+    throw new TypeError("fetch failed");
+  });
+  assert.deepEqual(await unreached.report("pool-token", "{}"), {
+    reported: "Failed",
+    evidence: "the plane could not be reached",
+  });
+});
+
+test("the client keeps the version its last poll's answer named, and none where that answer named none or never came", async () => {
+  let answer = () =>
+    answered(200, '{"assignments":[],"sessions":[],"stop":[]}');
+  const plane = poolPlaneClient(planeSettings, async () => answer());
+  assert.equal(plane.polledVersion(), undefined);
+  await plane.poll("pool-token", [], 1);
+  const [major, minor] = workerContractRelease.split(".").map(Number);
+  assert.deepEqual(plane.polledVersion(), { major, minor });
+  answer = () => new globalThis.Response("bad gateway", { status: 502 });
+  await plane.poll("pool-token", [], 1);
+  assert.equal(plane.polledVersion(), undefined);
+  answer = () =>
+    new globalThis.Response("{}", {
+      status: 500,
+      headers: { [workerContractHeader]: "1.27.3" },
+    });
+  await plane.poll("pool-token", [], 1);
+  assert.deepEqual(plane.polledVersion(), { major: 1, minor: 27 });
+  answer = () => {
+    throw new TypeError("fetch failed");
+  };
+  await plane.poll("pool-token", [], 1);
+  assert.equal(plane.polledVersion(), undefined);
+});

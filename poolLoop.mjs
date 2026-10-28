@@ -78,6 +78,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {string} why the backend's own words, never the workload's, which may carry a secret no scrub here holds
  * @property {WorkerPoolJobRefusal} [refusal] where the backend refused the job for its image's fault rather than ran it, `why` being the refusal's evidence
  * @property {"Deadline" | "DiskLow"} [killed] where the backend killed it: at its deadline, or for its machine's low disk
+ * @property {"Succeeded" | "Failed"} [ran] how its process ended where it ran to an end of its own, `Succeeded` only for one that exited 0; none where it never ran or was killed
  *
  * @typedef {object} WorkerPoolJobRefusal
  * @property {WorkerImageFault} fault what the job's image lacks
@@ -98,6 +99,7 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(byRoom: boolean) => boolean} [jobsTaken] whether it takes a job now, as its last `held` found, from a plane that claims by room or one that does not; false while its machine's disk is low or its engine's memory has no room for it, and true for a backend that keeps neither
  * @property {() => WorkerPoolMemoryRoom | undefined} [memoryRoom] its engine's memory as its last `held` found; none for a backend that keeps no budget
  * @property {() => Promise<(() => Promise<void>) | undefined>} [claimed] takes its engine's claim without waiting: what lets it go, or nothing while another pool holds it; none for a backend that keeps no claim lock
+ * @property {() => import("./runnerReport.mjs").RunnerMeasured} [measured] the image pulls it made and the runs that ended, since it was made; none for a backend that measures neither
  *
  * @typedef {object} WorkerPoolMemoryRoom in MiB
  * @property {number} roomMib what jobs may take now, none where the count failed
@@ -118,6 +120,11 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @property {(token: string, held: readonly string[], wanted: number, wantedSessions: number, terms?: WorkerPoolPollTerms) => Promise<WorkerPoolPolled>} poll
  * @property {(token: string, assignment: string, outcome: AssignmentOutcome) => Promise<WorkerPoolSettled>} settle
  * @property {() => boolean | undefined} [claimsByRoom] whether its last reconciled answer said whether a job waits, undefined before it has one; none, and it never does
+ * @property {() => WorkerContractVersion | undefined} [polledVersion] the version its last poll's answer named, undefined where it named none or never came
+ * @property {(token: string, body: string) => Promise<WorkerPoolReported>} [report] posts a runner's report, its body as JSON
+ *
+ * @typedef {{reported: "Reported"} | {reported: "Failed", evidence: string}} WorkerPoolReported
+ * @typedef {import("@chuggy/worker-contract/workerContract").WorkerContractVersion} WorkerContractVersion
  *
  * @typedef {"Ended" | "Refused" | "Unavailable"} WorkerPoolEndAnswer
  *
