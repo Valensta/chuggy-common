@@ -328,17 +328,44 @@ test("a remote that cannot be fetched is no tree, its failure logged without a s
   });
 });
 
+/** Catches a stop that waits out a plane that does not answer. */
+test("a checkout stopped while the plane is asked is given up at once, and nothing is fetched", async () => {
+  const stop = new globalThis.AbortController();
+  const made = chatCheckout(
+    task,
+    bearer,
+    "/sessions/session-1",
+    servicesOf(
+      { updated: () => assert.fail("a mirror was fetched") },
+      "/nowhere",
+      { mint: () => new Promise(() => undefined), signal: stop.signal },
+    ),
+  );
+  stop.abort(new Error("stopped"));
+
+  await assert.rejects(made, /stopped/u);
+});
+
 /** Catches a mirror its first session's stop left half-made refusing every later session. */
 test("a checkout its session's stop cancels is no tree, and the next is made", async () => {
-  await scratch(async ({ root, mirrors }) => {
+  await scratch(async ({ root }) => {
     const { url, head } = await remoteOf(root);
     const workspace = join(root, "session-1");
+    const stop = new globalThis.AbortController();
+    const mirrors = await chatMirrorsOpened({
+      root: join(root, "mirrors"),
+      own: async () => undefined,
+      run: (args, options) => {
+        if (args[0] === "init") stop.abort();
+        return sessionCheckoutGit(args, options);
+      },
+    });
 
     const made = await chatCheckout(
       task,
       bearer,
       workspace,
-      servicesOf(mirrors, url, { signal: globalThis.AbortSignal.abort() }),
+      servicesOf(mirrors, url, { signal: stop.signal }),
     );
 
     assert.deepEqual(made, { checkout: undefined });

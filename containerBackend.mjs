@@ -188,6 +188,7 @@ import {
   poolProjectDigest,
   poolProjectLabelValue,
 } from "./poolIdentity.mjs";
+import { poolSessionPhase } from "./poolSessionPlane.mjs";
 import {
   diskFloor,
   diskFloorCapped,
@@ -915,7 +916,7 @@ function workloadEnd(kind, attempt, end) {
     return {
       kind,
       session: attempt,
-      phase: end.succeeded ? "Succeeded" : "Failed",
+      phase: poolSessionPhase(end.succeeded),
     };
   return {
     kind,

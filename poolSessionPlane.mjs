@@ -78,3 +78,14 @@ export function poolSessionPlaneClient(input, fetcher = globalThis.fetch) {
   const settings = checkedPoolSessionPlaneClientSettings(input);
   return { end: (ended) => poolSessionPlaneEnded(settings, fetcher, ended) };
 }
+
+/**
+ * The phase a session's process is reported to have ended in: `Succeeded`
+ * where it ended as it should, `Failed` wherever it did not.
+ *
+ * @param {boolean} succeeded
+ * @returns {WorkerPoolSessionEnd["phase"]}
+ */
+export function poolSessionPhase(succeeded) {
+  return succeeded ? "Succeeded" : "Failed";
+}

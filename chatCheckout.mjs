@@ -24,6 +24,10 @@
  * project through the API instead. The resolution and the failure are that
  * module's, reused.
  *
+ * Every git call the supervisor makes outside a session's tree runs in the
+ * mirrors' directory, so the repository it finds itself in is never the one
+ * the supervisor happened to be started in.
+ *
  * A MIRROR IS PRUNED ONLY WHEN NOTHING BORROWS FROM IT. A clone's objects that
  * no ref of its mirror still reaches would go with a prune, so `pruned` is for
  * a supervisor that holds no session's tree at all.
@@ -32,7 +36,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, chown, mkdir, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import { jobRepositoryDirectory } from "./job.mjs";
@@ -94,29 +98,32 @@ export async function chatMirrorsOpened({
   const queues = new Map();
   const mirrors = { root, groupFirst, groupCount, owner, own, run, groups };
   return {
-    /** The mirror of `repository`, brought up to its remote under `environment`. */
+    /**
+     * The mirror of `repository`, brought up to its remote under
+     * `environment` once every fetch into it asked before has ended; one
+     * `signal` cancels stops waiting for them, and the next waits for both.
+     */
     updated: (repository, environment, signal) => {
       const path = join(
         root,
         `${chatMirrorName(repository)}${chatMirrorSuffix}`,
       );
       const group = chatMirrorGroup(mirrors, path);
-      const queued = (queues.get(path) ?? Promise.resolve()).then(() =>
+      const before = queues.get(path) ?? Promise.resolve();
+      const queued = chatAbortable(signal, before).then(() =>
         chatMirrorFetched(mirrors, { path, group }, repository, {
           env: environment,
           signal,
         }),
       );
-      queues.set(
-        path,
-        queued.catch(() => undefined),
-      );
+      queues.set(path, Promise.allSettled([before, queued]));
       return queued.then(() => ({ path, group }));
     },
     /** Every mirror with what no ref reaches dropped, for a supervisor holding no session's tree. */
     pruned: async () => {
       for (const path of groups.keys())
         await run(["--git-dir", path, "gc", "--prune=now", "--quiet"], {
+          cwd: root,
           timeout: sessionCheckoutTimeoutMs,
         });
     },
@@ -145,8 +152,8 @@ function chatMirrorGroup(mirrors, path) {
 
 /** The mirror at `path` made where it is not, or was left half-made, and fetched from `repository`. */
 async function chatMirrorFetched(mirrors, { path, group }, repository, call) {
-  const { run, owner, own } = mirrors;
-  const options = { ...call, timeout: sessionCheckoutTimeoutMs };
+  const { run, owner, own, root } = mirrors;
+  const options = { ...call, cwd: root, timeout: sessionCheckoutTimeoutMs };
   if (!(await chatMirrorMade(path))) {
     await mkdir(path, { recursive: true, mode: chatMirrorMode });
     await own(path, owner, group);
@@ -189,14 +196,30 @@ async function chatMirrorMade(path) {
 }
 
 /**
+ * What `pending` settles with, or the reason `signal` gives once it is
+ * aborted, whichever is first; `pending` itself is left to settle unread.
+ */
+export function chatAbortable(signal, pending) {
+  if (signal === undefined) return pending;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    pending.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", aborted);
+    });
+  });
+}
+
+/**
  * The tree one session reads, made under `workspace` for `user`, a user and
- * group — or nothing,
- * or the refusal, as `sessionCheckout` answers — and the group of the mirror
- * it borrows from, which the session is to be given.
+ * group — or nothing, or the refusal, as `sessionCheckout` answers — and the
+ * group of the mirror it borrows from, which the session is to be given.
  *
  * `mint` is the plane's answer for the session's repository; `repositories`,
  * `credentialFiles` and `environment` what the site's map resolves it with.
- * `handOver` gives a tree to a user and its group; `signal` cancels.
+ * `handOver` gives a tree to a user and its group; `signal` cancels, and a
+ * checkout it cancels while the plane is asked raises its reason.
  */
 export async function chatCheckout(task, bearer, workspace, services) {
   const { mint, mirrors, signal, log, user } = services;
@@ -204,7 +227,7 @@ export async function chatCheckout(task, bearer, workspace, services) {
     services;
   if (task.repository === undefined) return { checkout: undefined };
   const reference = task.repository.reference;
-  const minted = await mint(reference);
+  const minted = await chatAbortable(signal, mint(reference));
   const scrub = credentialScrub([bearer, minted?.password ?? ""]);
   const remote =
     minted?.unreached === undefined
@@ -224,10 +247,10 @@ export async function chatCheckout(task, bearer, workspace, services) {
   const options = { signal, timeout: sessionCheckoutTimeoutMs };
   try {
     const mirror = await mirrors.updated(repository, environment, signal);
-    await run(
-      ["clone", "--shared", "--quiet", mirror.path, directory],
-      options,
-    );
+    await run(["clone", "--shared", "--quiet", mirror.path, directory], {
+      ...options,
+      cwd: dirname(mirror.path),
+    });
     await run(["remote", "set-url", "origin", repository], {
       ...options,
       cwd: directory,

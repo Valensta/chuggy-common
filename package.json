@@ -28,6 +28,8 @@
     "boundedResponse.mjs",
     "chatChannel.mjs",
     "chatCheckout.mjs",
+    "chatSession.mjs",
+    "chatSupervisor.mjs",
     "check.sh",
     "checks.mjs",
     "chuggyApi.mjs",
