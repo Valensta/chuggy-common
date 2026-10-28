@@ -38,7 +38,6 @@
  * and a supervisor starting does the same for every user of its range, once
  * none has a process left, so nothing a predecessor's sessions left is the
  * next's.
-
  *
  * The places every user may write are found when the supervisor starts,
  * once no session user's process is left: every directory any user may
@@ -510,7 +509,6 @@ async function chatSystemEmptied(path, uid, asUser, signal) {
 }
 
 /** Whether anything is at `path`. */
-
 async function chatSystemExists(path) {
   try {
     await lstat(path);

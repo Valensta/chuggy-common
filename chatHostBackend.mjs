@@ -22,7 +22,6 @@
  * exited is ended once its output has been read to its end, within a bound,
  * so the frames it wrote before it exited are acted on, and has no room
  * meanwhile.
-
  *
  * A `Start` IS NEVER LOGGED, NOR WRITTEN ANYWHERE BUT THE SUPERVISOR'S
  * INPUT: it carries the session's bearer. What the supervisor writes on its
