@@ -17,6 +17,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -297,6 +298,13 @@ function placesOf(place, uid) {
   };
 }
 
+/** Asks the probe in `workspace` to try `targets`, a file it sees only once whole. */
+async function probeAsked(workspace, targets) {
+  const partial = join(workspace, "probe.json.partial");
+  await writeFile(partial, JSON.stringify(targets));
+  await rename(partial, join(workspace, "probe.json"));
+}
+
 /** What a session's probe is to try, against the session `other` and its own `mirror` and the other's. */
 function targetsOf(place, own, other, mirrors) {
   return {
@@ -386,14 +394,11 @@ test(
       );
       for (const [index, own] of started.entries()) {
         const other = started[1 - index];
-        await writeFile(
-          join(own.workspace, "probe.json"),
-          JSON.stringify({
-            ...targetsOf(place, own, other, [own.mirror, other.mirror]),
-            ignoreStop: index === 1,
-            ...(index === 1 ? { privateTree } : {}),
-          }),
-        );
+        await probeAsked(own.workspace, {
+          ...targetsOf(place, own, other, [own.mirror, other.mirror]),
+          ignoreStop: index === 1,
+          ...(index === 1 ? { privateTree } : {}),
+        });
       }
       for (const [index, own] of started.entries())
         await isolationAsserted(
@@ -455,13 +460,11 @@ test(
         live,
       );
       await said(machine.logged, own.label, "hello");
-      await writeFile(
-        join(own.workspace, "probe.json"),
-        JSON.stringify(
-          targetsOf(place, own, placesOf(place, uidFirst + 1), [
-            await mirrorOf(own.workspace),
-          ]),
-        ),
+      await probeAsked(
+        own.workspace,
+        targetsOf(place, own, placesOf(place, uidFirst + 1), [
+          await mirrorOf(own.workspace),
+        ]),
       );
 
       assert.equal(
@@ -499,15 +502,13 @@ async function oneRun(place, machine, targets) {
     new globalThis.AbortController().signal,
   );
   await said(machine.logged, own.label, "hello");
-  await writeFile(
-    join(own.workspace, "probe.json"),
-    JSON.stringify({
-      ...targetsOf(place, own, placesOf(place, uidFirst + 1), [
-        await mirrorOf(own.workspace),
-      ]),
-      ...targets,
-    }),
-  );
+  await probeAsked(own.workspace, {
+    ...targetsOf(place, own, placesOf(place, uidFirst + 1), [
+      await mirrorOf(own.workspace),
+    ]),
+    ...targets,
+  });
+
   const probed = await said(machine.logged, own.label, "probed");
   machine.logged.length = 0;
   running.stop();

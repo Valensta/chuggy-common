@@ -129,6 +129,10 @@ test(
       chatSupervisorCapabilities.filter((name) => name !== "FSETID"),
     );
     assert.equal(passed, false, tap);
-    assert.doesNotMatch(tap, /^# fail 0$/mu, tap);
+    assert.match(
+      tap,
+      /^not ok 2 - a later session reads what its mirror fetched since, through its group$/mu,
+      tap,
+    );
   },
 );
