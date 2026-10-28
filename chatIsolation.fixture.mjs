@@ -103,8 +103,9 @@ function probed(targets) {
 
 /**
  * What `targets` asks to be left behind in the places every user writes,
- * each file under its own directory there too, and System V IPC objects,
- * and whether what it asks to be looked for is there.
+ * each file under its own directory there too, and System V IPC objects;
+ * a deep tree there no other user may enter; and whether what it asks to be
+ * looked for is there.
  */
 function scattered(targets) {
   const said = {};
@@ -118,6 +119,15 @@ function scattered(targets) {
       execFileSync("ipcmk", ["--shmem", "4096"], { stdio: "ignore" });
       execFileSync("ipcmk", ["--queue"], { stdio: "ignore" });
     });
+  }
+  if (targets.privateTree !== undefined) {
+    mkdirSync(targets.privateTree, { mode: 0o700 });
+    let deeper = targets.privateTree;
+    for (let depth = 0; depth < 64; depth += 1) {
+      deeper = join(deeper, "d");
+      mkdirSync(deeper);
+      writeFileSync(join(deeper, "f"), "x");
+    }
   }
   if (targets.seek !== undefined)
     said.found = targets.seek.flatMap((path) =>

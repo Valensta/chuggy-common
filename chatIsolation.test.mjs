@@ -24,7 +24,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import test from "node:test";
+import test, { after, before } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -33,6 +33,7 @@ import { workerCredentialFilesVariable } from "@chuggy/worker-contract/workerEnv
 import { chatCheckout, chatMirrorsOpened } from "./chatCheckout.mjs";
 import {
   chatSessionsOpened,
+  chatSessionLabel,
   chatSystem,
   chatUserProcesses,
 } from "./chatSession.mjs";
@@ -56,6 +57,44 @@ const groupFirst = 42_000;
 
 /** A user of the image's own that holds the provider credential, which the supervisor is to read as. */
 const credentialOwner = 1_000;
+
+/** The users this suite made for its sessions to run as, removed once it is over. */
+const usersMade = [];
+
+/** Each user and group the suite's sessions run as made where the machine does not name it, as an image names its own. */
+before(async () => {
+  if (skipped !== false) return;
+  for (const uid of [uidFirst, uidFirst + 1]) {
+    const named = await run("getent", ["passwd", String(uid)]).then(
+      () => true,
+      () => false,
+    );
+    if (named) continue;
+    const name = `chuggy-suite-${String(uid)}`;
+    await run("groupadd", ["--gid", String(uid), name]);
+    await run("useradd", [
+      "--uid",
+      String(uid),
+      "--gid",
+      String(uid),
+      "--no-create-home",
+      "--shell",
+      "/usr/sbin/nologin",
+      name,
+    ]);
+    usersMade.push(name);
+  }
+});
+
+after(async () => {
+  for (const name of usersMade.splice(0)) {
+    await run("userdel", [name]).catch(() => undefined);
+    await run("groupdel", [name]).catch(() => undefined);
+  }
+});
+
+/** The assignment every session of the suite is prepared for, named as no log prefix may hold it. */
+const assignment = "isolation run] [1";
 
 const bearers = [
   "chgs_a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
@@ -115,9 +154,9 @@ function digestOf(bearer) {
   return createHash("sha256").update(bearer).digest("hex");
 }
 
-/** The first line `logged` holds of `id` carrying `key`, once one does. */
-async function said(logged, id, key) {
-  const prefix = `[${id}] `;
+/** The first line `logged` holds of the session `label` names carrying `key`, once one does. */
+async function said(logged, label, key) {
+  const prefix = `[${label}] `;
   for (let tries = 0; tries < 400; tries += 1) {
     for (const line of logged.join("").split("\n")) {
       if (!line.startsWith(`${prefix}{`)) continue;
@@ -126,7 +165,7 @@ async function said(logged, id, key) {
     }
     await new Promise((resolve) => globalThis.setTimeout(resolve, 25));
   }
-  throw new Error(`${id} never said ${key}: ${logged.join("")}`);
+  throw new Error(`${label} never said ${key}: ${logged.join("")}`);
 }
 
 /** `body` handed a directory every user may enter, removed after. */
@@ -252,6 +291,7 @@ function placesOf(place, uid) {
   const id = `session-${String(uid)}`;
   return {
     id,
+    label: chatSessionLabel(assignment, uid),
     workspace: join(place("sessions"), id),
     minted: join(place("minted"), id),
   };
@@ -277,12 +317,16 @@ async function twoStarted(place, machine) {
   const live = new globalThis.AbortController().signal;
   const started = [];
   for (const [index, bearer] of bearers.entries()) {
-    const running = await machine.sessions.prepared(envelopeOf(bearer), live);
+    const running = await machine.sessions.prepared(
+      assignment,
+      envelopeOf(bearer),
+      live,
+    );
     const own = placesOf(place, uidFirst + index);
     started.push({
       ...own,
       running,
-      hello: await said(machine.logged, own.id, "hello"),
+      hello: await said(machine.logged, own.label, "hello"),
       mirror: await mirrorOf(own.workspace),
     });
   }
@@ -336,6 +380,10 @@ test(
     inMachine(async (place) => {
       const machine = await supervisorIn(place);
       const started = await twoStarted(place, machine);
+      const privateTree = join(
+        tmpdir(),
+        `chuggy-private-${String(process.pid)}`,
+      );
       for (const [index, own] of started.entries()) {
         const other = started[1 - index];
         await writeFile(
@@ -343,6 +391,7 @@ test(
           JSON.stringify({
             ...targetsOf(place, own, other, [own.mirror, other.mirror]),
             ignoreStop: index === 1,
+            ...(index === 1 ? { privateTree } : {}),
           }),
         );
       }
@@ -352,7 +401,7 @@ test(
           own,
           index,
           ["a", "b"][index],
-          await said(machine.logged, own.id, "probed"),
+          await said(machine.logged, own.label, "probed"),
         );
 
       for (const { running } of started) running.stop();
@@ -370,6 +419,12 @@ test(
       }
       assert.deepEqual(await readdir(place("supervisor")), []);
       assert.equal((await readdir(place("mirrors"))).length, 2);
+      assert.doesNotMatch(
+        machine.logged.join(""),
+        /its user is not given out again/u,
+        "a session's clear failed on what another session left",
+      );
+      await assert.rejects(stat(privateTree), { code: "ENOENT" });
     }),
 );
 
@@ -384,20 +439,22 @@ test(
       const live = new globalThis.AbortController().signal;
       const own = placesOf(place, uidFirst);
       const first = await machine.sessions.prepared(
+        assignment,
         envelopeOf(bearers[0]),
         live,
       );
-      await said(machine.logged, own.id, "hello");
+      await said(machine.logged, own.label, "hello");
       first.stop();
       await first.ended;
       const later = await committed(join(place("remotes"), "a"), "# later\n");
       machine.logged.length = 0;
 
       const second = await machine.sessions.prepared(
+        assignment,
         envelopeOf(bearers[0]),
         live,
       );
-      await said(machine.logged, own.id, "hello");
+      await said(machine.logged, own.label, "hello");
       await writeFile(
         join(own.workspace, "probe.json"),
         JSON.stringify(
@@ -407,7 +464,10 @@ test(
         ),
       );
 
-      assert.equal((await said(machine.logged, own.id, "probed")).tree, later);
+      assert.equal(
+        (await said(machine.logged, own.label, "probed")).tree,
+        later,
+      );
       second.stop();
       assert.equal(await second.ended, "Succeeded");
     }),
@@ -434,10 +494,11 @@ async function ipcOf(uid) {
 async function oneRun(place, machine, targets) {
   const own = placesOf(place, uidFirst);
   const running = await machine.sessions.prepared(
+    assignment,
     envelopeOf(bearers[0]),
     new globalThis.AbortController().signal,
   );
-  await said(machine.logged, own.id, "hello");
+  await said(machine.logged, own.label, "hello");
   await writeFile(
     join(own.workspace, "probe.json"),
     JSON.stringify({
@@ -447,7 +508,7 @@ async function oneRun(place, machine, targets) {
       ...targets,
     }),
   );
-  const probed = await said(machine.logged, own.id, "probed");
+  const probed = await said(machine.logged, own.label, "probed");
   machine.logged.length = 0;
   running.stop();
   assert.equal(await running.ended, "Succeeded");
@@ -463,8 +524,8 @@ test(
       const machine = await supervisorIn(place, 1);
       machine.answers.set(bearers[0], answerOf("a"));
       const name = `chuggy-scattered-${String(process.pid)}`;
-      const scatter = ["/tmp", "/var/tmp", "/dev/shm"].map((root) =>
-        join(root, name),
+      const scatter = ["/tmp", "/var/tmp", "/dev/shm", "/run/lock"].map(
+        (root) => join(root, name),
       );
 
       const first = await oneRun(place, machine, { scatter });
@@ -479,6 +540,42 @@ test(
     }),
 );
 
+/**
+ * Catches a user's clear that walks another session user's tree, which that
+ * user may make too deep to walk or closed to root, and so fail every other
+ * user's clear.
+ */
+test(
+  "a user's clear leaves another session user's directory to that user, whatever it holds",
+  { skip: skipped },
+  () =>
+    inMachine(async (place) => {
+      const [own, other] = [uidFirst, uidFirst + 1];
+      const scratch = place("scratch");
+      await mkdir(scratch, { mode: 0o1777 });
+      await chmod(scratch, 0o1777);
+      const left = join(scratch, "left");
+      await writeFile(left, "x");
+      await chown(left, own, own);
+      let deeper = join(scratch, "theirs");
+      await mkdir(deeper, { mode: 0o700 });
+      await chown(deeper, other, other);
+      for (let depth = 0; depth < 8; depth += 1) {
+        deeper = join(deeper, "d");
+        await mkdir(deeper, { mode: 0o700 });
+        await chown(deeper, other, other);
+      }
+      const planted = join(deeper, "planted");
+      await writeFile(planted, "x");
+      await chown(planted, own, own);
+
+      await chatSystem().scattered(own, [scratch]);
+
+      await assert.rejects(stat(left), { code: "ENOENT" });
+      assert.equal((await stat(planted)).uid, own);
+    }),
+);
+
 /** Catches a provider credential read with root's reach rather than its owner's. */
 test(
   "a provider credential its owner cannot read is not read for a session",
@@ -490,6 +587,7 @@ test(
 
       await assert.rejects(
         machine.sessions.prepared(
+          assignment,
           envelopeOf(bearers[0]),
           new globalThis.AbortController().signal,
         ),

@@ -30,11 +30,31 @@
  * NOTHING OF A SESSION OUTLIVES IT. Once its process has exited its user's
  * processes are killed, its directories emptied as that user and removed, and
  * once no process of its user is left, everything it owns in the places every
- * user may write (`chatSessionScratchDirectories`) is removed as that user and
- * every System V IPC object it owns or made is removed. Only then is the user
- * free for another session and the end told. A user any of that failed for is
- * not given out again, and a supervisor starting does the same for every
- * user of its range, so nothing a predecessor's sessions left is the next's.
+ * user may write is removed as that user and every System V IPC object it
+ * made is removed. Only then is the user free for another session and the
+ * end told. A user any of that failed for is not given out again, and a
+ * supervisor starting does the same for every user of its range, once none
+ * has a process left, so nothing a predecessor's sessions left is the next's.
+ *
+ * The places every user may write are found when the supervisor starts:
+ * every directory any user may write on each filesystem the container
+ * mounts writable, outside what a session's user owns and what another user
+ * owns that no other user may enter. A user's clear never enters a directory
+ * another user owns: that is its owner's to empty, with what anyone left in
+ * it, so no user's tree can fail another's clear. A user that makes its own
+ * such directory one it cannot empty is held, and only that user.
+ *
+ * A SESSION'S USER IS ONE THE IMAGE NAMES. A supervisor whose range holds a
+ * user its passwd does not resolve refuses to start, since a session run as
+ * one finds no name, home or identity for itself.
+ *
+ * EVERY LINE ABOUT A SESSION NAMES ITS ASSIGNMENT. Each line a session
+ * writes, on its output or its error, and each the supervisor writes about
+ * it goes on the supervisor's log beginning `[<assignment> session-<uid>] `,
+ * its assignment written as `chatSessionLabel` states, so that no
+ * assignment, however it is named, puts a space, a bracket or a line's end
+ * in it and the host reads each line back to its assignment. A line about a
+ * user, and not a session, begins `[user-<uid>] `.
  */
 
 import { execFile, spawn as spawnDefault } from "node:child_process";
@@ -107,13 +127,24 @@ export const chatSessionFreeBytesMin = 2 * 2 ** 30;
 /** How long a session asked to stop is given before its user's processes are killed. */
 export const chatSessionStopGraceMs = 10_000;
 
-/** The places every user may write, where what a session left is looked for once it is over. */
-export const chatSessionScratchDirectories = [
-  "/tmp",
-  "/var/tmp",
-  "/dev/shm",
-  "/dev/mqueue",
-];
+/** The kinds of filesystem that hold nothing a session leaves as a file, which are not looked through. */
+const chatSessionMountsUnwalked = new Set([
+  "proc",
+  "sysfs",
+  "cgroup",
+  "cgroup2",
+  "devpts",
+  "securityfs",
+  "debugfs",
+  "tracefs",
+  "pstore",
+  "bpf",
+  "configfs",
+  "fusectl",
+  "binfmt_misc",
+  "autofs",
+  "nsfs",
+]);
 
 /** The core's own entrypoint, which a session is started as. */
 export const chatSessionEntrypoint = fileURLToPath(
@@ -132,7 +163,7 @@ const chatSessionSweepsMax = 16;
 /** How long a sweep waits for what it killed to go before it looks again. */
 const chatSessionSweepPauseMs = 50;
 
-/** How long a look through the scratch places, or a removal from them, is given. */
+/** How long a look for the scratch places, or through them, or a removal from them, is given. */
 const chatSessionScratchTimeoutMs = 120_000;
 
 /** The most a look through the scratch places may name, past which the user is taken to be past clearing. */
@@ -254,10 +285,7 @@ export async function chatUserProcesses(uid) {
  * The system a supervisor prepares sessions on, as root on Linux: every way
  * it touches users, files and processes, so a suite can stand in for it.
  */
-export function chatSystem({
-  spawn = spawnDefault,
-  scratch = chatSessionScratchDirectories,
-} = {}) {
+export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
   const asUser = (uid, command, options = {}) => {
     const [program, ...args] = chatSessionAsUser(uid, [], command);
     return executeFile(program, args, options);
@@ -312,11 +340,125 @@ export function chatSystem({
       await rmdir(path);
     },
     removed: (path) => rm(path, { recursive: true, force: true }),
-    scattered: async (uid) => {
-      await chatScratchCleared(uid, scratch, asUser);
-      await chatIpcCleared(uid, asUser);
+    named: chatUsersNamed,
+    scratchFound: async (settings) => scratch ?? chatScratchFound(settings),
+    scattered: async (uid, roots) => {
+      const cleared = await Promise.allSettled([
+        chatScratchCleared(uid, roots, asUser),
+        chatSessionIpcCleared(uid, {
+          read: (table) => readFile(table, "utf8").catch(() => undefined),
+          remove: (flag, id) => asUser(uid, ["ipcrm", flag, id]),
+        }),
+      ]);
+      const failed = cleared.find(({ status }) => status === "rejected");
+      if (failed !== undefined) throw failed.reason;
     },
   };
+}
+
+/** Which of `uids` the image's passwd resolves, as `getpwuid` would. */
+async function chatUsersNamed(uids) {
+  let stdout;
+  try {
+    ({ stdout } = await executeFile("getent", ["passwd", ...uids.map(String)]));
+  } catch (failure) {
+    stdout = failure?.stdout ?? "";
+  }
+  return new Set(
+    String(stdout)
+      .split("\n")
+      .map((line) => Number(line.split(":")[2]))
+      .filter((uid) => uids.includes(uid)),
+  );
+}
+
+/** The mount points `mounts` (as `/proc/self/mounts` reads) names writable, of a kind a session can leave a file in. */
+export function chatSessionMountsWalked(mounts) {
+  const walked = new Set(["/"]);
+  for (const line of mounts.split("\n")) {
+    const [, point, kind, options = ""] = line.split(" ");
+    if (point === undefined || kind === undefined) continue;
+    if (chatSessionMountsUnwalked.has(kind)) continue;
+    if (options.split(",").includes("ro")) continue;
+    walked.add(
+      point.replace(/\\([0-7]{3})/gu, (_, octal) =>
+        String.fromCharCode(Number.parseInt(octal, 8)),
+      ),
+    );
+  }
+  return [...walked].sort();
+}
+
+/**
+ * The paths `find` prints for `starts` and `expression`, null-separated,
+ * each once. Something gone between being listed and being looked at is
+ * gone, not a failure; any other complaint fails the look.
+ */
+export async function chatSessionScratchListed(starts, expression) {
+  let stdout;
+  try {
+    ({ stdout } = await executeFile("find", [...starts, ...expression], {
+      timeout: chatSessionScratchTimeoutMs,
+      maxBuffer: chatSessionScratchBytesMax,
+    }));
+  } catch (failure) {
+    const complaints = String(failure?.stderr ?? "")
+      .split("\n")
+      .filter((line) => line.length > 0);
+    if (
+      failure?.code !== 1 ||
+      typeof failure.stdout !== "string" ||
+      complaints.length === 0 ||
+      !complaints.every((line) => line.endsWith(": No such file or directory"))
+    )
+      throw failure;
+    ({ stdout } = failure);
+  }
+  return [...new Set(stdout.split("\0").filter((path) => path.length > 0))];
+}
+
+/**
+ * Every directory any user may write on the container's writable
+ * filesystems, found by root without following a link or leaving a
+ * filesystem, and without entering one a session's user owns or one another
+ * user owns that no other user may enter, since no session reaches what is
+ * in it.
+ */
+async function chatScratchFound(settings) {
+  const mounts = await readFile("/proc/self/mounts", "utf8");
+  return chatSessionScratchListed(chatSessionMountsWalked(mounts), [
+    "-xdev",
+    "-ignore_readdir_race",
+    "(",
+    "-type",
+    "d",
+    "-uid",
+    `+${String(settings.uidFirst - 1)}`,
+    "-uid",
+    `-${String(settings.uidFirst + settings.uidCount)}`,
+    "-prune",
+    ")",
+    "-o",
+    "(",
+    "-type",
+    "d",
+    "!",
+    "-user",
+    "0",
+    "!",
+    "-perm",
+    "-0001",
+    "-prune",
+    ")",
+    "-o",
+    "(",
+    "-type",
+    "d",
+    "-perm",
+    "-0002",
+    "-print0",
+    ")",
+  ]);
 }
 
 /** Every process of `uid` killed as `uid`, looked for again until none is left or the sweeps run out. */
@@ -344,36 +486,38 @@ async function chatSystemExists(path) {
 
 /**
  * Everything `uid` owns under `roots`, found by root without following a
- * link or leaving a root's filesystem, and removed as `uid`, so a link the
- * user or another planted reaches nothing `uid` could not remove itself. A
- * directory it owns goes whole. Anything left fails the clear.
+ * link, leaving a root's filesystem or entering a directory another user
+ * owns, and removed as `uid`, so a link the user or another planted reaches
+ * nothing `uid` could not remove itself. A directory it owns goes whole.
+ * Anything left fails the clear.
  */
 async function chatScratchCleared(uid, roots, asUser) {
   const present = [];
-  for (const root of roots)
+  for (const root of new Set(roots))
     if (await chatSystemExists(root)) present.push(root);
   if (present.length === 0) return;
-  const found = async () => {
-    const { stdout } = await executeFile(
-      "find",
-      [
-        ...present,
-        "-xdev",
-        "-ignore_readdir_race",
-        "-mindepth",
-        "1",
-        "-user",
-        String(uid),
-        "-prune",
-        "-print0",
-      ],
-      {
-        timeout: chatSessionScratchTimeoutMs,
-        maxBuffer: chatSessionScratchBytesMax,
-      },
-    );
-    return stdout.split("\0").filter((path) => path.length > 0);
-  };
+  const found = () =>
+    chatSessionScratchListed(present, [
+      "-xdev",
+      "-ignore_readdir_race",
+      "-mindepth",
+      "1",
+      "(",
+      "-user",
+      String(uid),
+      "-prune",
+      "-print0",
+      ")",
+      "-o",
+      "(",
+      "-type",
+      "d",
+      "!",
+      "-user",
+      "0",
+      "-prune",
+      ")",
+    ]);
   const paths = await found();
   for (let at = 0; at < paths.length; at += chatSessionScratchBatch)
     await asUser(
@@ -393,38 +537,54 @@ async function chatScratchCleared(uid, roots, asUser) {
     );
 }
 
+/** Each object of a System V IPC table `text` is, made by `uid`: its flag for `ipcrm` beside its id. */
+function chatSessionIpcMade(uid, text, flag) {
+  const [header = "", ...rows] = text.trim().split("\n");
+  const creator = header.trim().split(/\s+/u).indexOf("cuid");
+  if (creator < 0) return [];
+  return rows.flatMap((row) => {
+    const fields = row.trim().split(/\s+/u);
+    return fields[creator] === String(uid) ? [[flag, String(fields[1])]] : [];
+  });
+}
+
 /**
- * Every System V IPC object `uid` owns or made, removed as `uid`, which may
- * remove its own where a container's root, without the capability to, may not.
+ * Every System V IPC object `uid` made, removed. Its creator is the one
+ * owner no other user can set, and the one `remove` (as `uid`) may remove
+ * where a container's root, without the capability to, may not. An object
+ * gone before it is removed is gone; only one still there once all were
+ * asked fails the clear. `read` is a table's text, or nothing where there is
+ * no such table.
  */
-async function chatIpcCleared(uid, asUser) {
-  for (const [table, flag] of chatSessionIpcTables) {
-    let text;
-    try {
-      text = await readFile(table, "utf8");
-    } catch {
-      continue;
+export async function chatSessionIpcCleared(uid, { read, remove }) {
+  const made = async () => {
+    const objects = [];
+    for (const [table, flag] of chatSessionIpcTables) {
+      const text = await read(table);
+      if (text !== undefined)
+        objects.push(...chatSessionIpcMade(uid, text, flag));
     }
-    const [header = "", ...rows] = text.trim().split("\n");
-    const columns = header.trim().split(/\s+/u);
-    const owners = [columns.indexOf("uid"), columns.indexOf("cuid")];
-    for (const row of rows) {
-      const fields = row.trim().split(/\s+/u);
-      if (owners.some((at) => at >= 0 && fields[at] === String(uid)))
-        await asUser(uid, ["ipcrm", flag, String(fields[1])]);
-    }
-  }
+    return objects;
+  };
+  const objects = await made();
+  for (const [flag, id] of objects)
+    await remove(flag, id).catch(() => undefined);
+  if (objects.length > 0 && (await made()).length > 0)
+    throw new Error(
+      `a System V IPC object user ${String(uid)} made outlived its removal`,
+    );
 }
 
 /**
  * A session's places: its user, its directory and the ones in it, its minted
  * directory, and the supervisor's for its checkout.
  */
-function chatSessionPlace(settings, uid) {
+function chatSessionPlace(settings, uid, assignment) {
   const id = `session-${String(uid)}`;
   const workspace = join(settings.sessionsRoot, id);
   return {
     id,
+    label: chatSessionLabel(assignment, uid),
     uid,
     workspace,
     home: join(workspace, "home"),
@@ -433,6 +593,23 @@ function chatSessionPlace(settings, uid) {
     checkoutMinted: join(settings.supervisorMinted, id),
     made: [],
   };
+}
+
+/**
+ * What every line on the supervisor's log of the session `assignment` is
+ * run as `uid` begins with, inside its brackets: `assignment` with every
+ * byte of its UTF-8 outside letters, digits, `.`, `_` and `-` written
+ * `%XX`, then a space and `session-` and `uid`.
+ */
+export function chatSessionLabel(assignment, uid) {
+  let named = "";
+  for (const byte of new globalThis.TextEncoder().encode(assignment)) {
+    const character = String.fromCharCode(byte);
+    named += /^[A-Za-z0-9._-]$/u.test(character)
+      ? character
+      : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return `${named} session-${String(uid)}`;
 }
 
 /** The next user in turn that no session holds, now held. */
@@ -462,20 +639,43 @@ async function chatSessionAttempted(state, id, what, step) {
   }
 }
 
-/** Every process of `uid` killed and everything it left in the scratch places removed, once none is left. */
-async function chatSessionUserCleared(state, id, uid) {
-  const { system } = state;
-  return (
-    (await chatSessionAttempted(state, id, "the sweep of its processes", () =>
-      system.swept(uid),
-    )) &&
-    (await chatSessionAttempted(
-      state,
-      id,
-      "the removal of what it left in the places every user writes",
-      () => system.scattered(uid),
-    ))
+/**
+ * Every user of the range a predecessor's sessions ran as cleared: the
+ * processes of each killed first, so none is left to write while another is
+ * cleared, then what each left in the places every user writes. A user
+ * either fails for is held.
+ */
+async function chatSessionsUsersCleared(state) {
+  const { settings, system, log } = state;
+  const uids = Array.from(
+    { length: settings.uidCount },
+    (_, offset) => settings.uidFirst + offset,
   );
+  const hold = (uid) => {
+    state.held.add(uid);
+    log(`[user-${String(uid)}] it is not given out\n`);
+  };
+  for (const uid of uids)
+    if (
+      !(await chatSessionAttempted(
+        state,
+        `user-${String(uid)}`,
+        "the sweep of its processes",
+        () => system.swept(uid),
+      ))
+    )
+      hold(uid);
+  for (const uid of uids)
+    if (
+      !state.held.has(uid) &&
+      !(await chatSessionAttempted(
+        state,
+        `user-${String(uid)}`,
+        "the removal of what it left in the places every user writes",
+        () => system.scattered(uid, state.scratch),
+      ))
+    )
+      hold(uid);
 }
 
 /**
@@ -485,7 +685,7 @@ async function chatSessionUserCleared(state, id, uid) {
 async function chatSessionCleared(state, place) {
   const { system, log } = state;
   const attempt = (what, step) =>
-    chatSessionAttempted(state, place.id, what, step);
+    chatSessionAttempted(state, place.label, what, step);
   let cleared = await attempt("the sweep of its processes", () =>
     system.swept(place.uid),
   );
@@ -502,10 +702,10 @@ async function chatSessionCleared(state, place) {
   if (cleared)
     cleared = await attempt(
       "the removal of what it left in the places every user writes",
-      () => system.scattered(place.uid),
+      () => system.scattered(place.uid, state.scratch),
     );
   if (cleared) state.held.delete(place.uid);
-  else log(`[${place.id}] its user is not given out again\n`);
+  else log(`[${place.label}] its user is not given out again\n`);
 }
 
 /**
@@ -567,9 +767,9 @@ function chatSessionEnvironment(state, place, checkout) {
 /** Each line `stream` carries, scrubbed and named for its session, on the supervisor's log. */
 function chatSessionOutput(state, place, stream, scrub) {
   const lines = chatLineReader(chatSessionLineBytesMax, {
-    line: (bytes) => state.log(`[${place.id}] ${scrub(bytes.toString())}\n`),
+    line: (bytes) => state.log(`[${place.label}] ${scrub(bytes.toString())}\n`),
     overlong: () =>
-      state.log(`[${place.id}] a line too long to keep was dropped\n`),
+      state.log(`[${place.label}] a line too long to keep was dropped\n`),
   });
   stream.on("data", (chunk) => lines.push(chunk));
   stream.on("end", () => lines.end());
@@ -676,15 +876,19 @@ async function chatSessionMade(state, place, envelope, signal) {
  * own, or the reason it was not, with everything made for it gone. `signal`
  * cancels the preparation, whose refusal is then its reason.
  */
-async function chatSessionPrepared(state, envelope, signal) {
-  const place = chatSessionPlace(state.settings, chatSessionUid(state));
+async function chatSessionPrepared(state, assignment, envelope, signal) {
+  const place = chatSessionPlace(
+    state.settings,
+    chatSessionUid(state),
+    assignment,
+  );
   try {
     return await chatSessionMade(state, place, envelope, signal);
   } catch (failure) {
     if (!signal.aborted)
       state.log(
         credentialScrub([envelope.bearer])(
-          `[${place.id}] was not prepared: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+          `[${place.label}] was not prepared: ${failure instanceof Error ? failure.message : String(failure)}\n`,
         ),
       );
     await chatSessionCleared(state, place);
@@ -724,17 +928,33 @@ async function chatSessionsLeftCleared(state, root) {
   }
 }
 
+/** The users of `settings`' range its image's passwd names, refused unless it names them all. */
+async function chatSessionsUsersNamed(settings, system) {
+  const uids = Array.from(
+    { length: settings.uidCount },
+    (_, offset) => settings.uidFirst + offset,
+  );
+  const named = await system.named(uids);
+  if (uids.some((uid) => !named.has(uid)))
+    throw new Error(
+      `the users ${String(settings.uidFirst)} to ${String(settings.uidFirst + settings.uidCount - 1)} a session may be run as are not all named in this image's passwd`,
+    );
+}
+
 /**
- * The sessions a supervisor runs on `system`: its roots made, every session
- * user's processes a predecessor left killed and what it left removed.
- * `prepared` starts one; `holding` is whether any session's directory is
- * there, which a mirror's prune waits on.
+ * The sessions a supervisor runs on `system`: refused unless its image names
+ * every user of its range, then its roots made, the places every user writes
+ * found, and every session user's processes a predecessor left killed and
+ * what it left removed. `prepared` starts one for an assignment; `holding`
+ * is whether any session's directory is there, which a mirror's prune waits
+ * on.
  *
  * `task` is the plane's answer for an envelope, and `checkout` the tree a
  * session reads (`./chatCheckout.mjs`), each a seam a suite stands in for.
  */
 export async function chatSessionsOpened(settings, seams) {
   const { system, log, task, checkout } = seams;
+  await chatSessionsUsersNamed(settings, system);
   const state = {
     settings,
     system,
@@ -743,23 +963,18 @@ export async function chatSessionsOpened(settings, seams) {
     checkout,
     held: new Set(),
     turn: 0,
+    scratch: await system.scratchFound(settings),
   };
   await system.rootMade(settings.sessionsRoot, chatSessionsRootMode);
   await system.rootMade(settings.mintedRoot, chatSessionsRootMode);
   await system.rootMade(settings.supervisorMinted, chatSessionDirectoryMode);
-  for (let offset = 0; offset < settings.uidCount; offset += 1) {
-    const uid = settings.uidFirst + offset;
-    if (!(await chatSessionUserCleared(state, `user-${String(uid)}`, uid))) {
-      state.held.add(uid);
-      log(`[user-${String(uid)}] it is not given out\n`);
-    }
-  }
+  await chatSessionsUsersCleared(state);
   await chatSessionsLeftCleared(state, settings.sessionsRoot);
   await chatSessionsLeftCleared(state, settings.mintedRoot);
   await chatSessionsLeftCleared(state, settings.supervisorMinted);
   return {
-    prepared: (envelope, signal) =>
-      chatSessionPrepared(state, envelope, signal),
+    prepared: (assignment, envelope, signal) =>
+      chatSessionPrepared(state, assignment, envelope, signal),
     holding: async () =>
       (await system.listed(settings.sessionsRoot)).length > 0,
   };

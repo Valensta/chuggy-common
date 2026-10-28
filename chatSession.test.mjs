@@ -7,6 +7,9 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test, { afterEach } from "node:test";
 
@@ -17,11 +20,18 @@ import {
   chatCheckoutVariable,
   chatMintedVariable,
 } from "./chatChannel.mjs";
-import { chatSessionsOpened } from "./chatSession.mjs";
+import {
+  chatSessionIpcCleared,
+  chatSessionLabel,
+  chatSessionMountsWalked,
+  chatSessionScratchListed,
+  chatSessionsOpened,
+} from "./chatSession.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { poolHeldSessionAnswer } from "./envelope.fixture.mjs";
 
 const bearer = "chgs_fedcba9876543210fedcba9876543210";
+const assignment = "assignment-1";
 const token = "sk-ant-oat01-subscription-token-0123456789";
 
 const envelope = {
@@ -113,7 +123,12 @@ function systemOf(overrides = {}) {
     swept: recorded("swept"),
     emptied: recorded("emptied"),
     removed: recorded("removed"),
-    scattered: recorded("scattered"),
+    scattered: async (uid, roots) => {
+      calls.push(["scattered", uid]);
+      system.scratched = roots;
+    },
+    named: async (uids) => new Set(uids),
+    scratchFound: async () => ["/tmp", "/run/lock"],
     ...overrides,
   };
   return system;
@@ -152,7 +167,7 @@ test("a session is started as its own user, in its own places, its envelope on i
   const { sessions, checkouts } = await sessionsOf(system);
   const before = system.calls.length;
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   const [{ program, args, options, child }] = system.children;
   assert.deepEqual(
@@ -228,7 +243,7 @@ test("a session with no tree is given no group beside its own", async () => {
     },
   );
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   const [{ args, options }] = system.children;
   assert.ok(args.includes("--clear-groups"));
@@ -239,7 +254,7 @@ test("a session with no tree is given no group beside its own", async () => {
 test("what a session writes reaches the supervisor's log named for it, without its bearer or credential", async () => {
   const system = systemOf();
   const { sessions, logged } = await sessionsOf(system);
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
   const [{ child }] = system.children;
 
   child.stdout.write(`said ${bearer}\nand `);
@@ -251,12 +266,39 @@ test("what a session writes reaches the supervisor's log named for it, without i
   const printed = logged.join("");
   assert.ok(!printed.includes(bearer), "the bearer was printed");
   assert.ok(!printed.includes(token), "the credential was printed");
-  assert.match(printed, /^\[session-20000\] said \[redacted credential\]$/mu);
-  assert.match(printed, /^\[session-20000\] and more$/mu);
-  assert.match(printed, /^\[session-20000\] failed with /mu);
   assert.match(
     printed,
-    /^\[session-20000\] a line too long to keep was dropped$/mu,
+    /^\[assignment-1 session-20000\] said \[redacted credential\]$/mu,
+  );
+  assert.match(printed, /^\[assignment-1 session-20000\] and more$/mu);
+  assert.match(printed, /^\[assignment-1 session-20000\] failed with /mu);
+  assert.match(
+    printed,
+    /^\[assignment-1 session-20000\] a line too long to keep was dropped$/mu,
+  );
+});
+
+/** Catches an assignment named to end a line, or to begin one as another session's, on a log the host reads back by assignment. */
+test("an assignment cannot name its way into another line's prefix", async () => {
+  const system = systemOf();
+  const { sessions, logged } = await sessionsOf(system);
+  const forged = "a session-20001] forged\n[b session-20001] ü%";
+  await sessions.prepared(forged, envelope, live());
+  await sessions.prepared("b", envelope, live());
+  const [{ child }] = system.children;
+
+  child.stdout.end("hello\n");
+  await new Promise((resolve) => globalThis.setImmediate(resolve));
+
+  const label =
+    "a%20session-20001%5D%20forged%0A%5Bb%20session-20001%5D%20%C3%BC%25";
+  assert.equal(chatSessionLabel(forged, 20_000), `${label} session-20000`);
+  assert.deepEqual(logged.join("").split("\n").filter(Boolean), [
+    `[${label} session-20000] hello`,
+  ]);
+  assert.match(
+    chatSessionLabel(forged, 20_000),
+    /^[A-Za-z0-9._%-]+ session-\d+$/u,
   );
 });
 
@@ -265,9 +307,9 @@ test("two sessions are two users with places apart, each reading the credential 
   const system = systemOf();
   const { sessions } = await sessionsOf(system);
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
   system.credentialIs(`${token}-renewed`);
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   const [first, second] = system.children;
   assert.ok(first.args.includes("--reuid=20000"));
@@ -283,7 +325,7 @@ test("two sessions are two users with places apart, each reading the credential 
     ],
   );
   await assert.rejects(
-    sessions.prepared(envelope, live()),
+    sessions.prepared(assignment, envelope, live()),
     /every user a session may be run as is held/u,
   );
 });
@@ -291,8 +333,8 @@ test("two sessions are two users with places apart, each reading the credential 
 test("a session that ends is cleared as its user before its end is told, and its user is free again", async () => {
   const system = systemOf();
   const { sessions } = await sessionsOf(system);
-  const running = await sessions.prepared(envelope, live());
-  await sessions.prepared(envelope, live());
+  const running = await sessions.prepared(assignment, envelope, live());
+  await sessions.prepared(assignment, envelope, live());
   const before = system.calls.length;
 
   system.children[0].child.emit("exit", 0, null);
@@ -305,7 +347,7 @@ test("a session that ends is cleared as its user before its end is told, and its
     ["removed", "/supervisor/session-20000"],
     ["scattered", 20_000],
   ]);
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
   assert.ok(system.children[2].args.includes("--reuid=20000"));
 });
 
@@ -315,7 +357,7 @@ test("users are given out in turn, a free one only once those after it have been
   const { sessions } = await sessionsOf(system, { uidCount: 3 });
 
   for (let session = 0; session < 4; session += 1) {
-    const running = await sessions.prepared(envelope, live());
+    const running = await sessions.prepared(assignment, envelope, live());
     system.children[session].child.emit("exit", 0, null);
     await running.ended;
   }
@@ -336,19 +378,19 @@ test("a session's user whose scattered leftovers could not be removed is not giv
     },
   });
   const { sessions, logged } = await sessionsOf(system);
-  const running = await sessions.prepared(envelope, live());
+  const running = await sessions.prepared(assignment, envelope, live());
 
   system.children[0].child.emit("exit", 0, null);
   await running.ended;
 
   assert.match(
     logged.join(""),
-    /\[session-20000\] the removal of what it left in the places every user writes failed: find: timed out/u,
+    /\[assignment-1 session-20000\] the removal of what it left in the places every user writes failed: find: timed out/u,
   );
   assert.match(logged.join(""), /its user is not given out again/u);
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
   await assert.rejects(
-    sessions.prepared(envelope, live()),
+    sessions.prepared(assignment, envelope, live()),
     /every user a session may be run as is held/u,
   );
 });
@@ -362,7 +404,7 @@ test("what a session scattered is not looked for while its processes may outlive
     },
   });
   const { sessions } = await sessionsOf(system);
-  const running = await sessions.prepared(envelope, live());
+  const running = await sessions.prepared(assignment, envelope, live());
   const before = system.calls.length;
 
   system.children[0].child.emit("exit", 0, null);
@@ -382,7 +424,10 @@ test("a directory whose handing over failed is cleared with the rest", async () 
   const { sessions } = await sessionsOf(system);
   const before = system.calls.length;
 
-  await assert.rejects(sessions.prepared(envelope, live()), /EPERM/u);
+  await assert.rejects(
+    sessions.prepared(assignment, envelope, live()),
+    /EPERM/u,
+  );
 
   assert.deepEqual(
     since(system, before).filter(([name]) => name === "emptied"),
@@ -397,7 +442,7 @@ test("a session whose process does not exit clean ends Failed", async () => {
   ]) {
     const system = systemOf();
     const { sessions } = await sessionsOf(system);
-    const running = await sessions.prepared(envelope, live());
+    const running = await sessions.prepared(assignment, envelope, live());
 
     system.children[0].child.emit("exit", code, signal);
 
@@ -409,8 +454,8 @@ test("a session whose process does not exit clean ends Failed", async () => {
 test("a stop ends the session's channel, and its user's processes are killed once its grace has passed", async () => {
   const system = systemOf();
   const { sessions } = await sessionsOf(system);
-  await sessions.prepared(envelope, live());
-  const running = await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
+  const running = await sessions.prepared(assignment, envelope, live());
   const { child } = system.children[1];
   const ended = new Promise((resolve) => child.channel.once("end", resolve));
   const before = system.calls.length;
@@ -430,6 +475,7 @@ test("a session still running at its deadline is stopped, and ends Failed howeve
   const system = systemOf();
   const { sessions } = await sessionsOf(system);
   const running = await sessions.prepared(
+    assignment,
     { ...envelope, timeoutSecsMax: 1 },
     live(),
   );
@@ -456,7 +502,7 @@ test("a preparation that fails is refused with everything it made gone and its u
   const before = system.calls.length;
 
   await assert.rejects(
-    sessions.prepared(envelope, live()),
+    sessions.prepared(assignment, envelope, live()),
     /the session credential claude-code is not mounted/u,
   );
 
@@ -467,10 +513,19 @@ test("a preparation that fails is refused with everything it made gone and its u
     ["removed", "/supervisor/session-20000"],
     ["scattered", 20_000],
   ]);
-  assert.match(logged.join(""), /\[session-20000\] was not prepared: /u);
+  assert.match(
+    logged.join(""),
+    /\[assignment-1 session-20000\] was not prepared: /u,
+  );
   assert.deepEqual(system.children, []);
-  await assert.rejects(sessions.prepared(envelope, live()), /not mounted/u);
-  await assert.rejects(sessions.prepared(envelope, live()), /not mounted/u);
+  await assert.rejects(
+    sessions.prepared(assignment, envelope, live()),
+    /not mounted/u,
+  );
+  await assert.rejects(
+    sessions.prepared(assignment, envelope, live()),
+    /not mounted/u,
+  );
   assert.equal(
     system.calls.filter(
       ([name, path]) => name === "made" && path === "/sessions/session-20000",
@@ -494,7 +549,7 @@ test("a credential the session would refuse is refused before the session starts
   });
   system.credentialIs("not a service account's key");
 
-  await assert.rejects(sessions.prepared(envelope, live()));
+  await assert.rejects(sessions.prepared(assignment, envelope, live()));
 
   assert.deepEqual(system.children, []);
   assert.ok(!system.calls.some(([name]) => name === "credentialWritten"));
@@ -514,7 +569,7 @@ test("a credential its kind reads from a file is copied for the session, and its
   });
   system.credentialIs(key);
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   const [{ child, options }] = system.children;
   assert.deepEqual(
@@ -539,7 +594,7 @@ test("a session is not prepared on a disk with too little free, and nothing is m
   const before = system.calls.length;
 
   await assert.rejects(
-    sessions.prepared(envelope, live()),
+    sessions.prepared(assignment, envelope, live()),
     /\/sessions has too little free space/u,
   );
 
@@ -558,7 +613,7 @@ test("a preparation stopped while the plane is asked is given up, cleared, and n
   );
   const stop = new globalThis.AbortController();
 
-  const prepared = sessions.prepared(envelope, stop.signal);
+  const prepared = sessions.prepared(assignment, envelope, stop.signal);
   await new Promise((resolve) => globalThis.setImmediate(resolve));
   stop.abort(new Error("stopped"));
 
@@ -582,7 +637,10 @@ test("a preparation stopped once its checkout is made starts no process", async 
     },
   );
 
-  await assert.rejects(sessions.prepared(envelope, stop.signal), /stopped/u);
+  await assert.rejects(
+    sessions.prepared(assignment, envelope, stop.signal),
+    /stopped/u,
+  );
 
   assert.deepEqual(system.children, []);
 });
@@ -599,7 +657,10 @@ test("a process that cannot be started is refused, and its session cleared", asy
   });
   const { sessions } = await sessionsOf(system);
 
-  await assert.rejects(sessions.prepared(envelope, live()), /ENOENT/u);
+  await assert.rejects(
+    sessions.prepared(assignment, envelope, live()),
+    /ENOENT/u,
+  );
 
   assert.ok(system.calls.some(([name]) => name === "emptied"));
 });
@@ -612,11 +673,11 @@ test("a session's user whose directories could not be removed is not given out a
     },
   });
   const { sessions, logged } = await sessionsOf(system);
-  const running = await sessions.prepared(envelope, live());
+  const running = await sessions.prepared(assignment, envelope, live());
 
   system.children[0].child.emit("exit", 0, null);
   await running.ended;
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   assert.ok(system.children[1].args.includes("--reuid=20001"));
   assert.match(logged.join(""), /its user is not given out again/u);
@@ -641,15 +702,113 @@ test("sessions opened sweep every session user and clear what a predecessor left
     ["rootMade", "/minted", 0o711],
     ["rootMade", "/supervisor", 0o700],
     ["swept", 20_000],
-    ["scattered", 20_000],
     ["swept", 20_001],
+    ["scattered", 20_000],
     ["scattered", 20_001],
     ["emptied", "/sessions/session-20001", 20_001],
     ["removed", "/sessions/stray"],
     ["emptied", "/minted/session-20001", 20_001],
     ["removed", "/supervisor/session-20001"],
   ]);
+  assert.deepEqual(system.scratched, ["/tmp", "/run/lock"]);
   assert.equal(await sessions.holding(), true);
+});
+
+/** Catches a supervisor that gives out a user its image does not name, whose session finds no name, home or identity. */
+test("a supervisor whose range holds a user the image does not name refuses to start, naming the range", async () => {
+  const system = systemOf({
+    named: async (uids) => new Set(uids.filter((uid) => uid !== 20_001)),
+  });
+
+  await assert.rejects(
+    sessionsOf(system),
+    /^Error: the users 20000 to 20001 a session may be run as are not all named in this image's passwd$/u,
+  );
+  assert.deepEqual(system.calls, []);
+});
+
+/** Catches IPC objects matched by an owner a session may set to another user's, or one gone before its removal failing the clear. */
+test("a user's IPC objects are those it made, and one gone before its removal is gone", async () => {
+  const table = (rows) =>
+    [
+      "       key      shmid perms   size  cpid  lpid nattch   uid   gid  cuid  cgid",
+      ...rows,
+    ].join("\n");
+  const reads = [
+    table([
+      "         0          7  600   4096    10    10      0 20000 20000 20001 20001",
+      "         0          8  600   4096    11    11      0 20001 20001 20000 20000",
+    ]),
+    table([]),
+  ];
+  const removed = [];
+
+  await chatSessionIpcCleared(20_000, {
+    read: async (path) => (path.endsWith("/shm") ? reads.shift() : undefined),
+    remove: async (flag, id) => {
+      removed.push([flag, id]);
+      throw new Error("ipcrm: invalid id");
+    },
+  });
+
+  assert.deepEqual(removed, [["-m", "8"]]);
+  await assert.rejects(
+    chatSessionIpcCleared(20_000, {
+      read: async (path) =>
+        path.endsWith("/shm")
+          ? table([
+              "         0          8  600   4096    11    11      0 20000 20000 20000 20000",
+            ])
+          : undefined,
+      remove: async () => undefined,
+    }),
+    /a System V IPC object user 20000 made outlived its removal/u,
+  );
+});
+
+/** Catches a clear failed by what another user removed while it looked, or one that passes over a look `find` could not finish. */
+test("a scratch place gone while it is looked through is gone, and any other complaint fails the look", async () => {
+  const place = await mkdtemp(join(tmpdir(), "chuggy-scratch-listed-"));
+  try {
+    const kept = join(place, "kept");
+    await mkdir(kept);
+
+    assert.deepEqual(
+      await chatSessionScratchListed(
+        [kept, kept, join(place, "gone")],
+        ["-type", "d", "-print0"],
+      ),
+      [kept],
+    );
+    await assert.rejects(
+      chatSessionScratchListed([kept], ["-no-such-predicate"]),
+    );
+  } finally {
+    await rm(place, { recursive: true, force: true });
+  }
+});
+
+/** Catches a mount the scratch places are looked for on that a session cannot write, or one it can that is passed over. */
+test("the scratch places are looked for on every writable mount a file can be left on", () => {
+  const mounts = [
+    "overlay / overlay rw,relatime 0 0",
+    "proc /proc proc rw,nosuid 0 0",
+    "tmpfs /dev tmpfs rw,nosuid 0 0",
+    "sysfs /sys sysfs ro,nosuid 0 0",
+    "mqueue /dev/mqueue mqueue rw,nosuid 0 0",
+    "shm /dev/shm tmpfs rw,nosuid 0 0",
+    "tmpfs /proc/acpi tmpfs ro,relatime 0 0",
+    "tmpfs /scratch\\040space tmpfs rw 0 0",
+    "",
+  ].join("\n");
+
+  assert.deepEqual(chatSessionMountsWalked(mounts), [
+    "/",
+    "/dev",
+    "/dev/mqueue",
+    "/dev/shm",
+    "/scratch space",
+  ]);
 });
 
 test("a predecessor's directory that cannot be cleared holds its user", async () => {
@@ -664,7 +823,7 @@ test("a predecessor's directory that cannot be cleared holds its user", async ()
   });
   const { sessions } = await sessionsOf(system);
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   assert.ok(system.children[0].args.includes("--reuid=20001"));
 });
@@ -681,7 +840,7 @@ test("a predecessor's leftover no session user owns, which cannot be removed, ho
   });
   const { sessions } = await sessionsOf(system);
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   assert.ok(system.children[0].args.includes("--reuid=20001"));
 });
@@ -695,7 +854,7 @@ test("a user whose processes outlive the sweep at the start is held, and the sup
   });
   const { sessions, logged } = await sessionsOf(system);
 
-  await sessions.prepared(envelope, live());
+  await sessions.prepared(assignment, envelope, live());
 
   assert.ok(system.children[0].args.includes("--reuid=20001"));
   assert.match(logged.join(""), /\[user-20000\] it is not given out/u);

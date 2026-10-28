@@ -69,9 +69,15 @@ function supervisorOf(sessionsMax = 2) {
     },
     log: (text) => logged.push(text),
     sessions: {
-      prepared: (handed, signal) =>
+      prepared: (assignment, handed, signal) =>
         new Promise((resolve, reject) => {
-          preparations.push({ envelope: handed, signal, resolve, reject });
+          preparations.push({
+            assignment,
+            envelope: handed,
+            signal,
+            resolve,
+            reject,
+          });
         }),
     },
     sessionsMax,
@@ -122,6 +128,7 @@ test("a session started is answered Started once it is prepared, and Ended once 
   supervisor.send(start("a"));
   await settled();
   assert.deepEqual(supervisor.frames(), []);
+  assert.equal(supervisor.preparations[0].assignment, "a");
   assert.deepEqual(supervisor.preparations[0].envelope, envelope);
   const running = runningOf();
   supervisor.preparations[0].resolve(running);

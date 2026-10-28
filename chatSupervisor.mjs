@@ -154,7 +154,7 @@ async function chatSupervisorPrepared(state, assignment, envelope, entry) {
   const { signal } = entry.cancel;
   let running;
   try {
-    running = await state.sessions.prepared(envelope, signal);
+    running = await state.sessions.prepared(assignment, envelope, signal);
   } catch {
     running = undefined;
   }
