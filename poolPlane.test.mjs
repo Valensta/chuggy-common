@@ -562,3 +562,71 @@ test("a plane refusing this client's release ends the pool rather than losing an
     "Unavailable",
   );
 });
+
+test("a chat host's every poll names how long a session it claims may sit idle, and the image the answer names its sessions is passed on", async () => {
+  const seen = [];
+  /** @type {Record<string, unknown>} */
+  let body = {
+    assignments: [],
+    sessions: [session],
+    stop: [],
+    chatImage: `registry.invalid/chuggy/chat@sha256:${"a".repeat(64)}`,
+  };
+  const plane = poolPlaneClient(
+    { ...planeSettings, idleSecs: 600 },
+    async (input) => {
+      seen.push(String(input));
+      return answered(200, JSON.stringify(body));
+    },
+  );
+  assert.deepEqual(await plane.poll("pool-token", ["one"], 0, 1), {
+    polled: "Reconciled",
+    assignments: [],
+    sessions: [session],
+    stop: [],
+    chatImage: body.chatImage,
+  });
+  body = { assignments: [], sessions: [], stop: [] };
+  const unnamed = await plane.poll("pool-token", [], 0, 0);
+  assert.equal("chatImage" in unnamed, false);
+  assert.deepEqual(seen, [
+    "https://pool-plane.invalid/v1/assignments?held=one&wanted=0&wantedSessions=1&idleSecs=600",
+    "https://pool-plane.invalid/v1/assignments?wanted=0&wantedSessions=0&idleSecs=600",
+  ]);
+});
+
+test("a client given no idle bound names none, and an idle bound that is no positive whole number is refused at once", async () => {
+  const seen = [];
+  const plane = poolPlaneClient(planeSettings, async (input) => {
+    seen.push(String(input));
+    return answered(
+      200,
+      JSON.stringify({ assignments: [], sessions: [], stop: [] }),
+    );
+  });
+  await plane.poll("pool-token", [], 1, 1);
+  assert.equal(seen[0].includes("idleSecs"), false);
+  for (const idleSecs of [0, -1, 1.5, Number.NaN, 2 ** 53])
+    assert.throws(
+      () => checkedPoolPlaneClientSettings({ ...planeSettings, idleSecs }),
+      /^RangeError: pool plane idleSecs must be a positive integer$/u,
+    );
+});
+
+test("an answer naming a chat image the contract cannot read is an outage", async () => {
+  for (const chatImage of ["", "i".repeat(4096), 7])
+    assert.equal(
+      (
+        await answering(
+          200,
+          JSON.stringify({
+            assignments: [],
+            sessions: [],
+            stop: [],
+            chatImage,
+          }),
+        ).poll("pool-token", [], 0)
+      ).polled,
+      "Unavailable",
+    );
+});
