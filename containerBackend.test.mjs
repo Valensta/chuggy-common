@@ -39,6 +39,7 @@ import {
   deferred,
   fakeEngine,
   fakeImageId,
+  fakeImagePlatformDefault,
   unstartedEntrypoint,
 } from "./engine.fixture.mjs";
 import {
@@ -1834,7 +1835,7 @@ test("a job given a runtime starts through its own copy of it, mounted read-only
   const pulls = state.calls.filter((call) => call.argv[0] === "pull");
   assert.deepEqual(
     pulls.map((call) => call.argv.at(-1)),
-    [runtime, image],
+    [image, runtime],
   );
   const [volume, workspace, ...others] = state.volumes.keys();
   assert.deepEqual(others, []);
@@ -2216,6 +2217,186 @@ test("a job's image whose engine could not be reached through a runtime fails as
     ended.why,
     /^its container was not started: its image could not be pulled/u,
   );
+});
+
+/** A job's image the engine holds for arm64, beside `image`, which it holds for amd64. */
+const imageArm = `registry.chuggy.example/worker-arm@sha256:${"b".repeat(64)}`;
+
+/**
+ * The platform each call `which` picks named, in the order they were made,
+ * and the last word of each.
+ *
+ * @param {Awaited<ReturnType<typeof harness>>["state"]} state
+ * @param {(argv: string[]) => boolean} which
+ */
+const platformsNamed = (state, which) =>
+  state.calls
+    .filter(({ argv }) => which(argv))
+    .map(({ argv }) => [
+      argv.includes("--platform")
+        ? argv[argv.indexOf("--platform") + 1]
+        : undefined,
+      argv.at(-1),
+    ]);
+
+/** @param {string[]} argv */
+const isPull = (argv) => argv[0] === "pull";
+
+/** @param {string[]} argv */
+const isFill = (argv) => argv.includes("--rm");
+
+test("a job's image is got before the runtime, which is looked for, pulled and copied for the platform the engine holds that image for, though it is here for another", async (t) => {
+  const { backend, state } = await harness(t);
+  state.imagePlatforms.set(fakeImageId(state, imageArm), "linux/arm64");
+  state.images.add(runtime);
+  await backend.place(assignment({ image: imageArm, runtime }), "Job");
+  await backend.settled();
+  const images = state.calls
+    .filter(({ argv }) => argv[0] === "image" || isPull(argv))
+    .map(({ argv }) => [argv[0], argv.at(-1)]);
+  assert.deepEqual(images, [
+    ["image", imageArm],
+    ["pull", imageArm],
+    ["image", imageArm],
+    ["image", runtime],
+    ["pull", runtime],
+  ]);
+  assert.deepEqual(platformsNamed(state, isPull), [
+    [undefined, imageArm],
+    ["linux/arm64", runtime],
+  ]);
+  assert.deepEqual(platformsNamed(state, isFill), [
+    ["linux/arm64", "/workspace"],
+  ]);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+test("a runtime held for the job's image's architecture is not pulled again for a variant only one of them names", async (t) => {
+  const { backend, state } = await harness(t);
+  state.imagePlatforms.set(fakeImageId(state, imageArm), "linux/arm64/v8");
+  state.imagePlatforms.set(fakeImageId(state, runtime), "linux/arm64");
+  state.images.add(imageArm);
+  state.images.add(runtime);
+  await backend.place(assignment({ image: imageArm, runtime }), "Job");
+  await backend.settled();
+  assert.ok(!verbs(state).includes("pull"));
+  assert.deepEqual(platformsNamed(state, isFill), [
+    ["linux/arm64/v8", "/workspace"],
+  ]);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+});
+
+test("a single-platform runtime for the job's image's own platform is got and copied as it was before any platform was named", async (t) => {
+  const { backend, state } = await harness(t);
+  const runtimeId = fakeImageId(state, runtime);
+  state.images.add(image);
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.deepEqual(platformsNamed(state, isPull), [
+    [fakeImagePlatformDefault, runtime],
+  ]);
+  assert.equal(fakeImageId(state, runtime), runtimeId);
+  assert.deepEqual(platformsNamed(state, isFill), [
+    [fakeImagePlatformDefault, "/workspace"],
+  ]);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+
+  await backend.place(assignment({ assignment: "asg-2", runtime }), "Job");
+  await backend.settled();
+  assert.equal(platformsNamed(state, isPull).length, 1);
+  assert.equal(platformsNamed(state, isFill).length, 2);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1", "asg-2"));
+});
+
+test("a job whose image and runtime both cannot be got is refused for its image, and the runtime is never looked for", async (t) => {
+  const { backend, state } = await harness(t);
+  const said = (/** @type {string} */ pulled) =>
+    `Error response from daemon: manifest for ${pulled} not found: manifest unknown: manifest unknown`;
+  state.pull = (pulled) => failedWith(said(pulled));
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.settled();
+  assert.ok(!state.calls.some(({ argv }) => argv.includes(runtime)));
+  assert.deepEqual(await endsNamed(backend), [
+    {
+      kind: "Job",
+      job: heldAttempt,
+      why: `${containerImageFaultTexts.ImageUnpullable} The engine said: ${said(image)}`,
+      refusal: { fault: "ImageUnpullable" },
+    },
+  ]);
+});
+
+test("two jobs whose images are for different platforms each copy the runtime's variant for their own, on an engine holding one variant by a name", async (t) => {
+  const { backend, state } = await harness(t);
+  state.imagePlatforms.set(fakeImageId(state, imageArm), "linux/arm64");
+  state.images.add(image);
+  state.images.add(imageArm);
+  /** @type {ReturnType<typeof deferred<import("./engine.mjs").EngineAnswer>>[]} */
+  const pulls = [];
+  state.pull = (pulled) => {
+    state.images.add(pulled);
+    /** @type {ReturnType<typeof deferred<import("./engine.mjs").EngineAnswer>>} */
+    const pull = deferred();
+    pulls.push(pull);
+    return pull.promise;
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await backend.place(
+    assignment({ assignment: "asg-2", image: imageArm, runtime }),
+    "Job",
+  );
+  for (let round = 0; round < 2; round += 1) {
+    for (let wait = 0; pulls.length === 0 && wait < 1000; wait += 1)
+      await waited(1);
+    await waited(50);
+    assert.equal(pulls.length, 1, `round ${String(round)}`);
+    for (const pull of pulls.splice(0))
+      pull.resolve({ code: 0, stdout: "", stderr: "" });
+  }
+  await backend.settled();
+  assert.deepEqual(platformsNamed(state, isPull), [
+    [fakeImagePlatformDefault, runtime],
+    ["linux/arm64", runtime],
+  ]);
+  assert.deepEqual(
+    platformsNamed(state, isFill).map(([platform]) => platform),
+    [fakeImagePlatformDefault, "linux/arm64"],
+  );
+  assert.deepEqual(await endsNamed(backend), []);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1", "asg-2"));
+});
+
+test("a job waiting its turn at the runtime fails at its deadline, and the job ahead of it is not held up", async (t) => {
+  const { backend, state, clock } = await harness(t);
+  state.images.add(image);
+  /** @type {ReturnType<typeof deferred<import("./engine.mjs").EngineAnswer>>} */
+  const firstPull = deferred();
+  state.pull = (pulled) => {
+    state.images.add(pulled);
+    return firstPull.promise;
+  };
+  await backend.place(assignment({ runtime }), "Job");
+  await calledFor(state, ({ argv }) => isPull(argv));
+  clock.nowMs += 999;
+  await backend.place(
+    assignment({ assignment: "asg-2", runtime, deadlineSecs: 1 }),
+    "Job",
+  );
+  await waited(20);
+  firstPull.resolve({ code: 0, stdout: "", stderr: "" });
+  await backend.settled();
+  const ends = await endsNamed(backend);
+  assert.equal(ends.length, 1);
+  const [ended] = ends;
+  assert.ok(ended.kind === "Job");
+  assert.equal(ended.job.assignment, "asg-2");
+  assert.equal(ended.refusal, undefined);
+  assert.match(
+    ended.why,
+    /^its container was not started: this runner could not get chuggy's runtime \S+: the assignment's deadline passed first$/u,
+  );
+  assert.equal(platformsNamed(state, isPull).length, 1);
+  assert.deepEqual(await backend.held(), listedJobs("asg-1"));
 });
 
 /**

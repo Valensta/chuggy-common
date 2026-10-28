@@ -78,6 +78,7 @@ test("a pull with no credential is the engine's own: the plain pull, adding no v
         site,
         "ghcr.io/someone/private:1",
         undefined,
+        undefined,
         (argv, environment) => Promise.resolve({ argv, environment }),
       ),
       {
@@ -97,6 +98,7 @@ test("a pull under the pool's token reads it from a directory of its own: docker
       await registryPull(
         { engine, runtimeDir: runtime, dockerHost: "unix:///run/docker.sock" },
         poolImage,
+        undefined,
         credential,
         async (argv, environment) => {
           const directory =
@@ -145,6 +147,27 @@ test("a pull under the pool's token reads it from a directory of its own: docker
     },
   ]);
   assert.deepEqual(await readdir(runtime), []);
+});
+
+test("a pull for a platform names it on every path: the engine's own, and under the pool's token on either engine", async (t) => {
+  const runtime = await runtimeDir(t);
+  /** @type {Array<["docker" | "podman", typeof credential | undefined]>} */
+  const pulls = [
+    ["docker", undefined],
+    ["docker", credential],
+    ["podman", credential],
+  ];
+  for (const [engine, pulledWith] of pulls) {
+    const argv = await registryPull(
+      { engine, runtimeDir: runtime, dockerHost: "unix:///run/docker.sock" },
+      poolImage,
+      "linux/arm64",
+      pulledWith,
+      async (pulled) => pulled,
+    );
+    assert.equal(argv[argv.indexOf("--platform") + 1], "linux/arm64", engine);
+    assert.equal(argv.at(-1), poolImage, engine);
+  }
 });
 
 /** Images of no pool's registry: one that names its registry, and one of Docker Hub's. */
@@ -197,6 +220,7 @@ async function pulledThroughDocker(t, docker, daemon, machine) {
     const answer = await registryPull(
       site,
       image,
+      undefined,
       pulledWith,
       (argv, environment) =>
         docker.exec(argv, { environment: { ...machine, ...environment } }),

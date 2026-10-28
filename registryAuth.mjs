@@ -98,14 +98,21 @@ export async function withRegistryAuth(runtimeDir, credential, pull) {
  * @template T
  * @param {PullSite} site
  * @param {string} image
+ * @param {string | undefined} platform the one variant of a multi-platform image it pulls; none, and the engine's own
  * @param {RegistryCredential | undefined} credential
  * @param {(argv: string[], environment: Record<string, string>) => Promise<T>} run
  * @returns {Promise<T>}
  */
-export function registryPull(site, image, credential, run) {
-  if (credential === undefined) return run(pullArgv(image), {});
+export function registryPull(site, image, platform, credential, run) {
+  if (credential === undefined) return run(pullArgv(image, platform), {});
   return withRegistryAuth(site.runtimeDir, credential, (directory) => {
-    const pull = poolPullArgv(site.engine, image, directory, site.dockerHost);
+    const pull = poolPullArgv(
+      site.engine,
+      image,
+      directory,
+      site.dockerHost,
+      platform,
+    );
     return run(pull.argv, pull.environment);
   });
 }
