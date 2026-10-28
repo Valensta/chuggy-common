@@ -336,6 +336,16 @@ test("the refusal names what this caller can lower, and says so where there is n
       /list_executions is already asking for one; move past it with cursor\.$/,
     ],
     [
+      "list_tickets",
+      { limit: 1 },
+      /list_tickets is already asking for one; move past it with after\.$/,
+    ],
+    [
+      "list_tickets",
+      { order: "RecentActivity", limit: 1 },
+      /list_tickets is already asking for one, so this one cannot be answered\.$/,
+    ],
+    [
       "read_refusals",
       {},
       /read_refusals is already asking for one, so this one cannot be answered\.$/,
@@ -2266,6 +2276,64 @@ test("list_tickets says which values its phase filter takes", () => {
     /left out, it lists every phase/,
   ])
     assert.match(description, said);
+});
+
+test("list_tickets lists by recent activity on the server's own cursor, and by number unchanged without it", async () => {
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: "{}" }));
+
+  await call("list_tickets", {
+    order: "RecentActivity",
+    cursor: "eyJ0aWNrZXQiOjd9",
+    limit: 25,
+  });
+  await call("list_tickets", { after: 40, limit: 25, phase: ["Done"] });
+
+  assert.deepEqual(
+    api.calls.map(({ path }) => path),
+    [
+      "/api/v1/tenants/vteng/projects/chuggy?limit=25&order=RecentActivity&cursor=eyJ0aWNrZXQiOjd9",
+      "/api/v1/tenants/vteng/projects/chuggy?after=40&limit=25&phase=Done",
+    ],
+  );
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "list_tickets",
+  );
+  for (const said of [
+    /`order: "RecentActivity"` lists them newest activity first/,
+    /answering `nextCursor` for the next page, which `cursor` resumes from/,
+    /A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more/,
+  ])
+    assert.match(description, said);
+});
+
+/** A first ticket is filed from these descriptions alone, so they open with what one needs. */
+test("the draft writes open their brief with the minimum brief and say what authoring is", () => {
+  for (const name of ["create_draft", "revise_draft"]) {
+    const shape = chuggyProjectTools
+      .find((held) => held.name === name)
+      .shape(z);
+    assert.ok(
+      shape.brief.description.startsWith(
+        'The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.\n`brief` is {title?',
+      ),
+      name,
+    );
+    assert.match(
+      shape.authoring.description ?? "",
+      /^`authoring` is \{program, dependencies\}: pass initialize_draft's `defaults` unchanged unless you mean otherwise, and `dependencies` are ticket numbers from its `dependencyCandidates`\.$/,
+      name,
+    );
+  }
+});
+
+test("release_draft says releasing starts no work, and who starts it", () => {
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "release_draft",
+  );
+  assert.match(
+    description,
+    /Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does\./,
+  );
 });
 
 test("a ticket's landings are described as the route answers them, and read_ticket points at them", () => {

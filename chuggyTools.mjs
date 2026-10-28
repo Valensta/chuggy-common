@@ -170,6 +170,13 @@ const chuggySelectionDescription = `\`selection\` is for a configuration that is
  */
 const chuggyBriefDescription = `\`brief\` is {title?, intent, links, images?, checks?, repository?, branch?, finalization?}: \`title\` is optional in the contract, so always give one — one short line naming the work, which the console lists tickets by; \`intent\` is what the ticket is for, in your own words — one text bounded only as a whole, with no bound on a line of it or on how many lines it has; \`repository\` is the repository the work happens in, by the clone URL list_repositories answers, which list_configurations reports as an imported configuration's provenance, and a draft carrying none is refused when it is released; \`images\` are this project's images the work is handed, each by the identity fetch_image takes; \`checks\` are command lines added to the first Check stage the configuration runs as commands, each one line of 1 to ${String(briefLineCharsMax)} characters with no tab, line break or other control character in it, and initialize_draft answers that stage as \`commandedCheckStage\`, its program stage key, counted from one, and in words as \`commandedCheckStageNote\` (the same stage and, for a catalog, its plan, or that none does and which plans would), and a draft carrying them whose program leaves out that stage, or for a catalog the evaluator in it that runs commands, is refused when it is released whoever releases it (ProgramSkipsBriefChecks), and where it answers none a draft carrying checks is refused when it is released (BriefChecksUncommanded), and each runs under sh -eu with the commit the change started from in CHUG_CHANGE_BASE, unset where that is unknown, so a check that runs only what changed reads it as \${CHUG_CHANGE_BASE-} and runs everything where that is empty; \`branch\` is the refs/heads/ branch the work happens on, which the repository need not hold yet; \`finalization\` is how the work lands, and a brief naming none takes, on a version 2 catalog, the landing of the finalizer its selection lands with where that finalizer names one, and otherwise its repository's landing default, which for a newly bound repository is a pull request; the write's answer carries \`landing\`, the mode and target it stored, and its \`source\`: Brief, Finalizer, Repository, or Default for a brief naming no repository; a landing by PullRequest or PullRequestMerge opens its pull request from \`branch\` into the finalization's \`target\`, or into the repository's default branch where none is named, so whenever the landing is a pull request \`branch\` is a branch of its own, never the \`target\`, and where no target is named never the default branch; a \`branch\` that is the default branch with no target named is accepted when filed and then held by the finalizer (ProposalBaseIsHead). A 400 names the rule the brief broke, and for a check its position in \`checks\`, counted from zero.`;
 
+/** What a draft's brief is first told: the least a ticket can be filed with, ahead of everything a brief may carry. */
+const chuggyDraftBriefDescription = `The minimum brief is {title, intent, links: [], repository: <clone URL from list_repositories>, branch: "refs/heads/<a new branch of your own>"}.
+${chuggyBriefDescription}`;
+
+/** What a draft's authoring carries, which initialize_draft answers the defaults of. */
+const chuggyAuthoringDescription = `\`authoring\` is {program, dependencies}: pass initialize_draft's \`defaults\` unchanged unless you mean otherwise, and \`dependencies\` are ticket numbers from its \`dependencyCandidates\`.`;
+
 /** What the same call made again within one turn answers, which is that operation as it now stands. */
 export const chuggySubmissionRepeatDescription = `The same call again in the same turn is the same operation, answered as it now stands: a \`state\` other than Pending is the outcome it already settled on, not a new attempt.`;
 
@@ -339,12 +346,18 @@ function answerTooLarge(remedy) {
  * How the refusal ends once nothing smaller is left to ask for: the tool has no
  * page bound, or its page of a single item is still too large. It says what
  * the caller can do, which is move past that item where the tool takes a
- * cursor and nothing where it takes none.
+ * cursor and nothing where it takes none. A tool whose cursor depends on the
+ * call says which through its `cursorOf(given)`, `undefined` where none moves
+ * past one item.
  */
-function smallestPageRemedy(name, fields) {
+function smallestPageRemedy(definition, fields, given) {
+  const { name } = definition;
   if (!(chuggyToolPageArgument in fields))
     return `${name} takes no ${chuggyToolPageArgument}, so this one cannot be answered`;
-  const cursor = chuggyToolCursorArguments.find((one) => one in fields);
+  const cursor =
+    definition.cursorOf === undefined
+      ? chuggyToolCursorArguments.find((one) => one in fields)
+      : definition.cursorOf(given);
   return cursor === undefined
     ? `${name} is already asking for one, so this one cannot be answered`
     : `${name} is already asking for one; move past it with ${cursor}`;
@@ -839,16 +852,20 @@ export const chuggyProjectTools = [
   {
     name: "list_tickets",
     description:
-      "One page of this project's tickets, ascending by number. Answers `nextAfter` for the next page; `after` resumes from it. `phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly, and lists a ticket in any of them, or `NonTerminal` alone; left out, it lists every phase.",
+      'One page of this project\'s tickets, ascending by number. Answers `nextAfter` for the next page; `after` resumes from it. `order: "RecentActivity"` lists them newest activity first instead, answering `nextCursor` for the next page, which `cursor` resumes from in that order and `after` does not. A page may hold fewer than `limit`, and only `nextAfter`, or `nextCursor`, present says there are more. `phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly, and lists a ticket in any of them, or `NonTerminal` alone; left out, it lists every phase.',
     shape: (z) => ({
       after: ticket(z).optional(),
       limit: limit(z, nativeHttpPageItemsMax),
       phase: z.array(z.string().min(1)).max(16).optional(),
+      order: z.enum(["RecentActivity"]).optional(),
+      cursor: identity(z).optional(),
     }),
-    call: (context, { after, limit: pageLimit, phase }) =>
+    // An activity cursor is the server's own, so none names a ticket to move past.
+    cursorOf: ({ order }) => (order === undefined ? "after" : undefined),
+    call: (context, { after, limit: pageLimit, phase, order, cursor }) =>
       read(
         context,
-        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase })}`,
+        `${projectPath(context, "project")}${search({ after, limit: pageLimit, phase, order, cursor })}`,
       ),
   },
   {
@@ -1161,9 +1178,9 @@ export const chuggyProjectTools = [
         chuggyExpectedVersionDescription,
       ),
       configurationRevision: identity(z),
-      authoring: anyObject(z),
+      authoring: anyObject(z).describe(chuggyAuthoringDescription),
       brief: anyObject(z).describe(
-        `${chuggyBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
+        `${chuggyDraftBriefDescription} It is replaced whole, so send back the \`repository\` and \`images\` read_draft answered or the revision clears them.`,
       ),
       selection: anyObject(z)
         .optional()
@@ -1203,7 +1220,7 @@ export const chuggyProjectTools = [
   },
   {
     name: "release_draft",
-    description: `Submits the release of one draft. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
+    description: `Submits the release of one draft. Releasing makes the ticket Pending and starts no work: the project's lead dispatches it when its dependencies are Done, or a person who may dispatch does. ${chuggySubmissionDescription} A release refused for its brief or its configuration is refused again at that authoring version, so revise_draft the draft and release the \`authoringVersion\` and \`configurationRevision\` the revision answers. ${chuggyProgramShortDescription}`,
     shape: (z) => ({
       ticket: ticket(z),
       authoringVersion: count(z),
@@ -1227,8 +1244,8 @@ export const chuggyProjectTools = [
       expectedProjectSequence: count(z).describe(
         chuggyExpectedProjectSequenceDescription,
       ),
-      authoring: anyObject(z),
-      brief: anyObject(z).describe(chuggyBriefDescription),
+      authoring: anyObject(z).describe(chuggyAuthoringDescription),
+      brief: anyObject(z).describe(chuggyDraftBriefDescription),
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) =>
@@ -1388,7 +1405,7 @@ export function chuggyToolHandler(definition, z) {
     }
     return storable(answer)
       ? answer
-      : answerTooLarge(smallestPageRemedy(name, fields));
+      : answerTooLarge(smallestPageRemedy(definition, fields, given));
   };
 }
 

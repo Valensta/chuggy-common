@@ -136,6 +136,29 @@ test("the server tells the agent the docs are behind read_docs, index first", ()
   assert.ok(registered.some(({ name }) => name === "read_docs"));
 });
 
+test("the server's instructions name the filing recipe's tools in order, then who starts the work", () => {
+  const recipe = [
+    "list_repositories",
+    "list_configurations",
+    "initialize_draft",
+    "create_draft",
+    "read_draft",
+    "release_draft",
+    "read_operation",
+  ];
+  const steps = [...localToolInstructions.matchAll(/^(\d+)\. (\w+)/gmu)];
+  assert.deepEqual(
+    steps.map(([, number, tool]) => [Number(number), tool]),
+    recipe.map((tool, index) => [index + 1, tool]),
+  );
+  const tools = new Set(chuggyProjectTools.map(({ name }) => name));
+  for (const tool of recipe) assert.ok(tools.has(tool), tool);
+  assert.match(
+    localToolInstructions,
+    /Releasing starts nothing: [^.]*lead dispatches it[^.]*, or a person who may dispatch does\.$/u,
+  );
+});
+
 test("a registered tool reaches its project's route under the person's token", async () => {
   const api = apiOf([200]);
   const context = localToolContext({
