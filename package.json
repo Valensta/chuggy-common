@@ -27,6 +27,7 @@
     "agent.mjs",
     "boundedResponse.mjs",
     "chatChannel.mjs",
+    "chatCheckout.mjs",
     "check.sh",
     "checks.mjs",
     "chuggyApi.mjs",
