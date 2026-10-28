@@ -301,14 +301,14 @@ export function chatSupervised({
  * The tree a session reads, checked out by the supervisor as root under a
  * credential the plane mints for the session's own attempt.
  */
-function chatSupervisorCheckout(environment, mirrors, log) {
+function chatSupervisorCheckout(environment, mirrors) {
   const named = environment[workerRepositoriesVariable];
   const repositories =
     named === undefined || named.length === 0 ? {} : workerRepositories(named);
   const credentialFiles = JSON.parse(
     environment[workerCredentialFilesVariable] ?? "{}",
   );
-  return (task, bearer, workspace, { signal, uid, minted }) =>
+  return (task, bearer, workspace, { signal, uid, minted, log }) =>
     chatCheckout(task, bearer, workspace, {
       mint: (repository) =>
         planeCredential({
@@ -342,7 +342,7 @@ export async function chatSupervisorMain(environment = process.env) {
     system: chatSystem(),
     log,
     task: (envelope) => envelopeTask(envelope),
-    checkout: chatSupervisorCheckout(environment, mirrors, log),
+    checkout: chatSupervisorCheckout(environment, mirrors),
   });
   if (!(await sessions.holding())) await mirrors.pruned(log);
   const closed = new globalThis.AbortController();

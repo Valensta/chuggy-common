@@ -128,7 +128,10 @@ function systemOf(overrides = {}) {
       system.scratched = roots;
     },
     named: async (uids) => new Set(uids),
-    scratchFound: async () => ["/tmp", "/run/lock"],
+    scratchFound: async () => {
+      calls.push(["scratchFound"]);
+      return ["/tmp", "/run/lock"];
+    },
     ...overrides,
   };
   return system;
@@ -230,6 +233,21 @@ test("a session is started as its own user, in its own places, its envelope on i
   assert.equal(checkouts[0].asked.minted, "/supervisor/session-20000");
   assert.equal(checkouts[0].bearer, bearer);
   assert.equal(checkouts[0].task.workerPlane.url, envelope.callbackUrl);
+});
+
+/** Catches a line the checkout says of a session that the host cannot read back to its assignment. */
+test("what the checkout says of a session reaches the log named for it, line by line", async () => {
+  const { sessions, logged, checkouts } = await sessionsOf(systemOf());
+  await sessions.prepared(assignment, envelope, live());
+
+  checkouts[0].asked.log("session checkout main at abc\n");
+  checkouts[0].asked.log("could not discard\nits tree\n");
+
+  assert.deepEqual(logged.join("").split("\n").filter(Boolean), [
+    "[assignment-1 session-20000] session checkout main at abc",
+    "[assignment-1 session-20000] could not discard",
+    "[assignment-1 session-20000] its tree",
+  ]);
 });
 
 /** Catches a tree with no repository's group handed the group of none, or of another's. */
@@ -703,6 +721,7 @@ test("sessions opened sweep every session user and clear what a predecessor left
     ["rootMade", "/supervisor", 0o700],
     ["swept", 20_000],
     ["swept", 20_001],
+    ["scratchFound"],
     ["scattered", 20_000],
     ["scattered", 20_001],
     ["emptied", "/sessions/session-20001", 20_001],

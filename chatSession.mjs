@@ -36,13 +36,17 @@
  * supervisor starting does the same for every user of its range, once none
  * has a process left, so nothing a predecessor's sessions left is the next's.
  *
- * The places every user may write are found when the supervisor starts:
- * every directory any user may write on each filesystem the container
+ * The places every user may write are found when the supervisor starts,
+ * once no session user's process is left: every directory any user may
+ * write on each filesystem the container
  * mounts writable, outside what a session's user owns and what another user
  * owns that no other user may enter. A user's clear never enters a directory
  * another user owns: that is its owner's to empty, with what anyone left in
  * it, so no user's tree can fail another's clear. A user that makes its own
- * such directory one it cannot empty is held, and only that user.
+ * such directory one it cannot empty is held, and only that user, and what
+ * another user left in that directory stays with it. A directory every user
+ * writes that is filled past what one look gets through in
+ * `chatSessionScratchTimeoutMs` keeps the supervisor from starting.
  *
  * A SESSION'S USER IS ONE THE IMAGE NAMES. A supervisor whose range holds a
  * user its passwd does not resolve refuses to start, since a session run as
@@ -599,7 +603,8 @@ function chatSessionPlace(settings, uid, assignment) {
  * What every line on the supervisor's log of the session `assignment` is
  * run as `uid` begins with, inside its brackets: `assignment` with every
  * byte of its UTF-8 outside letters, digits, `.`, `_` and `-` written
- * `%XX`, then a space and `session-` and `uid`.
+ * `%XX`, then a space and `session-` and `uid`. A lone surrogate is written
+ * as U+FFFD is.
  */
 export function chatSessionLabel(assignment, uid) {
   let named = "";
@@ -641,9 +646,9 @@ async function chatSessionAttempted(state, id, what, step) {
 
 /**
  * Every user of the range a predecessor's sessions ran as cleared: the
- * processes of each killed first, so none is left to write while another is
- * cleared, then what each left in the places every user writes. A user
- * either fails for is held.
+ * processes of each killed first, so none is left to write while the places
+ * every user writes are found or another is cleared, then what each left in
+ * those places. A user either fails for is held.
  */
 async function chatSessionsUsersCleared(state) {
   const { settings, system, log } = state;
@@ -665,6 +670,7 @@ async function chatSessionsUsersCleared(state) {
       ))
     )
       hold(uid);
+  state.scratch = await system.scratchFound(settings);
   for (const uid of uids)
     if (
       !state.held.has(uid) &&
@@ -764,6 +770,14 @@ function chatSessionEnvironment(state, place, checkout) {
   };
 }
 
+/** What the supervisor says of the session `place` is, each line named for it, on its log. */
+function chatSessionLogged(state, place) {
+  return (text) => {
+    const lines = (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+    state.log(lines.map((line) => `[${place.label}] ${line}\n`).join(""));
+  };
+}
+
 /** Each line `stream` carries, scrubbed and named for its session, on the supervisor's log. */
 function chatSessionOutput(state, place, stream, scrub) {
   const lines = chatLineReader(chatSessionLineBytesMax, {
@@ -859,7 +873,12 @@ async function chatSessionMade(state, place, envelope, signal) {
     { ...fetched.answer, workerPlane: { url: envelope.callbackUrl } },
     envelope.bearer,
     place.workspace,
-    { signal, uid: place.uid, minted: place.checkoutMinted },
+    {
+      signal,
+      uid: place.uid,
+      minted: place.checkoutMinted,
+      log: chatSessionLogged(state, place),
+    },
   );
   await system.removed(place.checkoutMinted);
   signal.throwIfAborted();
@@ -943,9 +962,9 @@ async function chatSessionsUsersNamed(settings, system) {
 
 /**
  * The sessions a supervisor runs on `system`: refused unless its image names
- * every user of its range, then its roots made, the places every user writes
- * found, and every session user's processes a predecessor left killed and
- * what it left removed. `prepared` starts one for an assignment; `holding`
+ * every user of its range, then its roots made, every session user's
+ * processes a predecessor left killed, the places every user writes found,
+ * and what it left removed. `prepared` starts one for an assignment; `holding`
  * is whether any session's directory is there, which a mirror's prune waits
  * on.
  *
@@ -963,7 +982,7 @@ export async function chatSessionsOpened(settings, seams) {
     checkout,
     held: new Set(),
     turn: 0,
-    scratch: await system.scratchFound(settings),
+    scratch: [],
   };
   await system.rootMade(settings.sessionsRoot, chatSessionsRootMode);
   await system.rootMade(settings.mintedRoot, chatSessionsRootMode);
