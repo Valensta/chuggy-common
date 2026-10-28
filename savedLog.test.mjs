@@ -15,6 +15,7 @@ import test from "node:test";
 import {
   savedLogBytesMax,
   savedLogCutLine,
+  savedLogKept,
   savedLogLinesMax,
   savedLogTrimmed,
   savedLogWritten,
@@ -52,6 +53,20 @@ test("a log a job wrote is cut to its end only where it is over the bound, and n
   assert.equal(await readFile(file, "utf8"), `${savedLogCutLine}end\n`);
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.deepEqual(await readdir(made), ["job.log"]);
+});
+
+test("a tail is kept whole where nothing was cut, and after the cut line from its first whole line where its bytes were", () => {
+  assert.equal(savedLogKept(Buffer.from("a\nb\n"), false), undefined);
+  assert.equal(
+    String(savedLogKept(Buffer.from("t of a\nb\n"), true)),
+    `${savedLogCutLine}b\n`,
+  );
+  assert.equal(
+    String(
+      savedLogKept(Buffer.from(`x\n${"l\n".repeat(savedLogLinesMax)}`), false),
+    ),
+    `${savedLogCutLine}${"l\n".repeat(savedLogLinesMax)}`,
+  );
 });
 
 test("a log a job wrote of more lines than the bound is cut to its last lines, though it is under the byte bound", async (t) => {
