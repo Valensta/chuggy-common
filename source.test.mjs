@@ -616,12 +616,6 @@ async function publishedFrom(
 }
 
 /**
- * Driven against real repositories, because whether a commit exists when nothing
- * changed is git's answer and not the stub's. Catches a commit that stopped
- * being `--allow-empty`: the attempt would crash where it should have declared
- * the work its commands found nothing left to do.
- */
-/**
  * Catches a push repository made in an object format other than the
  * workspace's: it could borrow none of its objects, and the push would fail.
  */
@@ -662,6 +656,12 @@ test("a SHA-256 workspace pushes to a SHA-256 remote", async () => {
   }
 });
 
+/**
+ * Driven against real repositories, because whether a commit exists when nothing
+ * changed is git's answer and not the stub's. Catches a commit that stopped
+ * being `--allow-empty`: the attempt would crash where it should have declared
+ * the work its commands found nothing left to do.
+ */
 test("an attempt that changed nothing still declares a commit on its branch", async () => {
   await inCheckout(async ({ remote, directory, base }) => {
     const { source } = await publishedFrom({ remote, directory, base });
@@ -677,6 +677,51 @@ test("an attempt that changed nothing still declares a commit on its branch", as
       cwd: remote,
     });
     assert.equal(pushed.trim(), source.commit);
+  });
+});
+
+/**
+ * Catches a worker commit made on top of an author's own when nothing is left
+ * to commit: `HEAD`, the pushed ref and the attempt's commit would carry only
+ * the worker's message, and not the author's why.
+ */
+test("an author's commit with nothing left over is the attempt's commit", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory, remote } = checkout;
+    const authored = await agentCommitted(directory, "change", "made\n");
+
+    const { source } = await publishedFrom(checkout);
+
+    assert.equal(source.commit, authored);
+    assert.equal(await headOf(directory), authored);
+    const { stdout: pushed } = await git("git", ["rev-parse", source.ref], {
+      cwd: remote,
+    });
+    assert.equal(pushed.trim(), authored);
+  });
+});
+
+/** Catches what an author left uncommitted on top of its own commit going unpushed. */
+test("an author's commit with changes left over gets one commit on top holding them", async () => {
+  await inCheckout(async (checkout) => {
+    const { directory } = checkout;
+    const authored = await agentCommitted(directory, "change", "made\n");
+    await writeFile(join(directory, "left"), "over\n");
+
+    const { source } = await publishedFrom(checkout);
+
+    const { stdout: parent } = await git(
+      "git",
+      ["rev-parse", `${source.commit}^`],
+      { cwd: directory },
+    );
+    assert.equal(parent.trim(), authored);
+    const { stdout: changed } = await git(
+      "git",
+      ["diff", "--name-only", authored, source.commit],
+      { cwd: directory },
+    );
+    assert.equal(changed, "left\n");
   });
 });
 
@@ -778,6 +823,7 @@ test("a secret is refused at the commit that first carries it, whether or not a 
         { refused, asked },
         { secret: held[1], commit: added, place: "a file" },
       );
+      if (!removed) assert.equal(await headOf(directory), added);
     });
 });
 
