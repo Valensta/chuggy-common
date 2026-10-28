@@ -242,6 +242,28 @@ test("both streams are captured and a chatty command is bounded", async () => {
   assert.equal(output.checks[1].truncated, true);
 });
 
+test("a chatty command's capture keeps its start and its real ending", async () => {
+  const command = `${chatty}; echo FINAL LINE; exit 1`;
+  const { result, output } = await ran([command]);
+  const [check] = output.checks;
+
+  assert.equal(check.truncated, true);
+  assert.ok(check.output.length <= workerCheckOutputCharsMax);
+  assert.ok(check.output.startsWith("chatter\n"));
+  assert.ok(check.output.endsWith("chatter\nFINAL LINE\n"));
+  assert.ok(result.summary.endsWith("chatter FINAL LINE"), result.summary);
+});
+
+test("a capture cut through astral output lands on code points", async () => {
+  const wide = "\u{1F600}";
+  const command = `yes ${wide} | head -c ${String(workerCheckOutputCharsMax * 8)}`;
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, true);
+  assert.ok(output.checks[0].output.isWellFormed());
+  assert.ok(output.checks[0].output.length <= workerCheckOutputCharsMax);
+});
+
 test("what a stage captures across its commands is bounded as one total", async () => {
   const { output } = await ran([chatty, chatty]);
 
