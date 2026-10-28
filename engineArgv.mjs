@@ -766,6 +766,23 @@ export function listArgv(pool, assignment) {
   ];
 }
 
+/**
+ * A pool's containers, running or not, a line each: its name, its status and
+ * its image, as a person reads them.
+ *
+ * @param {string} pool the pool label's value
+ */
+export function listLinesArgv(pool) {
+  return [
+    "ps",
+    "--all",
+    "--filter",
+    `label=${poolLabel}=${pool}`,
+    "--format",
+    "{{.Names}}  {{.Status}}  {{.Image}}",
+  ];
+}
+
 /** Every running container on the engine, whoever ran it. */
 export function runningListArgv() {
   return ["ps", "--quiet", "--no-trunc"];

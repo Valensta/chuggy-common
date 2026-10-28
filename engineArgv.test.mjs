@@ -26,6 +26,7 @@ import {
   inspectArgv,
   killArgv,
   listArgv,
+  listLinesArgv,
   logsArgv,
   memoryStatsArgv,
   networkCreateArgv,
@@ -522,6 +523,17 @@ test("a pull for a platform names it, the engine's own and either engine's under
       image,
     ],
   );
+});
+
+test("a pool's containers are listed a line each, name, status and image", () => {
+  assert.deepEqual(listLinesArgv("vteng/chuggy/shame"), [
+    "ps",
+    "--all",
+    "--filter",
+    "label=io.chuggy.pool=vteng/chuggy/shame",
+    "--format",
+    "{{.Names}}  {{.Status}}  {{.Image}}",
+  ]);
 });
 
 test("every other call is handed to either engine as this argv", () => {
