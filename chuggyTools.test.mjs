@@ -2255,6 +2255,19 @@ test("the descriptions say what the server does where a session reads it", () =>
     for (const claim of claims) assert.match(described(tool), claim, tool);
 });
 
+/** The phase filter takes exact phase names, so the description names them. */
+test("list_tickets says which values its phase filter takes", () => {
+  const { description } = chuggyProjectTools.find(
+    ({ name }) => name === "list_tickets",
+  );
+  for (const said of [
+    /`phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly/,
+    /or `NonTerminal` alone/,
+    /left out, it lists every phase/,
+  ])
+    assert.match(description, said);
+});
+
 test("a ticket's landings are described as the route answers them, and read_ticket points at them", () => {
   const described = (tool) =>
     chuggyProjectTools.find(({ name }) => name === tool).description;

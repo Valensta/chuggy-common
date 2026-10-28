@@ -839,7 +839,7 @@ export const chuggyProjectTools = [
   {
     name: "list_tickets",
     description:
-      "One page of this project's tickets, ascending by number. Answers `nextAfter` for the next page; `after` resumes from it.",
+      "One page of this project's tickets, ascending by number. Answers `nextAfter` for the next page; `after` resumes from it. `phase` takes one or more of Pending, Work, Evaluation, Finalization, Done, Escalated and Revoked, matched exactly, and lists a ticket in any of them, or `NonTerminal` alone; left out, it lists every phase.",
     shape: (z) => ({
       after: ticket(z).optional(),
       limit: limit(z, nativeHttpPageItemsMax),
