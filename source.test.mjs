@@ -27,6 +27,7 @@ import {
   recordingGit,
   remoteRefs,
 } from "./checkout.fixture.mjs";
+import { workerGitVariable } from "./checks.mjs";
 import { forgeServed } from "./gitForge.fixture.mjs";
 import { gitRemotePauseMs, gitRemoteTriesMax } from "./gitRemote.mjs";
 import { workerCredentialEnvironment } from "./repository.mjs";
@@ -85,6 +86,21 @@ function stubbedGit(calls, answer = async () => undefined) {
       ? { stdout: `${stubbedCommit}\n` }
       : { stdout: "" };
   };
+}
+
+/**
+ * Clears `process.env` of every variable git reads configuration entries
+ * from until `t` ends, so a suite run as a job, whose worker hands it entries
+ * of its own, reads and spawns git as a pod whose image names none.
+ */
+function withoutStandingGitEntries(t) {
+  const standing = Object.entries(process.env).filter(([name]) =>
+    workerGitVariable(name),
+  );
+  for (const [name] of standing) delete process.env[name];
+  t.after(() => {
+    Object.assign(process.env, Object.fromEntries(standing));
+  });
 }
 
 /** The one call of `verb` among `calls`. */
@@ -309,7 +325,8 @@ function gitEntries(environment) {
  * repository with, or the entries the image's environment names dropped from
  * it; and the commit's hooks handed anything less than the reads.
  */
-test("the commit is handed the attempt's git, and the push only what the image's environment names", async () => {
+test("the commit is handed the attempt's git, and the push only what the image's environment names", async (t) => {
+  withoutStandingGitEntries(t);
   const calls = [];
   const reads = [
     ["credential.http://git.helper", ""],
@@ -964,7 +981,8 @@ async function packedObjects(bare) {
  * one that sends the remote objects it already holds, and one under a
  * namespace the pod names, which would land its ref elsewhere.
  */
-test("the push is made from a repository holding none of the workspace's refs or configuration, borrowing its objects, and sends only what the remote lacks", async () => {
+test("the push is made from a repository holding none of the workspace's refs or configuration, borrowing its objects, and sends only what the remote lacks", async (t) => {
+  withoutStandingGitEntries(t);
   await inCheckout(async (checkout) => {
     const { remote, directory } = checkout;
     await git("git", ["push", "--quiet", remote, "HEAD:refs/heads/main"], {

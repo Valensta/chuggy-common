@@ -63,6 +63,7 @@ import {
 } from "./chuggyTools.mjs";
 import { git } from "./checkout.fixture.mjs";
 import { claudeAgent } from "./claude.mjs";
+import { claudeCredentialVariable } from "./claudeCredential.mjs";
 import { codexAgent } from "./codex.mjs";
 import {
   envelopeCredentialFiles,
@@ -968,9 +969,14 @@ test("an envelope's task route answered only by a proxy is asked until the plane
 /**
  * Catches the provider credential put in a slot its agent does not read, and a
  * credential the pool mounted reaching an upload unscrubbed because no agent
- * asked for it.
+ * asked for it. The pod names no kind, whatever the suite's runner names.
  */
-test("an envelope's provider credential is its agent's, and is scrubbed as a mounted one is", async () => {
+test("an envelope's provider credential is its agent's, and is scrubbed as a mounted one is", async (t) => {
+  const named = process.env[claudeCredentialVariable];
+  delete process.env[claudeCredentialVariable];
+  t.after(() => {
+    if (named !== undefined) process.env[claudeCredentialVariable] = named;
+  });
   const directory = await mkdtemp(join(tmpdir(), "chuggy-envelope-"));
   try {
     const providerCredentialFile = join(directory, "provider-credential");

@@ -1790,12 +1790,17 @@ function agentRun(summary, verdict = "Pass") {
   });
 }
 
-/** Sets each of `variables` in this process's environment until `t` ends. */
+/**
+ * Sets each of `variables` in this process's environment until `t` ends, and
+ * unsets each whose value is `undefined`.
+ */
 function podHolds(t, variables) {
   const saved = Object.fromEntries(
     Object.keys(variables).map((name) => [name, process.env[name]]),
   );
-  Object.assign(process.env, variables);
+  for (const [name, value] of Object.entries(variables))
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
   t.after(() => {
     for (const [name, value] of Object.entries(saved))
       if (value === undefined) delete process.env[name];
@@ -2911,7 +2916,7 @@ test("an agent whose runner names no kind of credential is started as every agen
   const run = await credentialAttempt(
     t,
     `${secret}\n`,
-    strayEnvironment,
+    { ...strayEnvironment, [claudeCredentialVariable]: undefined },
     "CLAUDE_CODE_OAUTH_TOKEN",
   );
 
