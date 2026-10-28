@@ -266,6 +266,24 @@ test("a command's output exactly at the bound is captured whole", async () => {
   );
 });
 
+test("a command's output at the bound with a code point across the head's limit is captured whole", async () => {
+  const marker = "\n[capture dropped output here]\n".length;
+  const limit = Math.floor((workerCheckOutputCharsMax - marker) / 2) + marker;
+  const after = workerCheckOutputCharsMax - limit - 1;
+  const command = [
+    `head -c ${String(limit - 1)} /dev/zero | tr '\\0' a`,
+    "printf '\\360\\237\\230\\200'",
+    `head -c ${String(after)} /dev/zero | tr '\\0' b`,
+  ].join("; ");
+  const { output } = await ran([command]);
+
+  assert.equal(output.checks[0].truncated, false);
+  assert.equal(
+    output.checks[0].output,
+    `${"a".repeat(limit - 1)}\u{1F600}${"b".repeat(after)}`,
+  );
+});
+
 test("a command's output just past the bound is marked and still bounded", async () => {
   const command = `yes x | head -c ${String(workerCheckOutputCharsMax)}; echo END`;
   const { output } = await ran([command]);

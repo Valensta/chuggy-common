@@ -438,9 +438,10 @@ async function runCheckCommand(command, room, services) {
  * A command's output within `units` code units: everything, while it fits, and
  * otherwise its head and a rolling tail of what came last, joined by the
  * dropped marker where the marker fits, so the capture still ends where the
- * command did. Until output is dropped the head also holds the marker's room,
- * and gives it up when the tail first drops something. The tail is cut before
- * it is added to, so the two together never hold more than `units`.
+ * command did. Until output is dropped the tail holds whatever room the head
+ * left, and at the first drop the head is cut to its half and the tail to the
+ * other. The tail is cut before it is added to, so the two together never hold
+ * more than `units`.
  */
 function checkCapture(units) {
   const marker = units >= checkCaptureMarker.length ? checkCaptureMarker : "";
@@ -452,18 +453,21 @@ function checkCapture(units) {
   let truncated = false;
   return {
     take(chunk) {
-      const room = units - tailUnits - head.length;
-      const taken = headOpen ? checkHead(chunk, room) : "";
+      const taken = headOpen
+        ? checkHead(chunk, units - tailUnits - head.length)
+        : "";
       head += taken;
       if (taken.length === chunk.length) return;
       headOpen = false;
-      const rest = checkTail(chunk.slice(taken.length), tailUnits);
-      const kept = checkTail(tail, tailUnits - rest.length);
+      const rest = chunk.slice(taken.length);
       const dropped =
-        kept.length + rest.length < tail.length + chunk.length - taken.length;
+        tail.length + rest.length >
+        (truncated ? tailUnits : units - head.length);
       if (dropped && !truncated) head = checkHead(head, headUnits);
       truncated ||= dropped;
-      tail = kept + rest;
+      const room = truncated ? tailUnits : units - head.length;
+      const end = checkTail(rest, room);
+      tail = checkTail(tail, room - end.length) + end;
     },
     kept: () => ({
       truncated,
