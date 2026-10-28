@@ -22,6 +22,7 @@ import {
 } from "./chatChannel.mjs";
 import {
   chatSessionIpcCleared,
+  chatSessionHome,
   chatSessionLabel,
   chatSessionMountsWalked,
   chatSessionScratchListed,
@@ -127,7 +128,10 @@ function systemOf(overrides = {}) {
       calls.push(["scattered", uid]);
       system.scratched = roots;
     },
-    named: async (uids) => new Set(uids),
+    named: async (uids) =>
+      new Map(
+        uids.map((uid) => [uid, chatSessionHome(settings.sessionsRoot, uid)]),
+      ),
     scratchFound: async () => {
       calls.push(["scratchFound"]);
       return ["/tmp", "/run/lock"];
@@ -736,7 +740,12 @@ test("sessions opened sweep every session user and clear what a predecessor left
 /** Catches a supervisor that gives out a user its image does not name, whose session finds no name, home or identity. */
 test("a supervisor whose range holds a user the image does not name refuses to start, naming the range", async () => {
   const system = systemOf({
-    named: async (uids) => new Set(uids.filter((uid) => uid !== 20_001)),
+    named: async (uids) =>
+      new Map(
+        uids
+          .filter((uid) => uid !== 20_001)
+          .map((uid) => [uid, chatSessionHome(settings.sessionsRoot, uid)]),
+      ),
   });
 
   await assert.rejects(
@@ -744,6 +753,24 @@ test("a supervisor whose range holds a user the image does not name refuses to s
     /^Error: the users 20000 to 20001 a session may be run as are not all named in this image's passwd$/u,
   );
   assert.deepEqual(system.calls, []);
+});
+
+/** Catches a passwd whose home for a session's user is not the one the session is handed, where ssh would look for its keys. */
+test("a supervisor whose image names another home for a session's user refuses to start, naming the home it hands", async () => {
+  const system = systemOf({
+    named: async (uids) =>
+      new Map(uids.map((uid) => [uid, `/home/session-${String(uid)}`])),
+  });
+
+  await assert.rejects(
+    sessionsOf(system),
+    /^Error: this image's passwd names a home for user 20000 other than \/sessions\/session-20000\/home, the one a session run as it is handed$/u,
+  );
+  assert.deepEqual(system.calls, []);
+  assert.equal(
+    chatSessionHome("/sessions", 20_000),
+    "/sessions/session-20000/home",
+  );
 });
 
 /** Catches IPC objects matched by an owner a session may set to another user's, or one gone before its removal failing the clear. */

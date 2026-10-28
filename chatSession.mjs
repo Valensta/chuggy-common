@@ -48,9 +48,11 @@
  * writes that is filled past what one look gets through in
  * `chatSessionScratchTimeoutMs` keeps the supervisor from starting.
  *
- * A SESSION'S USER IS ONE THE IMAGE NAMES. A supervisor whose range holds a
- * user its passwd does not resolve refuses to start, since a session run as
- * one finds no name, home or identity for itself.
+ * A SESSION'S USER IS ONE THE IMAGE NAMES, AT THE HOME IT IS HANDED. A
+ * supervisor whose range holds a user its passwd does not resolve, or names
+ * another home for than `chatSessionHome`, refuses to start, since a session
+ * run as one finds no name, home or identity for itself, or finds a home in
+ * its passwd, where ssh looks, that is not the one it is handed.
  *
  * EVERY LINE ABOUT A SESSION NAMES ITS ASSIGNMENT. Each line a session
  * writes, on its output or its error, and each the supervisor writes about
@@ -360,7 +362,7 @@ export function chatSystem({ spawn = spawnDefault, scratch } = {}) {
   };
 }
 
-/** Which of `uids` the image's passwd resolves, as `getpwuid` would. */
+/** Which of `uids` the image's passwd resolves, as `getpwuid` would, each to the home it names. */
 async function chatUsersNamed(uids) {
   let stdout;
   try {
@@ -368,11 +370,12 @@ async function chatUsersNamed(uids) {
   } catch (failure) {
     stdout = failure?.stdout ?? "";
   }
-  return new Set(
+  return new Map(
     String(stdout)
       .split("\n")
-      .map((line) => Number(line.split(":")[2]))
-      .filter((uid) => uids.includes(uid)),
+      .map((line) => line.split(":"))
+      .map((fields) => [Number(fields[2]), fields[5] ?? ""])
+      .filter(([uid]) => uids.includes(uid)),
   );
 }
 
@@ -580,6 +583,17 @@ export async function chatSessionIpcCleared(uid, { read, remove }) {
 }
 
 /**
+ * The home of the session run as `uid`, which the image's passwd names as
+ * that user's.
+ *
+ * @param {string} sessionsRoot
+ * @param {number} uid
+ */
+export function chatSessionHome(sessionsRoot, uid) {
+  return join(sessionsRoot, `session-${String(uid)}`, "home");
+}
+
+/**
  * A session's places: its user, its directory and the ones in it, its minted
  * directory, and the supervisor's for its checkout.
  */
@@ -591,7 +605,7 @@ function chatSessionPlace(settings, uid, assignment) {
     label: chatSessionLabel(assignment, uid),
     uid,
     workspace,
-    home: join(workspace, "home"),
+    home: chatSessionHome(settings.sessionsRoot, uid),
     temporary: join(workspace, "tmp"),
     minted: join(settings.mintedRoot, id),
     checkoutMinted: join(settings.supervisorMinted, id),
@@ -947,7 +961,10 @@ async function chatSessionsLeftCleared(state, root) {
   }
 }
 
-/** The users of `settings`' range its image's passwd names, refused unless it names them all. */
+/**
+ * The users of `settings`' range its image's passwd names, refused unless it
+ * names them all, each at the home a session run as it is handed.
+ */
 async function chatSessionsUsersNamed(settings, system) {
   const uids = Array.from(
     { length: settings.uidCount },
@@ -957,6 +974,13 @@ async function chatSessionsUsersNamed(settings, system) {
   if (uids.some((uid) => !named.has(uid)))
     throw new Error(
       `the users ${String(settings.uidFirst)} to ${String(settings.uidFirst + settings.uidCount - 1)} a session may be run as are not all named in this image's passwd`,
+    );
+  const astray = uids.find(
+    (uid) => named.get(uid) !== chatSessionHome(settings.sessionsRoot, uid),
+  );
+  if (astray !== undefined)
+    throw new Error(
+      `this image's passwd names a home for user ${String(astray)} other than ${chatSessionHome(settings.sessionsRoot, astray)}, the one a session run as it is handed`,
     );
 }
 
