@@ -162,7 +162,7 @@ import { ticketImageExtension } from "./ticketImages.mjs";
 import { runTranscriptPage, transcriptPageAnswer } from "./transcriptPage.mjs";
 import { routeFilled } from "./wire.mjs";
 
-/** The `status` an execution is answered with, which the contract's responses parse by and none of its entries export. */
+/** The `status` an execution is answered with, which the contract's responses parse by and none of its entries export until kasofsk/chuggy#1185. */
 const executionStatuses = [
   "Queued",
   "Admitted",
