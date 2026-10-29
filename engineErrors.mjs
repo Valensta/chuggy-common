@@ -8,7 +8,7 @@
 /**
  * @typedef {import("./engine.mjs").EngineAnswer} EngineAnswer
  *
- * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "PlatformAbsent" | "FlagUnknown" | "NotFound" | "Other"} EngineFailure
+ * @typedef {"Unreachable" | "NoSuchContainer" | "NoSuchVolume" | "NameConflict" | "ImageInUse" | "Unauthorized" | "PlatformAbsent" | "PlatformUnbuilt" | "FlagUnknown" | "NotFound" | "Other"} EngineFailure
  */
 
 const engineFailures = /** @type {const} */ ([
@@ -28,6 +28,10 @@ const engineFailures = /** @type {const} */ ([
     /unauthorized|authentication required|no basic auth credentials/iu,
   ],
   ["PlatformAbsent", /was found but (?:its platform|does not provide)/iu],
+  [
+    "PlatformUnbuilt",
+    /no matching manifest for|no image found in (?:image index|manifest list) for architecture/iu,
+  ],
   ["FlagUnknown", /unknown flag|requires api version/iu],
   ["NotFound", /no such image|image not known|manifest unknown|not found/iu],
 ]);
