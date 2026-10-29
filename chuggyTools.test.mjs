@@ -2078,8 +2078,9 @@ test("a draft write's expected version says it is the draft's authoringVersion, 
 });
 
 /**
- * A new draft's fence is the project's journal head, which moves under any
- * command at all, so the parameter says where it is read, that a stale one is
+ * A new draft's fence is the project's journal head, which a Succeeded
+ * operation moves and a draft write does not, so the parameter says where it
+ * is read and what moves it, that a stale one is
  * answered with the head to send again, and that a project which is not active
  * refuses at every head: a session told only "stale" reads again for ever.
  */
@@ -2090,7 +2091,8 @@ test("a new draft's expected project sequence says it is the project head, and w
 
     for (const said of [
       /`fence\.projectSequence` initialize_draft answered/,
-      /every command anywhere in the project moves/,
+      /which only an operation on the project that Succeeded moves, whoever submitted it/,
+      /no draft write \(create_draft, file_dependent, revise_draft, delete_draft\) moves it/,
       /\(DraftInitializationStale\) with the head it is at now as `currentProjectSequence`/,
       /the same write may be sent again with/,
       /Where nothing else has moved it since, the `decidedSequence` of your last Succeeded operation is the head to pass next/,
@@ -2166,21 +2168,25 @@ test("a dependent is filed with its parent among the draft's dependencies", asyn
   });
 });
 
-test("a prerequisite is refused, and the refusal names the update that would carry it", async () => {
+/** The schema is what refuses a prerequisite, so its description points at the write that files one. */
+test("a dependent's relation admits FollowUp alone, and a prerequisite is refused before anything is asked", async () => {
   const { api, call } = toolsOf();
 
+  assert.deepEqual(
+    chuggyProjectTools.find(({ name }) => name === "file_dependent").shape(z)
+      .relation.options,
+    ["FollowUp"],
+  );
+  assert.match(
+    parameterDescribed("file_dependent", "relation"),
+    /a prerequisite of a ticket is a revise_draft of its draft's dependencies/,
+  );
   const answer = await call("file_dependent", {
     ...dependent,
     relation: "Prerequisite",
   });
 
   assert.equal(answer.isError, true);
-  assert.match(
-    textOf(answer),
-    /file_dependent changes no ticket but the draft it files/,
-  );
-  assert.match(textOf(answer), /FollowUp/);
-  assert.match(textOf(answer), /update_ticket releases/);
   assert.equal(api.calls.length, 0);
 });
 
@@ -2668,6 +2674,43 @@ test("list_tickets says which values its phase filter takes", () => {
     assert.match(description, said);
 });
 
+/**
+ * The executions route takes one or more distinct execution statuses or
+ * `NonTerminal` alone, and answers anything else 400, so the schema refuses
+ * it before it is sent and the parameter names the field it matches.
+ */
+test("list_executions takes only the states its route takes, named as read_execution answers them", async () => {
+  const { api, call } = toolsOf({}, () => ({ status: 200, body: "{}" }));
+  const statuses = [
+    "Queued",
+    "Admitted",
+    "Launching",
+    "Running",
+    "Terminal",
+    "Cancelled",
+  ];
+
+  for (const state of [statuses, ["NonTerminal"]]) {
+    const answer = await call("list_executions", { state });
+    assert.equal(answer.isError, undefined, state.join());
+  }
+  for (const state of [
+    [],
+    ["Pending"],
+    ["Registered"],
+    ["NonTerminal", "Running"],
+    [...statuses, "Queued"],
+  ]) {
+    const answer = await call("list_executions", { state });
+    assert.equal(answer.isError, true, state.join());
+  }
+  assert.equal(api.calls.length, 2);
+  assert.match(
+    parameterDescribed("list_executions", "state"),
+    /whose `status`, as read_execution answers it, is one of these, each named once, or `NonTerminal` alone/,
+  );
+});
+
 test("list_tickets lists by recent activity on the server's own cursor, and by number unchanged without it", async () => {
   const { api, call } = toolsOf({}, () => ({ status: 200, body: "{}" }));
 
@@ -2742,6 +2785,7 @@ test("a ticket's landings are described as the route answers them, and read_tick
     /A Held landing carries `hold`: its `kind`, [^.]*, and `since`, when a hold of that kind began/,
     /An AwaitingMerge landing carries `wait`: its `reason`, [^.]*, and `checkedAt`, when the forge was last heard about its merge/,
     /`proposal` is the pull request [^.]*: its `url`, [^.]*its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state`/,
+    /its `status` as chuggy last read it, [^.]*so a Proposed landing's is the one it opened with and not followed afterwards/,
     /`conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut/,
   ];
   for (const claim of claims)
