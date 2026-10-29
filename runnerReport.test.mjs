@@ -124,7 +124,11 @@ function fakePlane() {
   return plane;
 }
 
-/** A backend whose next `held` and `ended` are set by the case, and whose placements are as `refused` says. */
+/**
+ * A backend whose next `held` and `ended` are set by the case, whose
+ * placements are as `refused` says, and whose stops find what `stopping` says
+ * of each, and a workload running where it says nothing.
+ */
 function fakeBackend() {
   const measures = runnerMeasures();
   const backend = {
@@ -134,6 +138,8 @@ function fakeBackend() {
     ending: [],
     /** @type {Set<string>} */
     refused: new Set(),
+    /** @type {Map<string, unknown>} what each stop finds, `null` for nothing the backend can tell */
+    stopping: new Map(),
     measures,
     held: async () => backend.holding,
     ended: async () => backend.ending.splice(0),
@@ -141,7 +147,14 @@ function fakeBackend() {
       backend.refused.has(placed.assignment)
         ? { placed: "Refused", evidence: "this machine cannot run it" }
         : { placed: "Placed" },
-    stop: async () => ({ stopped: "Stopped" }),
+    stop: async (/** @type {string} */ assignment) => {
+      const found = backend.stopping.has(assignment)
+        ? backend.stopping.get(assignment)
+        : { found: "Running" };
+      return found === null
+        ? { stopped: "Stopped" }
+        : { stopped: "Stopped", found };
+    },
     measured: measures.measured,
   };
   return backend;
@@ -299,6 +312,96 @@ test("a report counts what the runner did through the paths that did it, since i
   });
 });
 
+/** @param {Record<string, unknown>} ended what a stop found a workload had ended as */
+function stopFoundEnded(ended) {
+  return { found: "Ended", ended };
+}
+
+/**
+ * The jobs and sessions the case's report counted ended.
+ *
+ * @param {ReturnType<typeof harness>} runner
+ */
+async function endedCounted({ plane, clock }) {
+  await clock.elapsed();
+  assert.deepEqual(plane.unread, []);
+  const report = plane.reports.at(-1)?.body;
+  return { jobs: report?.jobsEnded, sessions: report?.sessionsEnded };
+}
+
+test("a workload the pool stops is counted as its stop found it: by its own end, as Stopped for a job it interrupted, and not where it cannot tell", async (t) => {
+  const runner = harness();
+  const { client, plane, backend, pass } = runner;
+  t.after(() => client.reporting?.ended());
+  const stopping = {
+    "job-succeeded": stopFoundEnded({
+      kind: "Job",
+      why: "0",
+      ran: "Succeeded",
+    }),
+    "job-failed": stopFoundEnded({ kind: "Job", why: "1", ran: "Failed" }),
+    "job-late": stopFoundEnded({
+      kind: "Job",
+      why: "late",
+      killed: "Deadline",
+    }),
+    "job-running": { found: "Running" },
+    "job-untold": null,
+    "session-succeeded": stopFoundEnded({
+      kind: "Session",
+      phase: "Succeeded",
+    }),
+    "session-running": { found: "Running" },
+  };
+  backend.stopping = new Map(Object.entries(stopping));
+  backend.holding = Object.keys(stopping).map((assignment) => ({
+    assignment,
+    kind: assignment.startsWith("job") ? "Job" : "Session",
+  }));
+  plane.answer = () => plane.reconciled({ stop: Object.keys(stopping) });
+  await pass();
+  await pass();
+
+  assert.deepEqual(await endedCounted(runner), {
+    jobs: { Succeeded: 1, Failed: 1, Deadline: 1, Stopped: 1 },
+    sessions: { Succeeded: 1 },
+  });
+});
+
+test("a workload both a stop and ended see is counted once, whichever sees it first", async (t) => {
+  const runner = harness();
+  const { client, plane, backend, pass } = runner;
+  t.after(() => client.reporting?.ended());
+  const ends = {
+    "job-reported": { kind: "Job", why: "0", ran: "Succeeded" },
+    "session-reported": { kind: "Session", phase: "Succeeded" },
+    "job-unreported": { kind: "Job", why: "1", ran: "Failed" },
+    "session-unreported": { kind: "Session", phase: "Failed" },
+  };
+  backend.stopping = new Map(
+    Object.entries(ends).map(([id, ended]) => [id, stopFoundEnded(ended)]),
+  );
+  backend.holding = Object.keys(ends).map((assignment) => ({
+    assignment,
+    kind: assignment.startsWith("job") ? "Job" : "Session",
+  }));
+  plane.answer = () =>
+    plane.reconciled({ stop: ["job-reported", "session-reported"] });
+  await pass();
+  backend.holding = [];
+  backend.ending = Object.entries(ends).map(([id, ended]) =>
+    ended.kind === "Job"
+      ? { ...ended, job: attempt(id) }
+      : { ...ended, session: attempt(id) },
+  );
+  plane.answer = () => plane.reconciled({ stop: Object.keys(ends) });
+  await pass();
+
+  assert.deepEqual(await endedCounted(runner), {
+    jobs: { Succeeded: 1, Failed: 1 },
+    sessions: { Succeeded: 1, Failed: 1 },
+  });
+});
 test("a report is sent at once after the first poll whose answer names a version that takes it, then once each interval, and never after its run ends", async () => {
   const { client, plane, clock, pass } = harness();
   plane.release = releaseBefore;
