@@ -110,9 +110,6 @@
  * sentence in a description. `revoke_ticket` and `update_ticket` are under
  * that capability too, which is what keeps them from a roster that does not
  * hold it, and `dispatch_ticket` is under `TicketDispatch` alone.
- * `Prerequisite` is admitted by the schema only so its refusal can name the
- * reason — it would point an existing ticket at the new draft, which is an
- * update of that ticket and not a draft `file_dependent` files.
  *
  * `zod` IS A PEER DEPENDENCY OF THE AGENT SDK, NOT ONE OF ITS DEPENDENCIES, so
  * the shapes are functions of a `z` the caller resolves rather than of an import
@@ -131,7 +128,6 @@ import { sessionStoreBatchBytesMax } from "@chuggy/worker-contract/sessionPlane"
 import {
   agenticRefusalsAnsweredMax,
   allChuggyTools,
-  allDependentRelations,
   briefLineCharsMax,
   builtInToolCapabilities,
   chuggyDocsIndex,
@@ -166,6 +162,16 @@ import { ticketImageExtension } from "./ticketImages.mjs";
 import { runTranscriptPage, transcriptPageAnswer } from "./transcriptPage.mjs";
 import { routeFilled } from "./wire.mjs";
 
+/** The `status` an execution is answered with, which the contract's responses parse by and none of its entries export until kasofsk/chuggy#1185. */
+const executionStatuses = [
+  "Queued",
+  "Admitted",
+  "Launching",
+  "Running",
+  "Terminal",
+  "Cancelled",
+];
+
 const chuggySelectionDescription = `\`selection\` is for a configuration that is a catalog, one whose read_configuration \`canonical\` has \`version\` 2: {work?, evaluation?, finalization?}, each the name of one of its \`workloads\`, \`plans\` or \`finalizers\` the ticket runs on in place of the catalog's \`defaults\`, and a field left out is that default. A draft on any other configuration carries none.`;
 
 /**
@@ -194,7 +200,7 @@ const chuggySubmissionDescription = `Answers the operation's id and its \`state\
 const chuggyProgramShortDescription = `A draft whose program runs less than its configuration plans, leaving out a stage of the selected plan or of a document's \`evaluations\`, or for a catalog an evaluator of a stage it keeps, is released, or its ticket updated to it, only by a caller holding the project's skip_planned_evaluations permit, which its administrators hold; any other caller is answered 403 ProgramSkipsPlannedEvaluations and nothing is submitted, so revise_draft it to run the whole plan, as initialize_draft's \`defaults.program\` does, or ask your owner to have it sent.`;
 
 /** What a new draft is fenced on, which is the project's head and not any one ticket's. */
-const chuggyExpectedProjectSequenceDescription = `The \`fence.projectSequence\` initialize_draft answered: the project's journal head, which every command anywhere in the project moves. Where nothing else has moved it since, the \`decidedSequence\` of your last Succeeded operation is the head to pass next. A stale one is refused (DraftInitializationStale) with the head it is at now as \`currentProjectSequence\`, which the same write may be sent again with; a project that is not active refuses the write at any head (ProjectNotActive), naming its \`lifecycle\`.`;
+const chuggyExpectedProjectSequenceDescription = `The \`fence.projectSequence\` initialize_draft answered: the project's journal head, which only an operation on the project that Succeeded moves, whoever submitted it; no draft write (create_draft, file_dependent, revise_draft, delete_draft) moves it, so drafts filed one after another pass the same head. Where nothing else has moved it since, the \`decidedSequence\` of your last Succeeded operation is the head to pass next. A stale one is refused (DraftInitializationStale) with the head it is at now as \`currentProjectSequence\`, which the same write may be sent again with; a project that is not active refuses the write at any head (ProjectNotActive), naming its \`lifecycle\`.`;
 
 /** The configuration a new draft is filed against, which initialize_draft answered. */
 const chuggyNewDraftConfigurationDescription = {
@@ -1187,7 +1193,7 @@ export const chuggyProjectTools = [
   {
     name: "read_ticket_landings",
     description:
-      "One ticket's landings, each a finalization of its work into its repository. Call it for how a ticket's work lands and what its merge waits on. It answers the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out. A ticket whose work has not reached landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed or Landed, its `cycle`, its `attempts`, and its newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, and the `targetRef` it lands on. A Held landing carries `hold`: its `kind`, what holds it, and `since`, when a hold of that kind began. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on, and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status`, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
+      "One ticket's landings, each a finalization of its work into its repository. Call it for how a ticket's work lands and what its merge waits on. It answers the newest one answer holds, oldest first, and `truncated` where the ticket has older ones this answer leaves out. A ticket whose work has not reached landing has none. Answers JSON. Each landing carries its `state`, such as Running, Held, AwaitingApproval, AwaitingMerge, Proposed (its pull request opened for a person to merge), Failed or Landed, its `cycle`, its `attempts`, and its newest `attempt` where it made one: its `outcome`, its `failureKind` where it failed, and the `targetRef` it lands on. A Held landing carries `hold`: its `kind`, what holds it, and `since`, when a hold of that kind began. An AwaitingMerge landing carries `wait`: its `reason`, what the merge waits on, and `checkedAt`, when the forge was last heard about its merge. A Landed one carries `landedCommit`. `proposal` is the pull request it opened, where it opened one: its `url`, its `headRef` and `baseRef`, its `status` as chuggy last read it, when it opened the pull request and, where it merges it, at each merge reading, so a Proposed landing's is the one it opened with and not followed afterwards, its `mergeability`, and `mergeState`, the forge's own word for that, GitHub's `mergeable_state` such as `blocked`, `behind` or `dirty`. `conflict` is the paths its newest attempt conflicted on, `truncated` where they were cut.",
     shape: (z) => ({ ticket: ticket(z) }),
     call: (context, args) =>
       readTicketLandings(
@@ -1228,10 +1234,16 @@ export const chuggyProjectTools = [
         )
         .optional(),
       state: z
-        .array(z.string().min(1))
-        .max(16)
+        .union([
+          z
+            .array(z.enum(executionStatuses))
+            .min(1)
+            .max(executionStatuses.length)
+            .refine((states) => new Set(states).size === states.length),
+          z.array(z.literal("NonTerminal")).length(1),
+        ])
         .describe(
-          "Only executions in one of these states, each matched exactly as read_execution answers an execution's `state`; left out, every state.",
+          "Only executions whose `status`, as read_execution answers it, is one of these, each named once, or `NonTerminal` alone, every status but Terminal and Cancelled; left out, every status.",
         )
         .optional(),
       cursor: cursor(z),
@@ -1421,8 +1433,10 @@ export const chuggyProjectTools = [
         "The ticket the draft follows from, as list_tickets answers it.",
       ),
       relation: z
-        .enum(allDependentRelations)
-        .describe("`relation` admits FollowUp only."),
+        .enum(dependentRelationsAdmitted)
+        .describe(
+          "`relation` admits FollowUp only; a prerequisite of a ticket is a revise_draft of its draft's dependencies.",
+        ),
       configurationRevision: identity(z).describe(
         chuggyNewDraftConfigurationDescription.configurationRevision,
       ),
@@ -1439,11 +1453,6 @@ export const chuggyProjectTools = [
       selection: anyObject(z).optional().describe(chuggySelectionDescription),
     }),
     call: (context, args) => {
-      if (!dependentRelationsAdmitted.includes(args.relation))
-        return answered(
-          `${args.relation} is not derivable: file_dependent changes no ticket but the draft it files, so ticket ${String(args.parent)} cannot come to depend on that draft here. File a FollowUp instead; a prerequisite of a ticket still in draft is a revise_draft of that draft's dependencies, and of a Pending ticket a revise_draft of its draft's dependencies that update_ticket releases.`,
-          true,
-        );
       const dependencies = args.authoring?.dependencies;
       if (!Array.isArray(dependencies) || !dependencies.includes(args.parent))
         return answered(
