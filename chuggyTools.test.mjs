@@ -2699,6 +2699,7 @@ test("list_executions takes only the states its route takes, named as read_execu
     ["Pending"],
     ["Registered"],
     ["NonTerminal", "Running"],
+    ["Running", "Running"],
     [...statuses, "Queued"],
   ]) {
     const answer = await call("list_executions", { state });

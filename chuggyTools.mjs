@@ -1238,7 +1238,8 @@ export const chuggyProjectTools = [
           z
             .array(z.enum(executionStatuses))
             .min(1)
-            .max(executionStatuses.length),
+            .max(executionStatuses.length)
+            .refine((states) => new Set(states).size === states.length),
           z.array(z.literal("NonTerminal")).length(1),
         ])
         .describe(
