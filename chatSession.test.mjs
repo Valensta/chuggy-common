@@ -28,7 +28,11 @@ import {
   chatSessionsOpened,
 } from "./chatSession.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
-import { poolHeldSessionAnswer } from "./envelope.fixture.mjs";
+import { chatSupervisorCheckout } from "./chatSupervisor.mjs";
+import {
+  memberSessionAnswer,
+  poolHeldSessionAnswer,
+} from "./envelope.fixture.mjs";
 
 const bearer = "chgs_fedcba9876543210fedcba9876543210";
 const assignment = "assignment-1";
@@ -333,6 +337,40 @@ test("a session with no tree is given no group beside its own", async () => {
 
   await sessions.prepared(assignment, envelope, live());
 
+  const [{ args, options }] = system.children;
+  assert.ok(args.includes("--clear-groups"));
+  assert.ok(!args.some((arg) => arg.startsWith("--groups")));
+  assert.equal(options.env[chatCheckoutVariable], "{}");
+});
+
+/**
+ * Catches a member's own session, which no repository binds, handed a mirror
+ * or a clone by the supervisor's own checkout. A mint would ask a plane this
+ * suite does not serve, and the session would not be started.
+ */
+test("a member's own session is started with no tree, and the supervisor mirrors and clones nothing for it", async () => {
+  const system = systemOf();
+  const mirrored = [];
+  const { sessions } = await sessionsOf(
+    system,
+    {},
+    {
+      task: async () => ({ mode: "Session", answer: memberSessionAnswer }),
+      checkout: chatSupervisorCheckout(
+        {},
+        {
+          updated: async (...asked) => {
+            mirrored.push(asked);
+            throw new Error("a member's own session was mirrored for");
+          },
+        },
+      ),
+    },
+  );
+
+  await sessions.prepared(assignment, envelope, live());
+
+  assert.deepEqual(mirrored, []);
   const [{ args, options }] = system.children;
   assert.ok(args.includes("--clear-groups"));
   assert.ok(!args.some((arg) => arg.startsWith("--groups")));

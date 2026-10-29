@@ -1180,6 +1180,67 @@ test("a thread's own objectives ride on the preset prompt, recorded for the conv
   });
 });
 
+/** A member's own thread, as the plane answers its facts: its owner's reserved partition, `MemberRead` alone and objectives of its own. */
+const memberFacts = {
+  ...facts,
+  project: `@member-${"a".repeat(64)}`,
+  kind: "Thread",
+  capabilities: ["MemberRead"],
+  systemPrompt:
+    "# Whose thread this is\n\nYou are geoff's own thread in vteng, opened with no project selected.",
+};
+
+/** Catches a member's own session cloned for, given a tool its roster does not hold, or told objectives other than its own. */
+test("a member's own session runs with no tree, the member tools alone and its own objectives", async () => {
+  const plane = planeOf([], memberFacts, () => undefined, mintedCredential);
+  const { seen, query } = queryOf(() => []);
+  const checkouts = [];
+
+  const code = await run({
+    environment: {
+      ...environment,
+      [sessionTaskVariable]: JSON.stringify({
+        ...task,
+        project: memberFacts.project,
+        kind: "Thread",
+        capabilities: ["MemberRead"],
+      }),
+    },
+    request: plane.request,
+    query,
+    checkout: async (...asked) => {
+      const checkout = await sessionCheckout(...asked);
+      checkouts.push(checkout);
+      return checkout;
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(checkouts, [undefined]);
+  assert.equal(seen.options.cwd, "/workspace");
+  assert.deepEqual(
+    plane.calls.filter(({ path }) => path === "/v1/session/credential"),
+    [],
+  );
+  const member = sessionCapabilityTools.MemberRead;
+  assert.deepEqual(
+    seen.options.mcpServers.chuggy.tools.map(({ name }) => name).sort(),
+    [...member].sort(),
+  );
+  assert.deepEqual(
+    [...seen.options.allowedTools].sort(),
+    member.map((tool) => `${chuggyToolPrefix}${tool}`).sort(),
+  );
+  for (const tool of sessionBuiltInTools)
+    assert.ok(seen.options.disallowedTools.includes(tool), tool);
+  assert.deepEqual(seen.options.systemPrompt, {
+    type: "preset",
+    preset: "claude_code",
+    snapshot: true,
+    append: memberFacts.systemPrompt,
+  });
+});
+
 test("a thread originates through the API under its own session bearer, and answers in text", async () => {
   const plane = planeOf([threadMessageTurn], threadFacts);
   const seenApi = [];

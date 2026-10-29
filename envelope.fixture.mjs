@@ -111,3 +111,11 @@ export const poolHeldSessionAnswer = sessionTaskAnswerSchema.parse({
   },
   model: "pool-model",
 });
+
+/** What the task route answers a member's own thread on their chat host: their reserved partition, `MemberRead` alone, and no repository. */
+export const memberSessionAnswer = sessionTaskAnswerSchema.parse({
+  ...poolHeldSessionAnswer,
+  project: `@member-${"a".repeat(64)}`,
+  kind: "Thread",
+  capabilities: ["MemberRead"],
+});

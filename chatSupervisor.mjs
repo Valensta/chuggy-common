@@ -391,7 +391,7 @@ export function chatSupervised({
  * credential the plane mints for the session's own attempt; it is handed no
  * repository's credential file of its own.
  */
-function chatSupervisorCheckout(environment, mirrors) {
+export function chatSupervisorCheckout(environment, mirrors) {
   const named = environment[workerRepositoriesVariable];
   const repositories =
     named === undefined || named.length === 0 ? {} : workerRepositories(named);

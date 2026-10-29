@@ -11,6 +11,13 @@
  * reaches, so every project tool's route is one of that project's. A decision
  * tool (`./leadDecision.mjs`) writes nothing at all.
  *
+ * A MEMBER'S OWN SESSION READS ITS OWNER AND NO PROJECT. It is placed in the
+ * partition reserved for its owner, which is no project, and the API refuses
+ * its bearer on every project's route, so a member tool's path is built from
+ * the session's tenant alone (`memberPath`) and names no project, not even the
+ * reserved one its task carries. Which tools it holds is its roster, as every
+ * session's is: `MemberRead`, which no project's session is opened with.
+ *
  * A ROSTER IS NOT A CONTROL. `allowedTools` and `disallowedTools` are enforced
  * by the agent runtime inside the pod, and the pod is the thing being
  * controlled. The controls that are not the pod's are the membership, enforced
@@ -335,6 +342,14 @@ function projectPath(context, route, values = {}) {
   return routeFilled(chuggyToolRoutes[route], {
     tenant: context.task.tenant,
     project: context.task.project,
+    ...values,
+  });
+}
+
+/** One of the tools' routes at this session's own tenant, `values` filling the rest of its pattern; a pattern naming a project is refused rather than filled. */
+function memberPath(context, route, values = {}) {
+  return routeFilled(chuggyToolRoutes[route], {
+    tenant: context.task.tenant,
     ...values,
   });
 }
@@ -1616,10 +1631,85 @@ export const chuggyProjectTools = [
 ];
 
 /**
- * Every tool this session holds, project and decision alike, filtered by the
- * capability roster its row carries. A tool the roster does not admit is not
- * registered at all, so the runtime's own tool list is the proof rather than
- * this source.
+ * Every tool a member's own session reads its owner by, each at its tenant
+ * and none at a project, exported as the project tools are. `read_docs`, which
+ * its roster holds too, is the project tools' own and reaches no route.
+ */
+export const chuggyMemberTools = [
+  {
+    name: "read_my_abilities",
+    description:
+      "Who your owner is in this tenant and what they may do there, read live. Call it before saying what your owner may do. `principal` is their principal, encoded as a ticket's `creator` is; `openUnscopedChat`, `executeHosted`, `registerPersonalRunner` and `administerTenant` are the tenant's permits, each true or false.",
+    shape: () => ({}),
+    call: (context) => read(context, memberPath(context, "chatAbilities")),
+  },
+  {
+    name: "list_projects",
+    description:
+      "One page of the projects your owner may see in this tenant, in project order. Call it for which projects there are and how each stands. Each carries its `project`, its `lifecycle` (Active, Suspended, IntegrityBlocked, Deleting or Retention) and `role`, the strongest role your owner holds on it. A page may hold fewer than `limit`, and only `nextAfter`, present, says there are more.",
+    shape: (z) => ({
+      after: identity(z)
+        .describe(
+          "The `nextAfter` the previous page answered, for the page after it; left out, the first page.",
+        )
+        .optional(),
+      limit: limit(z, nativeHttpPageItemsMax),
+    }),
+    call: (context, { after, limit: pageLimit }) =>
+      read(
+        context,
+        `${memberPath(context, "chatProjects")}${search({ after, limit: pageLimit })}`,
+      ),
+  },
+  {
+    name: "list_my_threads",
+    description:
+      "Your owner's threads across this tenant, their own and each project's they may still see. Call it for the session a thread is read by. Each carries its `scope`: Member, a thread of their own kept in no project, which read_my_thread reads, or Project, kept in the `project` it names, of which only this entry is read here. Each also carries its state, its title and when it last moved.",
+    shape: () => ({}),
+    call: (context) => read(context, memberPath(context, "chatThreads")),
+  },
+  {
+    name: "read_my_thread",
+    description:
+      "One page of one of your owner's own threads, kept in no project, newest turn last: its state and that much of its conversation. A project's thread is not read here.",
+    shape: (z) => ({
+      session: identity(z).describe(
+        "The thread's session, as list_my_threads answers it with `scope` Member.",
+      ),
+      before: ordinal(z)
+        .describe(
+          "The `nextBefore` the previous page answered, for the page before it; left out, the newest turns.",
+        )
+        .optional(),
+      limit: limit(z, threadTurnsAnsweredMax),
+    }),
+    call: (context, { session, before, limit: pageLimit }) =>
+      read(
+        context,
+        `${memberPath(context, "chatThread", { session })}${search({ before, limit: pageLimit })}`,
+      ),
+  },
+  {
+    name: "list_my_runners",
+    description:
+      "Your owner's personal runners in this tenant, oldest first, and the projects every one of them may serve. Call it for whether a runner of theirs is registered and taking work. Each carries its `id`, its `capabilities`, when it registered and last polled, `live` and `executionsLive`, whether that poll is recent enough for it to be taking work, and the `runner` release its newest poll named. Answers 404 where they have none.",
+    shape: () => ({}),
+    call: (context) => read(context, memberPath(context, "personalRunner")),
+  },
+  {
+    name: "read_chat_host",
+    description:
+      "Your owner's chat host in this tenant, the machine their own threads run on. Call it for whether it is registered and taking chats. It carries its `id`, when it registered and last polled, `live`, whether that poll is recent enough for it to be taking chats, and the `runner` release its newest poll named. Answers 404 where they have none.",
+    shape: () => ({}),
+    call: (context) => read(context, memberPath(context, "chatHost")),
+  },
+];
+
+/**
+ * Every tool this session holds, project, member and decision alike, filtered
+ * by the capability roster its row carries. A tool the roster does not admit
+ * is not registered at all, so the runtime's own tool list is the proof rather
+ * than this source.
  */
 export function chuggyToolDefinitions(context) {
   const admitted = new Set(
@@ -1627,11 +1717,14 @@ export function chuggyToolDefinitions(context) {
       (held) => sessionCapabilityTools[held] ?? [],
     ),
   );
-  const project = chuggyProjectTools.map((definition) => ({
-    ...definition,
-    call: (args) => definition.call(context, scrubbedArguments(args, context)),
-  }));
-  return [...project, ...context.staging.definitions].filter((definition) =>
+  const served = [...chuggyProjectTools, ...chuggyMemberTools].map(
+    (definition) => ({
+      ...definition,
+      call: (args) =>
+        definition.call(context, scrubbedArguments(args, context)),
+    }),
+  );
+  return [...served, ...context.staging.definitions].filter((definition) =>
     admitted.has(definition.name),
   );
 }
