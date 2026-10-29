@@ -235,12 +235,41 @@ function engineOf(seen, { present, pulls, gate }) {
 }
 
 /**
+ * A host's clock and its waits, each wait taken into `sleeps`: one outlasts
+ * a start the host is making unless `hasty`, so a start takes no time of the
+ * clock, and one the start's end cut short is on the clock by the first time
+ * it is read after, whenever the wait itself notices.
+ */
+function clockOf(sleeps, hasty, starting) {
+  let clock = 0;
+  let owed = 0;
+  const now = () => {
+    if (!starting()) {
+      clock += owed;
+      owed = 0;
+    }
+    return clock;
+  };
+  const sleep = async (ms) => {
+    sleeps.push(ms);
+    if (hasty || !starting()) {
+      clock += ms;
+      return;
+    }
+    owed += ms;
+    while (starting()) await moment();
+    now();
+  };
+  return { now, sleep };
+}
+
+/**
  * A chat host over fakes: `answers` is each poll's answer in turn, a poll
  * past them denied, and `present` the images the engine holds. A pull waits
- * on `gate`; a host's wait outlasts a start it is making unless `hasty`, so
- * a start takes no time of the host's clock. Each supervisor answers as
- * `answering` says, and a start answers what `handed` makes of its handle,
- * given what the host has logged. Its site's engine is `engine`.
+ * on `gate`; its clock is as `clockOf` keeps it, `hasty` or not. Each
+ * supervisor answers as `answering` says, and a start answers what `handed`
+ * makes of its handle, given what the host has logged. Its site's engine is
+ * `engine`.
  */
 async function hostOf(
   t,
@@ -271,10 +300,14 @@ async function hostOf(
   const logged = [];
   const supervisors = [];
   const invalidated = [];
-  let clock = 0;
   let minted = 0;
   /** @type {ReturnType<typeof chatHost> | undefined} */
   let host;
+  const { now, sleep } = clockOf(
+    seen.sleeps,
+    hasty,
+    () => host?.status().starting ?? false,
+  );
   host = chatHost(
     credentials,
     { ...settings, ...given },
@@ -284,7 +317,7 @@ async function hostOf(
       started: (container, engineName) => {
         seen.started.push(container);
         seen.engines.push(engineName);
-        seen.startedMs.push(clock);
+        seen.startedMs.push(now());
         seen.events.push(`started ${container.image}`);
         const supervisor = supervisorOf(3, answering);
         supervisors.push(supervisor);
@@ -292,12 +325,8 @@ async function hostOf(
       },
       log: (line) => logged.push(line),
       logFor: (assignment) => (line) => logged.push(`${assignment}: ${line}`),
-      sleep: async (ms) => {
-        seen.sleeps.push(ms);
-        while (!hasty && host?.status().starting) await moment();
-        clock += ms;
-      },
-      nowMs: () => clock,
+      sleep,
+      nowMs: now,
       tokens: {
         acquire: async () => ({
           acquired: "Token",
@@ -306,7 +335,7 @@ async function hostOf(
         invalidate: (token) => invalidated.push(token),
       },
       fetch: planeOf(seen, answers, supervisors, {
-        nowMs: () => clock,
+        nowMs: now,
         status: () => host?.status(),
       }),
     },
