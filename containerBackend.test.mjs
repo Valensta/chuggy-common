@@ -1048,7 +1048,16 @@ test("a stop drops the end of a failed placement, whether or not held has made i
   await backend.place(assignment({ assignment: "asg-2" }), "Job");
   await backend.settled();
   for (const stopped of ["asg-1", "asg-2"])
-    assert.deepEqual(await backend.stop(stopped), { stopped: "Stopped" });
+    assert.deepEqual(await backend.stop(stopped), {
+      stopped: "Stopped",
+      found: {
+        found: "Ended",
+        ended: {
+          kind: "Job",
+          why: "its container was not started: its image could not be pulled: Error response from daemon: manifest unknown",
+        },
+      },
+    });
   assert.deepEqual(await backend.held(), []);
   assert.deepEqual(await backend.ended(), []);
 });
@@ -1093,7 +1102,7 @@ test("a stop that lands while held is under way keeps an in-flight placement's e
   await setImmediate();
   assert.deepEqual(await Promise.all([backend.held(), backend.stop("asg-1")]), [
     heldJobs("asg-1"),
-    { stopped: "Stopped" },
+    { stopped: "Stopped", found: { found: "Running" } },
   ]);
   assert.deepEqual(await backend.held(), []);
   assert.deepEqual(await backend.ended(), []);
@@ -1158,7 +1167,10 @@ test("a container a run named before names were scoped by project is held, and s
     `chuggy-shame-${digest.slice(0, 20)}`,
   );
   assert.deepEqual(await backend.held(), listedJobs("asg-2"));
-  assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-2"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   assert.equal(state.containers.has(name), false);
 });
 
@@ -1182,7 +1194,10 @@ test("a stop of an in-flight placement cancels its pull, and nothing is run", as
   state.pull = () => new Promise(() => undefined);
   await backend.place(assignment(), "Job");
   await setImmediate();
-  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-1"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   assert.deepEqual(backend.inFlight(), []);
   assert.deepEqual(await backend.held(), []);
   assert.ok(!verbs(state).includes("run"));
@@ -1193,7 +1208,10 @@ test("a stop of an in-flight placement cancels its pull, and nothing is run", as
 test("a stop of a running container kills it, saves its logs, and removes it with its volumes", async (t) => {
   const { backend, state, settings, log } = await harness(t);
   const name = seeded(state, "asg-2", "running", startMs / 1000 + 60);
-  assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-2"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   assert.deepEqual(
     state.calls.map((call) => call.argv),
     [
@@ -1227,7 +1245,20 @@ test("a stop of a running container kills it, saves its logs, and removes it wit
 test("a stop of a job that ended on its own just before saves its logs and removes it", async (t) => {
   const { backend, state, settings } = await harness(t);
   const name = seeded(state, "asg-2", "exited", startMs / 1000 + 60);
-  assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
+  const container = state.containers.get(name);
+  assert.ok(container !== undefined);
+  container.exitCode = 0;
+  assert.deepEqual(await backend.stop("asg-2"), {
+    stopped: "Stopped",
+    found: {
+      found: "Ended",
+      ended: {
+        kind: "Job",
+        why: "its container exited with status 0",
+        ran: "Succeeded",
+      },
+    },
+  });
   assert.deepEqual(verbs(state), ["ps", "kill", "container", "logs", "rm"]);
   assert.equal(state.containers.size, 0);
   assert.equal(
@@ -1240,7 +1271,10 @@ test("a stop whose logs could not be saved ends the job, and keeps its container
   const { backend, state, settings, log } = await harness(t);
   const name = seeded(state, "asg-2", "running", startMs / 1000 + 60);
   state.logsFail = true;
-  assert.deepEqual(await backend.stop("asg-2"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-2"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   assert.equal(state.containers.get(name)?.status, "exited");
   assert.ok(!verbs(state).includes("rm"));
   assert.match(
@@ -1775,8 +1809,14 @@ test("a session is stopped by its assignment as a job is, and its end is never n
   state.pull = () => ({ code: 1, stdout: "", stderr: "manifest unknown\n" });
   await backend.place(assignment({ assignment: "ses-2" }), "Session");
   await backend.settled();
-  assert.deepEqual(await backend.stop("ses-1"), { stopped: "Stopped" });
-  assert.deepEqual(await backend.stop("ses-2"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("ses-1"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
+  assert.deepEqual(await backend.stop("ses-2"), {
+    stopped: "Stopped",
+    found: { found: "Ended", ended: { kind: "Session", phase: "Failed" } },
+  });
   assert.equal(state.containers.has(name), false);
   assert.deepEqual(await backend.held(), []);
   assert.deepEqual(await backend.ended(), []);
@@ -2856,7 +2896,10 @@ test("a stop while the runtime is copied removes the container copying it, then 
   await backend.place(assignment({ runtime }), "Job");
   const fill = await fillHeld(state);
   assert.ok(state.containers.has(fill));
-  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-1"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   await backend.settled();
   assert.equal(state.containers.size, 0);
   assert.equal(state.volumes.size, 0);
@@ -2897,7 +2940,10 @@ test("a stop while a job's run is answered as an unstarted shell names no refusa
     await setImmediate();
   const stopping = backend.stop("asg-1");
   run.resolve(unstartedEntrypoint("/bin/sh"));
-  assert.deepEqual(await stopping, { stopped: "Stopped" });
+  assert.deepEqual(await stopping, {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   assert.ok(!log.some((line) => line.includes("was refused")), log.join("\n"));
   assert.ok(log.some((line) => line.endsWith("was stopped before it started")));
   assert.deepEqual(await endsNamed(backend), []);
@@ -3041,7 +3087,10 @@ test("a sweep leaves the volumes of a placement that began after held read its p
   assert.equal(state.volumes.size, 2);
   assert.ok(state.containers.has(fill));
   assert.ok(!state.calls.some(({ argv }) => argv.includes("--force")));
-  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-1"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
 });
 
 test("a sweep the engine could not answer is logged, and made again at the next held", async (t) => {
@@ -5161,7 +5210,10 @@ test("a held job stopped, or too near its deadline to start, leaves no hold", as
   await backend.place(assignment({ memoryMib: 4096 }), "Job");
   await until(() => waiting() === 1);
   assert.equal(holdNames(state).length, 1);
-  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-1"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   assert.deepEqual(holdNames(state), []);
   const name = containerName(pool, "asg-1");
   assert.ok(log.includes(`${name} was stopped before it started`));

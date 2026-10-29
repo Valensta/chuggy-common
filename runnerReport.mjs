@@ -6,10 +6,14 @@
  * WHAT IT COUNTS IS WHAT THE RUNNER ALREADY DOES, seen through its own plane
  * and backend, wrapped: each poll and whether its answer named a release,
  * which only the plane's own does; each settlement by its outcome, and each
- * refusal by its image's fault; each job's end by how it ended, a stop this
- * pool made and a placement its backend refused included; each session's end
- * by its phase; and what its last `held` found running of each kind. Its
- * backend measures its image pulls and its runs. Every count is since this
+ * refusal by its image's fault; each job's end by how it ended, a placement
+ * its backend refused included; each session's end by its phase; and what its
+ * last `held` found running of each kind. A workload its pool stops is counted
+ * as the stop found it: by its own end where it had ended, as `Stopped` where
+ * it was a job still running, and not at all where its backend cannot tell or
+ * it was a session still running. Each workload is counted once, whether
+ * `ended` or a stop sees its end first. Its backend measures its image pulls
+ * and its runs. Every count is since this
  * process made the client, and nothing a wrapper counts changes what the
  * wrapped call does or answers.
  *
@@ -51,6 +55,7 @@ import {
  * @typedef {import("./poolLoop.mjs").WorkerPoolPlane} WorkerPoolPlane
  * @typedef {import("./poolLoop.mjs").WorkerPoolWorkloadKind} WorkerPoolWorkloadKind
  * @typedef {import("./poolLoop.mjs").WorkerPoolEnded} WorkerPoolEnded
+ * @typedef {import("./poolLoop.mjs").WorkerPoolStopEnded} WorkerPoolStopEnded
  *
  * @typedef {{bucketCounts: number[], sumSecs: number}} RunnerHistogram
  * @typedef {{imagePullSecs: RunnerHistogram, runSecs: Record<WorkerPoolWorkloadKind, RunnerHistogram>}} RunnerMeasured
@@ -198,6 +203,7 @@ export function runnerReportTaken(version) {
  * @property {Record<string, number>} jobsEnded
  * @property {Record<string, number>} sessionsEnded
  * @property {Map<string, WorkerPoolWorkloadKind>} held what the last `held` found, by assignment
+ * @property {Set<string>} counted the assignments whose end is counted, each kept until an `ended` after a `held` that no longer found it
  *
  * @typedef {object} RunnerReportState
  * @property {WorkerPoolClient} client the one reporting, whose settings are read as each report is made
@@ -223,10 +229,59 @@ function runnerReportCounted(tally, label) {
 /**
  * How a job's end is counted.
  *
- * @param {Extract<WorkerPoolEnded, {kind: "Job"}>} ended
+ * @param {Extract<WorkerPoolStopEnded, {kind: "Job"}>} ended
  */
 function runnerReportJobEnd(ended) {
   return ended.killed ?? ended.ran ?? "PlacementFailed";
+}
+
+/**
+ * Counts a workload's end under `label`, unless its assignment's is counted
+ * already.
+ *
+ * @param {RunnerReportCounts} counts
+ * @param {string} assignment
+ * @param {Record<string, number>} tally
+ * @param {string} label
+ */
+function runnerReportEnded(counts, assignment, tally, label) {
+  if (counts.counted.has(assignment)) return;
+  counts.counted.add(assignment);
+  runnerReportCounted(tally, label);
+}
+
+/**
+ * Counts how a workload ended, its end given.
+ *
+ * @param {RunnerReportCounts} counts
+ * @param {string} assignment
+ * @param {WorkerPoolStopEnded} ended
+ */
+function runnerReportEnd(counts, assignment, ended) {
+  if (ended.kind === "Job")
+    runnerReportEnded(
+      counts,
+      assignment,
+      counts.jobsEnded,
+      runnerReportJobEnd(ended),
+    );
+  else runnerReportEnded(counts, assignment, counts.sessionsEnded, ended.phase);
+}
+
+/**
+ * Counts what a stop of a workload the last `held` found found of it.
+ *
+ * @param {RunnerReportCounts} counts
+ * @param {string} assignment
+ * @param {import("./poolLoop.mjs").WorkerPoolStopped} stopped
+ */
+function runnerReportStopped(counts, assignment, stopped) {
+  const kind = counts.held.get(assignment);
+  if (stopped.stopped !== "Stopped" || kind === undefined) return;
+  if (stopped.found?.found === "Ended")
+    runnerReportEnd(counts, assignment, stopped.found.ended);
+  else if (stopped.found?.found === "Running" && kind === "Job")
+    runnerReportEnded(counts, assignment, counts.jobsEnded, "Stopped");
 }
 
 /**
@@ -280,9 +335,15 @@ function runnerReportBackend(counts, backend) {
     ended: async () => {
       const ended = await backend.ended();
       for (const workload of ended)
-        if (workload.kind === "Job")
-          runnerReportCounted(counts.jobsEnded, runnerReportJobEnd(workload));
-        else runnerReportCounted(counts.sessionsEnded, workload.phase);
+        runnerReportEnd(
+          counts,
+          workload.kind === "Job"
+            ? workload.job.assignment
+            : workload.session.assignment,
+          workload,
+        );
+      for (const assignment of counts.counted)
+        if (!counts.held.has(assignment)) counts.counted.delete(assignment);
       return ended;
     },
     place: /** @type {WorkerPoolBackend["place"]} */ (
@@ -298,11 +359,7 @@ function runnerReportBackend(counts, backend) {
     ),
     stop: async (assignment) => {
       const stopped = await backend.stop(assignment);
-      if (
-        stopped.stopped === "Stopped" &&
-        counts.held.get(assignment) === "Job"
-      )
-        runnerReportCounted(counts.jobsEnded, "Stopped");
+      runnerReportStopped(counts, assignment, stopped);
       return stopped;
     },
   };
@@ -499,6 +556,7 @@ export function runnerReporting(client, seams) {
       jobsEnded: {},
       sessionsEnded: {},
       held: new Map(),
+      counted: new Set(),
     },
     version: undefined,
     token: undefined,

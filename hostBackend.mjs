@@ -288,6 +288,25 @@ function hostJobEndedWhy(job, code, signal) {
 }
 
 /**
+ * How a job's process ended: killed where its deadline killed it, and
+ * otherwise as it exited.
+ *
+ * @param {HostJob} job
+ * @param {number | null} code
+ * @param {NodeJS.Signals | null} signal
+ * @returns {Extract<import("./poolLoop.mjs").WorkerPoolStopEnded, {kind: "Job"}>}
+ */
+function hostJobEnd(job, code, signal) {
+  return {
+    kind: "Job",
+    why: hostJobEndedWhy(job, code, signal),
+    ...(job.expired
+      ? { killed: /** @type {const} */ ("Deadline") }
+      : { ran: signal === null && code === 0 ? "Succeeded" : "Failed" }),
+  };
+}
+
+/**
  * Settles once a child has started, or throws why it could not.
  *
  * @param {ChildProcess} child
@@ -517,17 +536,12 @@ function hostJobWatched(state, job, name, log, deadlineSecs) {
           if (state.jobs.get(job.assignment) === job)
             state.jobs.delete(job.assignment);
           if (!job.stopped) {
-            const why = hostJobEndedWhy(job, code, signal);
-            state.seams.log(`${name} ended: ${why}`);
+            state.seams.log(
+              `${name} ended: ${hostJobEndedWhy(job, code, signal)}`,
+            );
             state.pending.push({
-              kind: "Job",
+              ...hostJobEnd(job, code, signal),
               job: job.attempt,
-              why,
-              ...(job.expired
-                ? { killed: "Deadline" }
-                : {
-                    ran: signal === null && code === 0 ? "Succeeded" : "Failed",
-                  }),
             });
           }
           settle();
@@ -589,6 +603,10 @@ async function hostPlaced(state, assignment, kind) {
 }
 
 /**
+ * Stops a job, answering whether it found the job's process running, or
+ * already exited or killed at its deadline, and how. One it no longer holds
+ * has ended, and its end is named.
+ *
  * @param {State} state
  * @param {string} assignment
  * @returns {Promise<WorkerPoolStopped>}
@@ -596,9 +614,15 @@ async function hostPlaced(state, assignment, kind) {
 async function hostStopped(state, assignment) {
   const job = state.jobs.get(assignment);
   if (job === undefined) return { stopped: "Stopped" };
+  const { exitCode, signalCode } = job.child;
+  /** @type {import("./poolLoop.mjs").WorkerPoolStopFound} */
+  const found =
+    job.expired || exitCode !== null || signalCode !== null
+      ? { found: "Ended", ended: hostJobEnd(job, exitCode, signalCode) }
+      : { found: "Running" };
   job.stopped = true;
   await hostJobEnded(state, job);
-  return { stopped: "Stopped" };
+  return { stopped: "Stopped", found };
 }
 
 /**
