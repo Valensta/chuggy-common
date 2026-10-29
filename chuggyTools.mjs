@@ -1639,14 +1639,14 @@ export const chuggyMemberTools = [
   {
     name: "read_my_abilities",
     description:
-      "Who your owner is in this tenant and what they may do there, read live. Call it before saying what your owner may do. `principal` is their principal, encoded as a ticket's `creator` is; `openUnscopedChat`, `executeHosted`, `registerPersonalRunner` and `administerTenant` are the tenant's permits, each true or false.",
+      "Who your owner is in this tenant and what they may do there, read live. Call it before saying what your owner may do. Answers JSON: `principal`, their principal, encoded as a ticket's `creator` is, and the tenant's permits `openUnscopedChat`, `executeHosted`, `registerPersonalRunner` and `administerTenant`, each true or false.",
     shape: () => ({}),
     call: (context) => read(context, memberPath(context, "chatAbilities")),
   },
   {
     name: "list_projects",
     description:
-      "One page of the projects your owner may see in this tenant, in project order. Call it for which projects there are and how each stands. Each carries its `project`, its `lifecycle` (Active, Suspended, IntegrityBlocked, Deleting or Retention) and `role`, the strongest role your owner holds on it. A page may hold fewer than `limit`, and only `nextAfter`, present, says there are more.",
+      "One page of the projects your owner may see in this tenant, in identity order, none in retention. Call it for which projects there are and how each stands. Answers JSON: `projects`, each its `project`, its `lifecycle` (Active, Suspended, IntegrityBlocked or Deleting) and `role`, the strongest role your owner holds on it, and `nextAfter`. A page reads `limit` of the tenant's projects and keeps those your owner may see, so it may hold fewer, or none, and only `nextAfter`, present, says there are more.",
     shape: (z) => ({
       after: identity(z)
         .describe(
@@ -1664,14 +1664,14 @@ export const chuggyMemberTools = [
   {
     name: "list_my_threads",
     description:
-      "Your owner's threads across this tenant, their own and each project's they may still see. Call it for the session a thread is read by. Each carries its `scope`: Member, a thread of their own kept in no project, which read_my_thread reads, or Project, kept in the `project` it names, of which only this entry is read here. Each also carries its state, its title and when it last moved.",
+      "Your owner's threads across this tenant, their own and each project's they may still see. Their own open threads come first, then their other open ones, then the rest, each by when it last moved, newest first, as many as one answer holds, so an older one past them is not listed. Call it for the session a thread is read by. Answers JSON: `threads`, each its `session` and its `scope`: Member, a thread of their own kept in no project, which read_my_thread reads, or Project, kept in the `project` it names, of which only this entry is read here. Each also carries its `state` (Open or Closed), its `title` where it has one, `turns`, how many it holds, `openedAt`, `lastActivityAt`, when it last moved, and `hidden`, whether it is off their rail.",
     shape: () => ({}),
     call: (context) => read(context, memberPath(context, "chatThreads")),
   },
   {
     name: "read_my_thread",
     description:
-      "One page of one of your owner's own threads, kept in no project, newest turn last: its state and that much of its conversation. A project's thread is not read here.",
+      "One page of one of your owner's own threads, kept in no project. Answers JSON: the thread's `state`, `title` and `lastActivityAt` as list_my_threads answers them, and `turns`, the newest before `before`, oldest first, each its `ordinal`, its `state`, the `input` your owner sent and its `result` and `failure` where it has them; `nextBefore`, present, is the cursor for the turns before them. A project's thread, or a session that is not one of theirs, is answered 404.",
     shape: (z) => ({
       session: identity(z).describe(
         "The thread's session, as list_my_threads answers it with `scope` Member.",
@@ -1692,14 +1692,14 @@ export const chuggyMemberTools = [
   {
     name: "list_my_runners",
     description:
-      "Your owner's personal runners in this tenant, oldest first, and the projects every one of them may serve. Call it for whether a runner of theirs is registered and taking work. Each carries its `id`, its `capabilities`, when it registered and last polled, `live` and `executionsLive`, whether that poll is recent enough for it to be taking work, and the `runner` release its newest poll named. Answers 404 where they have none.",
+      "Your owner's personal runners in this tenant, oldest first, and the projects every one of them may serve. Call it for whether a runner of theirs is registered and taking work. Answers JSON: `runners`, each its `id`, its `capabilities`, `registeredAt`, `polledAt`, its newest poll, absent until it polls, `live`, whether that poll is recent enough for it to be taking work, `executionsLive`, the same of its newest poll for executions alone, which may be older, and `runner`, the `package` and `version` that poll named and the version chuggy `pinned` for it where it pins one, absent where it named none; and `projects`. Answers 404 where they have none.",
     shape: () => ({}),
     call: (context) => read(context, memberPath(context, "personalRunner")),
   },
   {
     name: "read_chat_host",
     description:
-      "Your owner's chat host in this tenant, the machine their own threads run on. Call it for whether it is registered and taking chats. It carries its `id`, when it registered and last polled, `live`, whether that poll is recent enough for it to be taking chats, and the `runner` release its newest poll named. Answers 404 where they have none.",
+      "Your owner's chat host in this tenant, the machine their own threads run on. Call it for whether it is registered and taking chats. Answers JSON: its `id`, `registeredAt`, `polledAt`, its newest poll, absent until it polls, `live`, whether that poll is recent enough for it to be taking chats, and `runner`, the `package` and `version` that poll named and the version chuggy `pinned` for it where it pins one, absent where it named none. Answers 404 where they have none.",
     shape: () => ({}),
     call: (context) => read(context, memberPath(context, "chatHost")),
   },

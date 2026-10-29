@@ -3408,6 +3408,58 @@ test("a member tool refuses arguments outside its shape and asks nothing", async
   assert.deepEqual(calls, []);
 });
 
+/**
+ * Each member tool names the fields its route answers and what that route
+ * leaves out: projects in retention are never listed, the thread listing is
+ * capped with no marker of what it cut, a project's thread and a member with
+ * no runner or host are each answered 404, and a page's turns are oldest first.
+ */
+test("each member tool is described as its route answers it", () => {
+  const described = (tool) =>
+    chuggyMemberTools.find(({ name }) => name === tool).description;
+  const claims = {
+    read_my_abilities: [
+      /`principal`, their principal, encoded as a ticket's `creator` is/,
+      /`openUnscopedChat`, `executeHosted`, `registerPersonalRunner` and `administerTenant`, each true or false/,
+    ],
+    list_projects: [
+      /in identity order, none in retention/,
+      /its `lifecycle` \(Active, Suspended, IntegrityBlocked or Deleting\) and `role`/,
+      /may hold fewer, or none, and only `nextAfter`, present, says there are more/,
+    ],
+    list_my_threads: [
+      /Their own open threads come first, then their other open ones, then the rest, each by when it last moved, newest first/,
+      /as many as one answer holds, so an older one past them is not listed/,
+      /its `state` \(Open or Closed\)/,
+      /`lastActivityAt`, when it last moved, and `hidden`/,
+    ],
+    read_my_thread: [
+      /`turns`, the newest before `before`, oldest first/,
+      /`nextBefore`, present, is the cursor for the turns before them/,
+      /A project's thread, or a session that is not one of theirs, is answered 404/,
+    ],
+    list_my_runners: [
+      /`polledAt`, its newest poll, absent until it polls, `live`/,
+      /`executionsLive`, the same of its newest poll for executions alone, which may be older/,
+      /the version chuggy `pinned` for it where it pins one, absent where it named none; and `projects`/,
+      /Answers 404 where they have none/,
+    ],
+    read_chat_host: [
+      /`polledAt`, its newest poll, absent until it polls, `live`/,
+      /the version chuggy `pinned` for it where it pins one, absent where it named none/,
+      /Answers 404 where they have none/,
+    ],
+  };
+  assert.deepEqual(
+    Object.keys(claims).sort(),
+    chuggyMemberTools.map(({ name }) => name).sort(),
+  );
+  for (const [tool, said] of Object.entries(claims))
+    for (const claim of said) assert.match(described(tool), claim, tool);
+  assert.doesNotMatch(described("list_projects"), /Retention\)/);
+  assert.doesNotMatch(described("list_my_threads"), /Orphaned/);
+});
+
 /** The `limit` one request asked with, or nothing where it asked with none. */
 function limitAsked({ path }) {
   const asked = new URL(path, task.api.url).searchParams.get("limit");
