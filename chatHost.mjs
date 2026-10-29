@@ -23,6 +23,12 @@
  * could not be started, or ended of itself, is started again no sooner than
  * a backoff after.
  *
+ * A SESSION IS STOPPED ONCE. It is held until its supervisor answers the
+ * stop, and the plane answers at once a poll holding it, naming it to stop
+ * again; the host takes that as the stop it already made, and a pass that
+ * placed nothing while one is held waits `chatHostStoppingWaitMs` before it
+ * polls again.
+ *
  * THE SUPERVISOR'S CONTAINER IS ROOT WITH THE FEW CAPABILITIES IT NEEDS to
  * make each session's user, directories and mirrors and to drop to that
  * user, and gains none. Its memory is capped at room for each session the
@@ -286,6 +292,9 @@ export const chatHostStopWaitMs =
 
 /** The wait between polls of a host with no room, which ask for an answer at once. */
 export const chatHostUnreadyWaitMs = 5_000;
+
+/** The wait between polls of a host holding a session it was told to stop, which the plane answers at once. */
+export const chatHostStoppingWaitMs = 1_000;
 
 /** The least time between starts of a supervisor, after one that failed or ended of itself. */
 export const chatHostRestartBackoffMs = 30_000;
@@ -746,7 +755,8 @@ function chatHostFollowed(state, draining, idle) {
 
 /**
  * The plane a pass polls: asking for an answer at once while the host has
- * no room, and keeping the image each answer names.
+ * no room, keeping the image each answer names, and naming no stop of a
+ * session already stopping.
  *
  * @param {ChatHostState} state
  * @param {WorkerPoolClient["plane"]} plane
@@ -770,7 +780,12 @@ function chatHostPlane(state, plane) {
           );
         state.named = polled.chatImage;
       }
-      return polled;
+      if (polled.polled !== "Reconciled") return polled;
+      const stopping = state.backend.stopping();
+      return {
+        ...polled,
+        stop: polled.stop.filter((stop) => !stopping.includes(stop)),
+      };
     },
   };
 }
@@ -1049,6 +1064,8 @@ async function chatHostRun(state) {
       if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
         seams.log(poolRunnerPassLine(pass));
       if (waiting) await chatHostUnready(state);
+      else if (pass.placed === 0 && state.backend.stopping().length > 0)
+        await seams.sleep(chatHostStoppingWaitMs);
       else if (pass.claim !== undefined)
         await seams.sleep(workerPoolClaimWaitMs);
     }

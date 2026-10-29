@@ -40,6 +40,7 @@ import {
   chatHostStatusAsked,
   chatHostStatusLines,
   chatHostStopWaitMs,
+  chatHostStoppingWaitMs,
   chatHostUnreadyWaitMs,
   chatHostVolumes,
   chatImagePulled,
@@ -121,15 +122,20 @@ async function settled() {
 /**
  * A supervisor answering as the protocol says, of `sessionsMax`: each
  * session started at once, and, told to drain, each ended and itself gone,
- * or, `lingering`, once `finish` is called; `frames` is what the host wrote
- * it.
+ * or, `lingering`, once `finish` is called; each told to stop ended at once,
+ * or, `holding`, once `stopsEnded` is called; `frames` is what the host
+ * wrote it.
  */
-function supervisorOf(sessionsMax = 3, lingering = false) {
+function supervisorOf(
+  sessionsMax = 3,
+  { lingering = false, holding = false } = {},
+) {
   const input = new PassThrough();
   const output = new PassThrough();
   const errors = new PassThrough();
   const frames = [];
   const running = new Set();
+  const stopped = new Set();
   let exit;
   const exited = new Promise((resolve) => {
     exit = resolve;
@@ -146,6 +152,11 @@ function supervisorOf(sessionsMax = 3, lingering = false) {
     say({ frame: "Drained" });
     gone();
   };
+  const stopsEnded = () => {
+    for (const assignment of stopped)
+      say({ frame: "Ended", assignment, phase: "Failed" });
+    stopped.clear();
+  };
   let pending = "";
   input.on("data", (chunk) => {
     pending += String(chunk);
@@ -156,9 +167,10 @@ function supervisorOf(sessionsMax = 3, lingering = false) {
       if (frame.frame === "Start") {
         running.add(frame.assignment);
         say({ frame: "Started", assignment: frame.assignment });
-      } else if (frame.frame === "Stop" && running.delete(frame.assignment))
-        say({ frame: "Ended", assignment: frame.assignment, phase: "Failed" });
-      else if (frame.frame === "Drain" && !lingering) finish();
+      } else if (frame.frame === "Stop" && running.delete(frame.assignment)) {
+        stopped.add(frame.assignment);
+        if (!holding) stopsEnded();
+      } else if (frame.frame === "Drain" && !lingering) finish();
     }
   });
   input.on("finish", gone);
@@ -171,6 +183,7 @@ function supervisorOf(sessionsMax = 3, lingering = false) {
   return {
     frames,
     finish,
+    stopsEnded,
     crash: gone,
     handle: { input, output, errors, exited, kill: gone },
   };
@@ -225,9 +238,9 @@ function engineOf(seen, { present, pulls, gate }) {
  * A chat host over fakes: `answers` is each poll's answer in turn, a poll
  * past them denied, and `present` the images the engine holds. A pull waits
  * on `gate`; a host's wait outlasts a start it is making unless `hasty`, so
- * a start takes no time of the host's clock. A start answers what `handed`
- * makes of each supervisor's handle, given what the host has logged. Its
- * site's engine is `engine`.
+ * a start takes no time of the host's clock. Each supervisor answers as
+ * `answering` says, and a start answers what `handed` makes of its handle,
+ * given what the host has logged. Its site's engine is `engine`.
  */
 async function hostOf(
   t,
@@ -238,7 +251,7 @@ async function hostOf(
     given = {},
     gate,
     hasty = false,
-    lingering = false,
+    answering = {},
     handed = (handle) => handle,
     engine = "docker",
   },
@@ -273,7 +286,7 @@ async function hostOf(
         seen.engines.push(engineName);
         seen.startedMs.push(clock);
         seen.events.push(`started ${container.image}`);
-        const supervisor = supervisorOf(3, lingering);
+        const supervisor = supervisorOf(3, answering);
         supervisors.push(supervisor);
         return handed(supervisor.handle, logged);
       },
@@ -434,7 +447,7 @@ test("a drained supervisor's sessions are named as ended before a supervisor is 
       { chatImage: two },
       { chatImage: two },
     ],
-    lingering: true,
+    answering: { lingering: true },
   });
   await run.host.run();
   assert.deepEqual(run.seen.ended, ["Succeeded"]);
@@ -444,6 +457,52 @@ test("a drained supervisor's sessions are named as ended before a supervisor is 
     events.join(", "),
   );
   assert.deepEqual(run.host.status().used, two);
+});
+
+test("a session stopped is stopped once while its supervisor ends it, and the polls the plane answers at once with its stop meanwhile are a wait apart unless one placed a session", async (t) => {
+  const named = { chatImage: one };
+  const stop = { chatImage: one, stop: ["a"] };
+  const run = await hostOf(t, {
+    answers: [
+      named,
+      { chatImage: one, sessions: [sessionOf("a")] },
+      stop,
+      { ...stop, sessions: [sessionOf("b")] },
+      stop,
+      stop,
+      (supervisors) => {
+        supervisors[0].stopsEnded();
+        return named;
+      },
+      named,
+    ],
+    given: { sessionsMax: 3 },
+    answering: { holding: true },
+  });
+  assert.equal((await run.host.run()).passed, "Denied");
+  assert.deepEqual(
+    run.supervisors[0].frames.map(({ frame }) => frame),
+    ["Start", "Stop", "Start"],
+  );
+  assert.deepEqual(
+    run.seen.polls.map(({ held }) => held),
+    [[], [], ["a"], ["a"], ["a", "b"], ["a", "b"], ["a", "b"], ["b"], ["b"]],
+  );
+  assert.deepEqual(run.seen.sleeps, [
+    chatHostUnreadyWaitMs,
+    chatHostStoppingWaitMs,
+    chatHostStoppingWaitMs,
+    chatHostStoppingWaitMs,
+  ]);
+  assert.deepEqual(
+    run.logged.filter((line) => line.startsWith("placed ")),
+    [
+      "placed 1, stopped 0, refused 0",
+      "placed 0, stopped 1, refused 0",
+      "placed 1, stopped 0, refused 0",
+    ],
+  );
+  assert.deepEqual(run.seen.ended, []);
 });
 
 test("a host goes on polling while its image is pulled, and a pull the host's end cuts short starts nothing", async (t) => {

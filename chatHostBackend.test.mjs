@@ -281,7 +281,7 @@ test("each answer to a Start is named by ended once, in the phase the supervisor
   );
 });
 
-test("a session stopped is stopped once, held until it is answered, and never named by ended", async () => {
+test("a session stopped is stopped once, held and stopping until it is answered, and never named by ended", async () => {
   const host = await readyHost();
   for (const assignment of ["a", "b"])
     await host.backend.place(sessionOf(assignment), "Session");
@@ -302,12 +302,14 @@ test("a session stopped is stopped once, held until it is answered, and never na
     (await host.backend.held()).map(({ assignment }) => assignment),
     ["a", "b"],
   );
+  assert.deepEqual(host.backend.stopping(), ["a", "b"]);
   host.say(
     { frame: "Refused", assignment: "a", reason: "Stopped" },
     { frame: "Ended", assignment: "b", phase: "Failed" },
   );
   await settled();
   assert.deepEqual(await host.backend.held(), []);
+  assert.deepEqual(host.backend.stopping(), []);
   assert.deepEqual(await host.backend.ended(), []);
 });
 
