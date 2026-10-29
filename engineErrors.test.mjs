@@ -84,6 +84,20 @@ const sourced = {
     // Its containerd store, daemon/containerd/image.go: `errPlatformNotFound`.
     "Error response from daemon: image with reference chuggy/worker-runtime:1 was found but does not provide the specified platform (linux/amd64)",
   ],
+  PlatformUnbuilt: [
+    // docker's classic store, moby's daemon/internal/distribution/pull_v2.go:
+    // `noMatchesErr.Error`, an index pulled with no build for the platform.
+    "Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries",
+    // Its containerd store, daemon/containerd/image_pull.go:
+    // `ImageService.pullTag`, wrapping containerd's own words.
+    "Error response from daemon: no matching manifest for linux/arm64/v8 in the manifest list entries: no match for platform in manifest: not found",
+    // podman, containers/container-libs's image/internal/manifest/oci_index.go
+    // and docker_schema2_list.go: `ChooseInstanceByCompression`, wrapped by
+    // image/copy/copy.go's `Image` and common/libimage/copier.go's
+    // `Copier.copyToStorage`.
+    'Trying to pull docker.io/splunk/splunk:latest...\nError: unable to copy from source docker://splunk/splunk:latest: choosing an image from manifest list docker://splunk/splunk:latest: no image found in image index for architecture "arm64", variant "v8", OS "linux"',
+    'Error: unable to copy from source docker://splunk/splunk:latest: choosing an image from manifest list docker://splunk/splunk:latest: no image found in manifest list for architecture "arm64", variant "v8", OS "linux"',
+  ],
   FlagUnknown: [
     // docker's CLI before 28.1, whose `image inspect` takes no `--platform`,
     // in the words of pflag's flag.go: `FlagSet.parseLongArg`.

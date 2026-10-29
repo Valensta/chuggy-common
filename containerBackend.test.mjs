@@ -2573,6 +2573,157 @@ test("a docker whose inspection takes no platform holds the runtime for none but
   assert.deepEqual(await backend.held(), listedJobs("asg-1"));
 });
 
+/** The platform an arm64 engine pulls for where a pull names none, as docker names it. */
+const enginePlatformArm = "linux/arm64/v8";
+
+/**
+ * What each engine prints of a pull of an image index with no build for
+ * `platform`, in the words `engineErrors.test.mjs` sources.
+ */
+const platformUnbuiltSaid = {
+  docker: (/** @type {string} */ platform) =>
+    `Error response from daemon: no matching manifest for ${platform} in the manifest list entries: no match for platform in manifest: not found`,
+  podman: (/** @type {string} */ platform) => {
+    const [os, architecture, variant = ""] = platform.split("/");
+    return `Trying to pull ${image}...\nError: unable to copy from source docker://${image}: choosing an image from manifest list docker://${image}: no image found in image index for architecture "${architecture}", variant "${variant}", OS "${os}"`;
+  },
+};
+
+/**
+ * A harness whose engine is arm64 and whose registry holds the job's image as
+ * `builds` names it: an index of builds for those platforms, or, where none,
+ * a single-platform amd64 manifest, which an engine pulls whatever its own
+ * platform. Any other image is pulled as the engine pulls it.
+ *
+ * @param {import("node:test").TestContext} t
+ * @param {"docker" | "podman"} engine
+ * @param {string[] | undefined} builds
+ */
+async function emulatingHarness(t, engine, builds) {
+  const context = await harness(t, {
+    engine,
+    dockerHost: engine === "docker" ? "unix:///var/run/docker.sock" : undefined,
+  });
+  const { state } = context;
+  state.pull = (pulled, { argv }) => {
+    if (pulled !== image || builds === undefined) {
+      state.images.add(pulled);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    const wanted = argv.includes("--platform")
+      ? argv[argv.indexOf("--platform") + 1]
+      : enginePlatformArm;
+    const [, wantedArchitecture] = wanted.split("/");
+    const built = builds.find(
+      (platform) => platform.split("/")[1] === wantedArchitecture,
+    );
+    if (built === undefined)
+      return failedWith(platformUnbuiltSaid[engine](wanted));
+    state.images.add(pulled);
+    state.imagePlatforms.set(fakeImageId(state, pulled), built);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  return context;
+}
+
+/** An assignment naming an image, which chuggy requires as Linux/Amd64. */
+const amd64Required = (/** @type {object} */ overrides = {}) =>
+  assignment({
+    capabilities: ["container", "Platform:Linux:Amd64"],
+    ...overrides,
+  });
+
+for (const engine of /** @type {const} */ (["docker", "podman"])) {
+  for (const [held, builds, pulls] of /** @type {const} */ ([
+    [
+      "an index with a build for the engine's platform pulls that build",
+      ["linux/amd64", "linux/arm64"],
+      [[undefined, image]],
+    ],
+    [
+      "an index with no build for the engine's platform pulls the one the job requires",
+      ["linux/amd64"],
+      [
+        [undefined, image],
+        ["linux/amd64", image],
+      ],
+    ],
+    [
+      "a single-platform manifest pulls as it is",
+      undefined,
+      [[undefined, image]],
+    ],
+  ]))
+    test(`on ${engine}, ${held}, and the runtime is got and copied for the platform pulled`, async (t) => {
+      const { backend, state } = await emulatingHarness(
+        t,
+        engine,
+        builds === undefined ? undefined : [...builds],
+      );
+      await backend.place(amd64Required({ runtime }), "Job");
+      await backend.settled();
+      const platform =
+        builds?.includes("linux/arm64") === true
+          ? "linux/arm64"
+          : fakeImagePlatformDefault;
+      assert.deepEqual(platformsNamed(state, isPull), [
+        ...pulls,
+        [platform, runtime],
+      ]);
+      assert.deepEqual(platformsNamed(state, isFill), [
+        [platform, "/workspace"],
+      ]);
+      const pull = state.calls.find(({ argv }) => isPull(argv));
+      assert.ok(
+        engine === "docker"
+          ? pull?.environment.DOCKER_CONFIG !== undefined
+          : pull?.argv.includes("--authfile"),
+      );
+      assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+    });
+
+  test(`on ${engine}, an index with no build for the engine's platform is pulled for the one the job requires where the job runs its own entrypoint`, async (t) => {
+    const { backend, state } = await emulatingHarness(t, engine, [
+      "linux/amd64",
+    ]);
+    await backend.place(amd64Required(), "Job");
+    await backend.settled();
+    assert.deepEqual(platformsNamed(state, isPull), [
+      [undefined, image],
+      ["linux/amd64", image],
+    ]);
+    assert.deepEqual(await backend.held(), listedJobs("asg-1"));
+  });
+
+  test(`on ${engine}, an index with a build for neither platform is refused as before, and one whose job requires no platform is pulled once`, async (t) => {
+    const neither = await emulatingHarness(t, engine, ["linux/s390x"]);
+    await neither.backend.place(amd64Required({ runtime }), "Job");
+    await neither.backend.settled();
+    assert.deepEqual(platformsNamed(neither.state, isPull).slice(0, 2), [
+      [undefined, image],
+      ["linux/amd64", image],
+    ]);
+    const [ended] = await endsNamed(neither.backend);
+    assert.ok(ended?.kind === "Job");
+    assert.deepEqual(ended.refusal, { fault: "ImageUnpullable" });
+    assert.deepEqual(platformsNamed(neither.state, isPull).at(-1), [
+      "linux/amd64",
+      image,
+    ]);
+    assert.ok(!neither.state.calls.some(({ argv }) => argv.includes(runtime)));
+
+    const unrequired = await emulatingHarness(t, engine, ["linux/amd64"]);
+    await unrequired.backend.place(assignment(), "Job");
+    await unrequired.backend.settled();
+    assert.ok(
+      platformsNamed(unrequired.state, isPull).every(
+        ([platform]) => platform === undefined,
+      ),
+    );
+    assert.deepEqual(await unrequired.backend.held(), []);
+  });
+}
+
 test("two runners sharing a runtime lock on an engine holding one variant by a name get and copy the runtime one at a time, each its own image's platform", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "chuggy-runtime-lock-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

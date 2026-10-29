@@ -22,6 +22,10 @@
  * it, and `held` answers for them meanwhile. One that fails leaves `held` and
  * is logged.
  *
+ * A WORKLOAD'S IMAGE IS PULLED FOR THE ENGINE'S OWN PLATFORM, or, where it has
+ * no build for that one, for the platform its assignment requires, which an
+ * engine that emulates that platform runs.
+ *
  * WHAT IS RUNNING IS READ FROM THE ENGINE. `held` lists this pool's containers
  * by label and reads each one's assignment, kind and deadline off its labels,
  * so a restarted runner picks up what its predecessor started. A container that
@@ -326,9 +330,10 @@ import {
  *   runtime: PlacementRuntime | undefined,
  *   volumes: readonly OwnerVolume[] | undefined,
  *   pulled: Map<string, string>,
+ *   platformRequired: string | undefined,
  *   controller: AbortController,
  *   done: Promise<void>,
- * }} Placement each image it pulled in `pulled`, by the id it was pulled as; how long its container may run in `runSecs`; its hold in `memory`, none for a session or without a budget, and whether that hold is on the engine in `holding`
+ * }} Placement each image it pulled in `pulled`, by the id it was pulled as; the platform its assignment requires in `platformRequired`, as `placementPlatformRequired` reads it; how long its container may run in `runSecs`; its hold in `memory`, none for a session or without a budget, and whether that hold is on the engine in `holding`
  *
  * @typedef {object} PoolContainer
  * @property {string} id
@@ -1635,6 +1640,63 @@ async function pullMade(state, placement, image, named, platform) {
 }
 
 /**
+ * The platform an assignment's capabilities require, as `--platform` names
+ * one, or nothing where they name no Linux one.
+ *
+ * @param {readonly string[]} capabilities
+ */
+function placementPlatformRequired(capabilities) {
+  for (const capability of capabilities) {
+    const [, architecture] =
+      /^Platform:Linux:([A-Za-z0-9]+)$/u.exec(capability) ?? [];
+    if (architecture !== undefined)
+      return `linux/${architecture.toLowerCase()}`;
+  }
+  return undefined;
+}
+
+/**
+ * A placement's image pulled for the engine's own platform, or, where the
+ * image has no build for it, for the platform its assignment requires, which
+ * an engine that emulates that platform runs.
+ *
+ * @param {State} state
+ * @param {Placement} placement
+ * @param {number} [startedMs] as `pulled` takes it
+ */
+async function placementImagePulled(
+  state,
+  placement,
+  startedMs = state.seams.nowMs(),
+) {
+  try {
+    await pulled(
+      state,
+      placement,
+      placement.image,
+      "its image",
+      undefined,
+      startedMs,
+    );
+  } catch (failure) {
+    if (
+      !(failure instanceof ImageCallFailed) ||
+      engineFailure(failure.answer) !== "PlatformUnbuilt" ||
+      placement.platformRequired === undefined
+    )
+      throw failure;
+    await pulled(
+      state,
+      placement,
+      placement.image,
+      "its image",
+      placement.platformRequired,
+      startedMs,
+    );
+  }
+}
+
+/**
  * A failure to get a job's image as the image's fault, where it is one.
  *
  * @param {ImageCallFailed} failure
@@ -1665,14 +1727,7 @@ async function jobImagePulled(state, placement) {
   const firstPullMs = seams.nowMs();
   for (;;) {
     try {
-      await pulled(
-        state,
-        placement,
-        placement.image,
-        "its image",
-        undefined,
-        firstPullMs,
-      );
+      await placementImagePulled(state, placement, firstPullMs);
       return;
     } catch (failure) {
       if (
@@ -1732,7 +1787,7 @@ async function jobImageHere(state, placement) {
 async function imageHere(state, placement) {
   if (await imagePresent(state, placement.image, "its image")) return;
   placement.phase = "Pulling";
-  await pulled(state, placement, placement.image, "its image");
+  await placementImagePulled(state, placement);
 }
 
 /**
@@ -2788,6 +2843,7 @@ async function placed(state, assignment, kind) {
         : undefined,
     volumes: volumes?.served,
     pulled: new Map(),
+    platformRequired: placementPlatformRequired(assignment.capabilities),
     controller: new globalThis.AbortController(),
     done: Promise.resolve(),
   };
