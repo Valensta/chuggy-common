@@ -86,8 +86,9 @@ function assignment(overrides = {}) {
  * @param {import("node:test").TestContext} t
  * @param {string} mode
  * @param {Partial<import("./hostBackend.mjs").HostBackendSettings>} [overrides]
+ * @param {Partial<import("./hostBackend.mjs").HostBackendSeams>} [seams] in place of the harness's own
  */
-async function harness(t, mode, overrides = {}) {
+async function harness(t, mode, overrides = {}, seams = {}) {
   const root = await mkdtemp(join(tmpdir(), "chuggy-host-"));
   const core = join(root, "core.mjs");
   await writeFile(core, fixtureCore);
@@ -125,6 +126,7 @@ async function harness(t, mode, overrides = {}) {
       return tokenFileRefused;
     },
     log: (line) => log.push(line),
+    ...seams,
   });
   t.after(async () => {
     for (const onExit of exits) onExit();
@@ -254,12 +256,54 @@ test("a stop kills the job's whole group, and its end is never named", async (t)
   await backend.place(assignment(), "Job");
   const { grandchild } = await seen();
   assert.equal(alive(grandchild), true);
-  assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+  assert.deepEqual(await backend.stop("asg-1"), {
+    stopped: "Stopped",
+    found: { found: "Running" },
+  });
   for (let tries = 0; alive(grandchild) && tries < 100; tries++) await wait(10);
   assert.equal(alive(grandchild), false);
   assert.deepEqual(await backend.held(), []);
   assert.deepEqual(await backend.ended(), []);
   assert.deepEqual(await backend.stop("asg-1"), { stopped: "Stopped" });
+});
+
+test("a stop of a job whose process had already exited answers how it exited, and its end is never named", async (t) => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4242,
+    /** @type {number | null} */
+    exitCode: null,
+    /** @type {NodeJS.Signals | null} */
+    signalCode: null,
+  });
+  const { backend } = await harness(
+    t,
+    "unused",
+    {},
+    {
+      spawn: /** @type {never} */ (
+        () => {
+          globalThis.setImmediate(() => child.emit("spawn"));
+          return child;
+        }
+      ),
+      kill: () => child.emit("close", child.exitCode, child.signalCode),
+    },
+  );
+  await backend.place(assignment(), "Job");
+  child.exitCode = 0;
+  assert.deepEqual(await backend.stop("asg-1"), {
+    stopped: "Stopped",
+    found: {
+      found: "Ended",
+      ended: {
+        kind: "Job",
+        why: "the job's process exited 0",
+        ran: "Succeeded",
+      },
+    },
+  });
+  assert.deepEqual(await backend.held(), []);
+  assert.deepEqual(await backend.ended(), []);
 });
 
 test("a stop kills what of the group outlives its leader", async (t) => {

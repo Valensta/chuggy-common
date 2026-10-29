@@ -980,15 +980,24 @@ const deadlineEnd = {
  * @returns {WorkerPoolEnded}
  */
 function workloadEnd(kind, attempt, end) {
+  const ended = workloadEndStopped(kind, end);
+  return ended.kind === "Session"
+    ? { ...ended, session: attempt }
+    : { ...ended, job: attempt };
+}
+
+/**
+ * An end as a stop that found it answers it, which names no attempt.
+ *
+ * @param {WorkerPoolWorkloadKind} kind
+ * @param {ContainerEnd} end
+ * @returns {import("./poolLoop.mjs").WorkerPoolStopEnded}
+ */
+function workloadEndStopped(kind, end) {
   if (kind === "Session")
-    return {
-      kind,
-      session: attempt,
-      phase: poolSessionPhase(end.succeeded),
-    };
+    return { kind, phase: poolSessionPhase(end.succeeded) };
   return {
     kind,
-    job: attempt,
     why: end.why,
     ...(end.refusal === undefined ? {} : { refusal: end.refusal }),
     ...(end.killed === undefined ? {} : { killed: end.killed }),
@@ -1007,6 +1016,23 @@ function endedAssignment(ended) {
   return ended.kind === "Session"
     ? ended.session.assignment
     : ended.job.assignment;
+}
+
+/**
+ * An end as a stop that found it answers it, without the attempt it names.
+ *
+ * @param {WorkerPoolEnded} ended
+ * @returns {import("./poolLoop.mjs").WorkerPoolStopEnded}
+ */
+function endedStopped(ended) {
+  if (ended.kind === "Session") return { kind: ended.kind, phase: ended.phase };
+  return {
+    kind: ended.kind,
+    why: ended.why,
+    ...(ended.refusal === undefined ? {} : { refusal: ended.refusal }),
+    ...(ended.killed === undefined ? {} : { killed: ended.killed }),
+    ...(ended.ran === undefined ? {} : { ran: ended.ran }),
+  };
 }
 
 /**
@@ -2883,6 +2909,8 @@ function stopAnswer(answer) {
  * one past its deadline. The kill is judged by the container it leaves, since
  * a workload that ended on its own just before refuses one; a workload that
  * has ended is stopped even where its container is kept for `held` to retire.
+ * A kill that took found the workload running, and one refused by a container
+ * that had ended found it ended as that container says.
  *
  * @param {State} state
  * @param {string} id
@@ -2896,7 +2924,36 @@ async function containerStopped(state, id) {
   const [container] = inspectionContainers(state, inspected).map(poolContainer);
   if (!endedStatuses.has(container.status)) return stopAnswer(killed);
   await retired(state, container, "was stopped");
-  return { stopped: "Stopped" };
+  return {
+    stopped: "Stopped",
+    found:
+      killed.code === 0
+        ? { found: "Running" }
+        : {
+            found: "Ended",
+            ended: workloadEndStopped(
+              container.kind,
+              containerEnded(container),
+            ),
+          },
+  };
+}
+
+/**
+ * What a stop found of a workload, of what it found of each part: running
+ * where any part ran, else ended as the first part found ended says, else
+ * nothing it can tell.
+ *
+ * @param {readonly (import("./poolLoop.mjs").WorkerPoolStopFound | undefined)[]} parts
+ * @returns {WorkerPoolStopped}
+ */
+function stoppedFound(parts) {
+  const found =
+    parts.find((part) => part?.found === "Running") ??
+    parts.find((part) => part !== undefined);
+  return found === undefined
+    ? { stopped: "Stopped" }
+    : { stopped: "Stopped", found };
 }
 
 /**
@@ -2904,7 +2961,9 @@ async function containerStopped(state, id) {
  * flight is cancelled and waited out first, so a `run` it was already making
  * is killed too rather than left behind. Its container is found by its
  * labels, as `held` finds it, so one a run under another naming started is
- * found too. Its end is never named, and one already waiting to be is dropped.
+ * found too. Its end is never named, and one already waiting to be is dropped,
+ * and answered as how it ended unless a placement or container of it was
+ * still running.
  *
  * @param {State} state
  * @param {string} assignment
@@ -2914,6 +2973,9 @@ async function stopped(state, assignment) {
   state.ends.accounted.add(assignment);
   /** @param {WorkerPoolEnded} ended */
   const kept = (ended) => endedAssignment(ended) !== assignment;
+  const queued = [...state.ends.pending, ...state.ends.ready].find(
+    (ended) => !kept(ended),
+  );
   state.ends.pending = state.ends.pending.filter(kept);
   state.ends.ready = state.ends.ready.filter(kept);
   const placement = state.placements.get(assignment);
@@ -2925,11 +2987,19 @@ async function stopped(state, assignment) {
     listArgv(poolLabelValue(state.settings.pool), assignment),
   );
   if (listed.code !== 0) return stopAnswer(listed);
+  /** @type {(import("./poolLoop.mjs").WorkerPoolStopFound | undefined)[]} */
+  const parts = [
+    placement === undefined ? undefined : { found: "Running" },
+    queued === undefined
+      ? undefined
+      : { found: "Ended", ended: endedStopped(queued) },
+  ];
   for (const id of listedIds(listed)) {
     const answer = await containerStopped(state, id);
     if (answer.stopped !== "Stopped") return answer;
+    parts.push(answer.found);
   }
-  return { stopped: "Stopped" };
+  return stoppedFound(parts);
 }
 
 /**

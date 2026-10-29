@@ -70,7 +70,9 @@ import { runnerVersionAbove } from "./runnerUpdate.mjs";
  * @typedef {Pick<WorkerPoolAssignment, "assignment" | "callbackUrl" | "bearer">} WorkerPoolAttempt what an assignment's own plane is reached at, and under
  *
  * @typedef {{placed: "Placed"} | {placed: "Refused", evidence: string} | {placed: "Unavailable"}} WorkerPoolPlacement
- * @typedef {{stopped: "Stopped"} | {stopped: "Refused", evidence: string} | {stopped: "Unavailable", evidence: string}} WorkerPoolStopped
+ * @typedef {{stopped: "Stopped", found?: WorkerPoolStopFound} | {stopped: "Refused", evidence: string} | {stopped: "Unavailable", evidence: string}} WorkerPoolStopped `found` none where the backend cannot tell what the stop found
+ * @typedef {{found: "Running"} | {found: "Ended", ended: WorkerPoolStopEnded}} WorkerPoolStopFound whether the stop interrupted the workload, or found it already ended, and how
+ * @typedef {Omit<WorkerPoolJobEnd, "job"> | Omit<WorkerPoolSessionEnd, "session">} WorkerPoolStopEnded
  *
  * @typedef {object} WorkerPoolJobEnd a job that ended of itself, which its harness may never have reported
  * @property {"Job"} kind
