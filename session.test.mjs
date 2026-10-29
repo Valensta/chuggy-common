@@ -855,6 +855,104 @@ test("a turn whose settlement the plane refused is not settled again as the sess
     }
 });
 
+const threadSessionFacts = {
+  ...facts,
+  kind: "Thread",
+  capabilities: [...threadRoster],
+};
+
+/** Catches a member's `/clear` reaching the runtime as its command, which starts a stream the reference does not name. */
+test("a thread message naming a runtime command reaches the model as text, and its answer is the member's", async () => {
+  const turns = ["/clear", "/usr/bin is missing"].map((input, index) => ({
+    ...turnOne,
+    turn: `turn-${String(index + 1)}`,
+    ordinal: index + 1,
+    input,
+  }));
+  const plane = planeOf(turns, threadSessionFacts);
+  const asked = [];
+  const { query } = queryOf((message, index) => {
+    asked.push(message);
+    return [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      result("success", { result: `read ${turns[index].input} as text` }),
+    ];
+  });
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query,
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(
+    asked.map((message) => [message.message.content, message.client_composed]),
+    [
+      ["/clear", true],
+      ["/usr/bin is missing", undefined],
+    ],
+  );
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnAnswer.path)
+      .map(({ body }) => [body.turn, body.result]),
+    [
+      ["turn-1", "read /clear as text"],
+      ["turn-2", "read /usr/bin is missing as text"],
+    ],
+  );
+});
+
+/** Catches a session carrying on in a stream its reference does not name, which the next resume would not bring back. */
+test("a runtime that leaves the stream its reference names ends the session and fails the turn", async () => {
+  const moves = {
+    "a new session id": {
+      type: "system",
+      subtype: "init",
+      session_id: "runtime-2",
+    },
+    "a reset conversation": {
+      type: "conversation_reset",
+      new_conversation_id: "runtime-2",
+      session_id: "runtime-1",
+      trigger: "clear",
+    },
+  };
+  for (const [move, moved] of Object.entries(moves)) {
+    const second = { ...turnOne, turn: "turn-2", ordinal: 2 };
+    const plane = planeOf([turnOne, second], threadSessionFacts);
+    const runtime = inputReadingQueryOf((_asked, index) => [
+      { type: "system", subtype: "init", session_id: "runtime-1" },
+      ...(index === 1 ? [moved] : []),
+      result("success", { result: "ok" }),
+    ]);
+
+    const code = await run({
+      request: plane.request,
+      requestOnce: plane.requestOnce,
+      query: runtime.query,
+    });
+
+    assert.equal(code, 1, `${move} did not end the session`);
+    assert.deepEqual(
+      plane.calls
+        .filter(({ path }) => path === sessionPlaneRoutes.reference.path)
+        .map(({ body }) => body),
+      [{ reference: "runtime-1" }],
+      `${move} was bound`,
+    );
+    assert.deepEqual(
+      plane.calls
+        .filter(({ path }) => path === sessionPlaneRoutes.turnFailure.path)
+        .map(({ body }) => body),
+      [{ turn: "turn-2", failure: "AgentFailed" }],
+      `${move} did not fail its turn`,
+    );
+    assert.ok(runtime.seen.closed, `${move} left the runtime running`);
+  }
+});
+
 const leadFacts = {
   ...facts,
   capabilities: [...leadRoster],

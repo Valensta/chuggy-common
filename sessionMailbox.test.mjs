@@ -121,6 +121,35 @@ test("the user message carries the turn's input and nothing of the plane's envel
   });
 });
 
+/** Catches a member's message that names a runtime command being run as one. */
+test("a message the runtime would read as its own command is delivered as written", () => {
+  for (const input of [
+    "/clear",
+    "/compact keep the plan",
+    "  /model opus",
+    "/plugin:command\nwith more",
+  ]) {
+    const message = sessionUserMessage(input);
+    assert.equal(message.client_composed, true, `${input} was not marked`);
+    assert.equal(message.message.content, input, `${input} was rewritten`);
+  }
+});
+
+/** Catches the mark spreading to text, where it costs the turn the context the runtime attaches. */
+test("a message that is not a command is left for the runtime to read as it would", () => {
+  for (const input of [
+    "/usr/bin is missing",
+    "//comment",
+    "/ clear",
+    "please /clear the cache",
+    "",
+  ]) {
+    const message = sessionUserMessage(input);
+    assert.equal(message.client_composed, undefined, `${input} was marked`);
+    assert.equal(message.message.content, input);
+  }
+});
+
 test("the idle window opens when a turn settles, not when it was claimed", async () => {
   const { calls, advance, mailbox } = mailboxOf([
     claimed("turn-1"),

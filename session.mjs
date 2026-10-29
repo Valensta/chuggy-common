@@ -638,10 +638,21 @@ async function post(context, path, body) {
     );
 }
 
+/**
+ * The runtime's session id, bound as the session's reference the first time
+ * the runtime names one. A different id named after that is a stream the
+ * reference does not name, which the next resume would not bring back, so it
+ * ends the session rather than being spoken in.
+ */
 async function bindReference(context, message) {
   const reference = message.session_id;
-  if (context.bound || typeof reference !== "string" || reference.length === 0)
-    return;
+  if (typeof reference !== "string" || reference.length === 0) return;
+  if (context.bound !== undefined) {
+    if (reference === context.bound) return;
+    throw new Error(
+      "the runtime moved to a session id its session reference does not name",
+    );
+  }
   const response = await context.request(
     context.task,
     context.bearer,
@@ -658,7 +669,7 @@ async function bindReference(context, message) {
     throw new Error(
       `the worker plane answered ${String(response.status)} binding the session reference`,
     );
-  context.bound = true;
+  context.bound = reference;
 }
 
 /**
@@ -673,6 +684,10 @@ function observeStream(context, message) {
 
 async function observe(context, message) {
   if (message.type === "stream_event") return observeStream(context, message);
+  if (message.type === "conversation_reset")
+    throw new Error(
+      "the runtime reset the conversation its session reference names",
+    );
   observeRateLimit(context.sightings, message);
   context.measure.saw(message);
   if (message.type === "result") {

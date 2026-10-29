@@ -23,6 +23,16 @@
  * iterable on its first look at an empty mailbox. Idle is time the session spent
  * with nothing to do, so it is measured from the first moment it had nothing to
  * do, and a claim closes the window again.
+ *
+ * A TURN NEVER RUNS ONE OF THE RUNTIME'S OWN COMMANDS. The runtime reads a
+ * message that opens with a slash and a name as a command for itself rather
+ * than as text for its model, and `/clear` starts a new conversation under a
+ * new session id, which a session named by one reference written once can
+ * never honour. Such a message is marked `client_composed`, the runtime's own
+ * way of delivering one message as written, so the model reads it as the text
+ * it is. That mark also skips the context the runtime attaches at a turn's
+ * start, so it is set on nothing else: a first word holding a slash of its own
+ * is a path, which the runtime reads as text already.
  */
 
 import { setTimeout as wait } from "node:timers/promises";
@@ -34,6 +44,15 @@ import { sessionRequest, sessionStopped } from "./sessionTransport.mjs";
 const claimedStatus = 200;
 const emptyStatus = 204;
 
+/**
+ * Whether the runtime may read `input` as one of its own commands: a slash,
+ * then a first word with no slash in it.
+ */
+function sessionUserMessageReadsAsCommand(input) {
+  const name = /^\s*\/(\S+)/u.exec(input)?.[1];
+  return name !== undefined && !name.includes("/");
+}
+
 /** One claimed turn as the runtime's streaming input takes it. */
 export function sessionUserMessage(input) {
   return {
@@ -41,6 +60,9 @@ export function sessionUserMessage(input) {
     session_id: "",
     parent_tool_use_id: null,
     message: { role: "user", content: input },
+    ...(sessionUserMessageReadsAsCommand(input)
+      ? { client_composed: true }
+      : {}),
   };
 }
 
