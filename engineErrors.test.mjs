@@ -2,10 +2,10 @@
  * Every stderr in `printed`, and each a pull test lists as refused, is what
  * docker 28.1, docker 29.1 on Windows or podman 5.8 printed for the failure it
  * is filed under, copied from a run of each against a daemon, and a local
- * registry that challenged for credentials. Those in `sourced` are built from the source that prints
- * them, each naming the file and function, where no run of that engine was
- * seen. The rest are built on what those engines print, and crun's on the
- * formats of its own source.
+ * registry that challenged for credentials. Those in `sourced` are built from
+ * the source that prints them, each naming the file and function, where no run
+ * of that engine was seen. The rest are built on what those engines print, and
+ * crun's on the formats of its own source.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -63,6 +63,12 @@ const printed = {
 };
 
 const sourced = {
+  Unreachable: [
+    // docker 29 on Linux or a Mac, moby's client/request.go: `Client.doRequest`,
+    // an engine socket that does not exist, and one its user may not open.
+    "failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
+    "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+  ],
   ImageInUse: [
     // docker's containerd image store, moby's daemon/containerd/image_delete.go:
     // `ImageService.ImageDelete`, a stopped container's image removed by name,

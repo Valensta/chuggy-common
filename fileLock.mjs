@@ -8,6 +8,9 @@
  * holder's process number was reused. Two processes that judge the same
  * abandoned lock at once can both remove it, and then both hold one, so a
  * caller says what that costs it.
+ *
+ * A lock, and a file staged beside one, is removed and renamed over past
+ * another process's brief hold, which Windows refuses where Unix never would.
  */
 
 import { randomUUID } from "node:crypto";
