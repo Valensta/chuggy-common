@@ -675,6 +675,53 @@ test("a job's environment is the runner's less chuggy's, then the owner's, then 
   );
 });
 
+test("on Windows a job's places are also where Windows' programs look, a runner's own of any case is withheld, and the owner's names win whatever their case", () => {
+  const started = hostJobEnvironment(
+    {
+      Temp: "C:\\Users\\op\\AppData\\Local\\Temp",
+      userprofile: "C:\\Users\\op",
+      Path: "C:\\bin",
+      HTTP_PROXY: "http://runner",
+    },
+    { PATH: "C:\\owner\\bin", http_proxy: "http://owner" },
+    "/jobs/job-1",
+    "{}",
+    "win32",
+  );
+  assert.equal(started.USERPROFILE, "/jobs/job-1/home");
+  assert.equal(started.TEMP, "/jobs/job-1/tmp");
+  assert.equal(started.TMP, "/jobs/job-1/tmp");
+  assert.equal(started.PATH, "C:\\owner\\bin");
+  assert.equal(started.http_proxy, "http://owner");
+  for (const gone of ["Temp", "userprofile", "Path", "HTTP_PROXY"])
+    assert.ok(!(gone in started), gone);
+  for (const name of ["USERPROFILE", "temp", "Tmp", "home"])
+    assert.match(
+      String(hostEnvironmentRefusal({ [name]: "x" }, "win32")),
+      new RegExp(`^${name} is set for every host job`, "u"),
+    );
+});
+
+test("off Windows a job's places are HOME and TMPDIR alone, and names are matched as written", () => {
+  const started = hostJobEnvironment(
+    { TEMP: "/tmp/x", home: "/h" },
+    { TMP: "/var/tmp" },
+    "/jobs/job-1",
+    "{}",
+    "linux",
+  );
+  assert.equal(started.TEMP, "/tmp/x");
+  assert.equal(started.TMP, "/var/tmp");
+  assert.equal(started.home, "/h");
+  assert.ok(!("USERPROFILE" in started));
+  for (const name of ["TMP", "TEMP", "USERPROFILE", "home"])
+    assert.equal(
+      hostEnvironmentRefusal({ [name]: "x" }, "linux"),
+      undefined,
+      name,
+    );
+});
+
 test("a job runs on the host only where it pins no image and names a platform the host is", () => {
   const platforms = ["Platform:MacOS:Arm64"];
   assert.equal(hostRuns(platforms, assignment()), true);
@@ -833,5 +880,26 @@ test("a host beside a container backend measures what both measured", () => {
   assert.deepEqual(
     measured?.runSecs.Session,
     container.measured().runSecs.Session,
+  );
+});
+
+test("a backend's platform is its host's where its settings name one, which decides what its owner's environment may name", () => {
+  const windows = {
+    platforms: ["Platform:Windows:Amd64"],
+    directory: "/d",
+    logDir: "/l",
+    tokenFile: "/t",
+    timeoutSecsMax: 1,
+    outputBytesMax: 1,
+    environment: { Tmp: "x" },
+    machine: { cpuMillis: 1, memoryMib: 1 },
+    platform: /** @type {NodeJS.Platform} */ ("win32"),
+  };
+  assert.throws(
+    () => checkedHostBackendSettings(windows),
+    /Tmp is set for every host job/u,
+  );
+  assert.doesNotThrow(() =>
+    checkedHostBackendSettings({ ...windows, platform: "linux" }),
   );
 });

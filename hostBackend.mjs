@@ -78,6 +78,7 @@ import { savedLogTrimmed } from "./savedLog.mjs";
  * @property {Readonly<Record<string, string>>} environment the owner's, over the runner's own
  * @property {{cpuMillis: number, memoryMib: number}} machine
  * @property {string} [core] the worker core's entry; this core's own where absent
+ * @property {NodeJS.Platform} [platform] the host's, which decides the places a job is told of; this process's where absent
  *
  * @typedef {object} HostBackendSeams
  * @property {typeof spawnDefault} [spawn]
@@ -138,8 +139,26 @@ export const hostTimeoutSecsMax = Math.floor((2 ** 31 - 1) / 1000);
 /** The variables a host job's places set, which the owner's environment may not name. */
 const hostPlaceVariables = ["HOME", "TMPDIR"];
 
+/** Those Windows' programs read for the same places, set too on a Windows host. */
+const hostWindowsPlaceVariables = ["USERPROFILE", "TEMP", "TMP"];
+
 /** The variables a job is never handed from its runner's environment: the ones its core or its places set. */
 const hostWithheldVariables = [...reservedJobVariables, ...hostPlaceVariables];
+
+/**
+ * Whether `name` is one chuggy sets for a job on this platform. Windows reads
+ * a variable's name whatever its case, so there a runner's `Temp` stands for
+ * `TEMP`; elsewhere names are as written.
+ *
+ * @param {string} name
+ * @param {NodeJS.Platform} platform
+ */
+function hostWithheld(name, platform) {
+  if (platform !== "win32") return hostWithheldVariables.includes(name);
+  return [...hostWithheldVariables, ...hostWindowsPlaceVariables].some(
+    (withheld) => withheld.toUpperCase() === name.toUpperCase(),
+  );
+}
 
 /**
  * The settings as given, or a throw naming what is wrong with them.
@@ -158,7 +177,7 @@ export function checkedHostBackendSettings(settings) {
   for (const platform of settings.platforms)
     if (!/^Platform:[A-Za-z0-9]+:[A-Za-z0-9]+$/u.test(platform))
       throw new RangeError(`${platform} is no platform token`);
-  const named = hostEnvironmentRefusal(settings.environment);
+  const named = hostEnvironmentRefusal(settings.environment, settings.platform);
   if (named !== undefined) throw new RangeError(named);
   return settings;
 }
@@ -168,11 +187,15 @@ export function checkedHostBackendSettings(settings) {
  * variable the job's core or its places set.
  *
  * @param {Readonly<Record<string, string>>} environment
+ * @param {NodeJS.Platform} [platform] the host's, this process's where absent
  * @returns {string | undefined}
  */
-export function hostEnvironmentRefusal(environment) {
+export function hostEnvironmentRefusal(
+  environment,
+  platform = globalThis.process.platform,
+) {
   const name = Object.keys(environment).find((each) =>
-    hostWithheldVariables.includes(each),
+    hostWithheld(each, platform),
   );
   return name === undefined
     ? undefined
@@ -185,7 +208,7 @@ export function hostEnvironmentRefusal(environment) {
  * A chat host's credentials are refused, since a chat host runs no job.
  *
  * @param {Pick<PoolCredentials, "capabilities" | "host"> & {kind?: string}} credentials
- * @param {"Linux" | "MacOS"} operatingSystem the host's
+ * @param {"Linux" | "MacOS" | "Windows"} operatingSystem the host's
  */
 export function hostPlatformsDeclared(credentials, operatingSystem) {
   if (credentials.kind === "ChatHost")
@@ -254,20 +277,38 @@ function hostRefusal(settings, assignment, kind) {
  * @param {Readonly<Record<string, string>>} owned
  * @param {string} directory
  * @param {string} envelope
+ * @param {NodeJS.Platform} [platform] the host's, this process's where absent
  * @returns {Record<string, string>}
  */
-export function hostJobEnvironment(inherited, owned, directory, envelope) {
+export function hostJobEnvironment(
+  inherited,
+  owned,
+  directory,
+  envelope,
+  platform = globalThis.process.platform,
+) {
+  const windows = platform === "win32";
+  const ownedNames = Object.keys(owned).map((name) => name.toUpperCase());
   /** @type {Record<string, string>} */
   const environment = {};
   for (const [name, value] of Object.entries(inherited))
-    if (value !== undefined && !hostWithheldVariables.includes(name))
+    if (
+      value !== undefined &&
+      !hostWithheld(name, platform) &&
+      // On Windows the owner's `PATH` is the runner's `Path`, and must win.
+      !(windows && ownedNames.includes(name.toUpperCase()))
+    )
       environment[name] = value;
   const places = jobHostPlaces(directory);
+  const temporary = join(directory, "tmp");
   return {
     ...environment,
     ...owned,
     HOME: places.home,
-    TMPDIR: join(directory, "tmp"),
+    TMPDIR: temporary,
+    ...(windows
+      ? { USERPROFILE: places.home, TEMP: temporary, TMP: temporary }
+      : {}),
     [hostJobVariable]: directory,
     [workerTaskVariable]: envelope,
   };
@@ -481,6 +522,7 @@ async function hostJobSpawned(state, name, made, agent) {
         },
         made.directory,
         made.envelope,
+        state.settings.platform,
       ),
       stdio: ["ignore", log.fd, log.fd],
     });

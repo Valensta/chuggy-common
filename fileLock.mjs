@@ -8,10 +8,14 @@
  * holder's process number was reused. Two processes that judge the same
  * abandoned lock at once can both remove it, and then both hold one, so a
  * caller says what that costs it.
+ *
+ * A lock, and a file staged beside one, is removed and renamed over past
+ * another process's brief hold, which Windows refuses where Unix never would.
  */
 
 import { randomUUID } from "node:crypto";
-import { link, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { link, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 
 /**
  * @typedef {object} FileLockBounds
@@ -28,6 +32,45 @@ import { link, readFile, rm, stat, writeFile } from "node:fs/promises";
  */
 
 const fileLockMode = 0o600;
+
+/**
+ * How a lock or a staged file is removed: tried again past a brief hold of
+ * another process's, as Windows' indexer or antivirus takes, which Windows
+ * refuses a removal for with EPERM or EBUSY where a Unix system never would.
+ */
+export const fileRemoval = { force: true, maxRetries: 5, retryDelay: 100 };
+
+/** The tries a rename over a file another process briefly holds is given. */
+const fileRenameTries = 5;
+
+/** Between two tries of a rename. */
+const fileRenameRetryMs = 100;
+
+/** What Windows refuses a rename over a file another process holds with. */
+const fileRenameHeld = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/**
+ * `from` renamed over `to`, tried again while Windows refuses it for a brief
+ * hold of another process's on `to`.
+ *
+ * @param {string} from
+ * @param {string} to
+ * @param {{rename: (from: string, to: string) => Promise<void>, wait: (ms: number) => Promise<unknown>}} [ports]
+ */
+export async function fileRenamedOver(
+  from,
+  to,
+  ports = { rename, wait: (ms) => delay(ms) },
+) {
+  for (let tried = 1; ; tried += 1)
+    try {
+      return await ports.rename(from, to);
+    } catch (failure) {
+      if (tried >= fileRenameTries || !fileRenameHeld.has(failure?.code))
+        throw failure;
+      await ports.wait(fileRenameRetryMs);
+    }
+}
 
 /** Whether the process a lock names is still running; one of another user's is. */
 export function fileLockHolderAlive(pid) {
@@ -86,7 +129,7 @@ async function fileLockLinked(lockPath, ports) {
     if (failure?.code === "EEXIST") return false;
     throw failure;
   } finally {
-    await rm(staged, { force: true });
+    await rm(staged, fileRemoval);
   }
 }
 
@@ -101,7 +144,7 @@ async function fileLockLinked(lockPath, ports) {
 async function fileLockTried(lockPath, bounds, ports) {
   if (await fileLockLinked(lockPath, ports)) return true;
   if (!(await fileLockAbandoned(lockPath, bounds, ports))) return false;
-  await rm(lockPath, { force: true });
+  await rm(lockPath, fileRemoval);
   return fileLockLinked(lockPath, ports);
 }
 
@@ -130,7 +173,7 @@ async function fileLockAcquired(lockPath, bounds, ports) {
  */
 export async function fileLockTaken(lockPath, bounds, ports) {
   if (!(await fileLockTried(lockPath, bounds, ports))) return undefined;
-  return () => rm(lockPath, { force: true });
+  return () => rm(lockPath, fileRemoval);
 }
 
 /**
@@ -148,6 +191,6 @@ export async function fileLocked(lockPath, bounds, ports, hold) {
   try {
     return await hold();
   } finally {
-    await rm(lockPath, { force: true });
+    await rm(lockPath, fileRemoval);
   }
 }
