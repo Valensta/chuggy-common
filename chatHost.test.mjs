@@ -744,6 +744,29 @@ test("a container's environment is one its supervisor reads, and is told the cre
   assert.ok(!("CHUG_WORKER_CREDENTIAL_FILES" in container.environment));
 });
 
+/** Catches a Windows runner's credential refused, or its directory bound by posix rules, which name no directory of it. */
+test("a credential on a Windows runner's drive is bound by its own directory, and the supervisor finds it by its name", () => {
+  const container = chatSupervisorContainer(
+    one,
+    {
+      ...places,
+      credentialFile: "C:\\Users\\op\\AppData\\Roaming\\claude\\claude-token",
+      credentialOwner: { uid: 0, gid: 0 },
+    },
+    gib,
+  );
+  assert.deepEqual(container.binds, [
+    {
+      source: "C:\\Users\\op\\AppData\\Roaming\\claude",
+      target: "/var/run/chuggy/credentials/provider",
+    },
+  ]);
+  assert.equal(
+    chatSupervisorSettings(container.environment).credentialFile,
+    "/var/run/chuggy/credentials/provider/claude-token",
+  );
+});
+
 test("a container whose credential a session's user could own or open another way, or whose supervisor would move its places, is refused", () => {
   for (const [changed, why] of [
     [
@@ -770,6 +793,9 @@ test("a container whose credential a session's user could own or open another wa
     [{ credentialFile: "/a/../b.json" }, /written plainly/u],
     [{ credentialFile: "/a/" }, /no directory of its own/u],
     [{ credentialFile: "/b.json" }, /no directory of its own/u],
+    [{ credentialFile: "C:\\b.json" }, /no directory of its own/u],
+    [{ credentialFile: "C:\\a\\..\\b.json" }, /written plainly/u],
+    [{ credentialFile: "C:b.json" }, /no absolute path/u],
   ])
     assert.throws(
       () => chatSupervisorContainer(one, { ...places, ...changed }, gib),
@@ -948,7 +974,12 @@ function startOf(removed) {
     naming: chatSupervisorNaming(geoffHost, "chuggy"),
     spawn: /** @type {any} */ (
       (command, argv, options) => {
-        seen.spawned.push({ command, argv, env: options.env });
+        seen.spawned.push({
+          command,
+          argv,
+          env: options.env,
+          windowsHide: options.windowsHide,
+        });
         return child;
       }
     ),
@@ -971,8 +1002,9 @@ test("a supervisor is started once a container of its name that has exited is re
     await started(container, "docker");
     assert.deepEqual(seen.execs, [["rm", "-v", name]]);
     assert.equal(seen.spawned.length, 1);
-    const [{ command, argv, env }] = seen.spawned;
+    const [{ command, argv, env, windowsHide }] = seen.spawned;
     assert.equal(command, "docker");
+    assert.equal(windowsHide, true);
     assert.equal(argv.at(argv.indexOf("--name") + 1), name);
     assert.equal(
       env.CHUG_CHAT_CREDENTIAL,

@@ -42,7 +42,7 @@
 
 import { spawn as spawnDefault } from "node:child_process";
 import { lstat, readdir } from "node:fs/promises";
-import { posix } from "node:path";
+import { posix, win32 } from "node:path";
 import process from "node:process";
 
 import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
@@ -310,6 +310,16 @@ function chatSupervisorCounts(places) {
 }
 
 /**
+ * The path rules a credential's file on the host is written in: Windows'
+ * where it names a drive, as a Windows runner's does, and posix otherwise.
+ *
+ * @param {string} file
+ */
+function chatCredentialPathRules(file) {
+  return /^[A-Za-z]:\\/u.test(file) ? win32 : posix;
+}
+
+/**
  * The credential's mount, its directory bound where the supervisor finds
  * it: refused where its file is no absolute path written plainly, or its
  * directory the root.
@@ -317,17 +327,22 @@ function chatSupervisorCounts(places) {
  * @param {string} file
  */
 function chatSupervisorCredentialMount(file) {
-  if (!file.startsWith("/") || posix.normalize(file) !== file)
+  const rules = chatCredentialPathRules(file);
+  if (
+    !rules.isAbsolute(file) ||
+    (rules === posix && !file.startsWith("/")) ||
+    rules.normalize(file) !== file
+  )
     throw new RangeError(
       "the credential's file is no absolute path written plainly",
     );
-  const source = posix.dirname(file);
-  if (source === "/" || file.endsWith("/"))
+  const source = rules.dirname(file);
+  if (source === rules.parse(file).root || file.endsWith(rules.sep))
     throw new RangeError("the credential's file is in no directory of its own");
   return {
     source,
     target: chatSupervisorCredentialDirectory,
-    file: `${chatSupervisorCredentialDirectory}/${posix.basename(file)}`,
+    file: `${chatSupervisorCredentialDirectory}/${rules.basename(file)}`,
   };
 }
 
@@ -467,6 +482,7 @@ export function chatSupervisorStarted(seams) {
     const child = spawn(engineName, argv, {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...environment },
+      windowsHide: true,
     });
     const exited = new Promise((resolve) => {
       child.once("exit", resolve);
@@ -956,7 +972,8 @@ export async function chatHostStatusAsked(path) {
  * @returns {Promise<string | undefined>}
  */
 export async function chatCredentialAloneRefusal(file) {
-  const directory = posix.dirname(file);
+  const rules = chatCredentialPathRules(file);
+  const directory = rules.dirname(file);
   let entries;
   try {
     if ((await lstat(file)).isSymbolicLink())
@@ -965,7 +982,7 @@ export async function chatCredentialAloneRefusal(file) {
   } catch (failure) {
     return `the credential ${file} or its directory cannot be read: ${failure instanceof Error ? failure.message : String(failure)}`;
   }
-  const others = entries.filter((entry) => entry !== posix.basename(file));
+  const others = entries.filter((entry) => entry !== rules.basename(file));
   if (others.length === 0) return undefined;
   return `${directory} holds ${others.slice(0, 3).join(", ")}${others.length > 3 ? " and more" : ""} beside the credential ${file}, and a chat host's supervisor is handed the directory whole; keep the credential in a directory of its own`;
 }
