@@ -414,6 +414,7 @@ function interruptible(script) {
       seen.interrupts.push(turn);
       heard();
     };
+    stream.close = () => undefined;
     return stream;
   };
   return { seen, query };

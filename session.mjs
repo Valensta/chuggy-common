@@ -736,6 +736,7 @@ export async function runSessionTurn(context) {
  * budget, to drain the queue.
  */
 async function settleTurn(context, turn, result) {
+  context.settling = turn.turn;
   if (context.mirrored) {
     await post(context, sessionPlaneRoutes.turnFailure.path, {
       turn: turn.turn,
@@ -832,6 +833,31 @@ async function refuseSession(context, warn, reason) {
     });
   context.mailbox.stop();
   return 1;
+}
+
+/**
+ * The turn this pod holds, failed `AgentFailed` because the session failed
+ * under it: a turn left claimed by a pod that has exited is one its member
+ * watches until the attempt is reaped. A plane that will not take the failure
+ * is warned of rather than raised, so what the session failed of is still the
+ * failure it ends on.
+ *
+ * A turn the plane was already asked to settle is left as it answered: what
+ * failed there was the plane refusing that settlement, and a refusal is a
+ * decision that asking again with another settlement would only retry.
+ */
+async function sessionClaimedTurnFailed(context, warn) {
+  const turn = context.mailbox.claimed();
+  if (turn === undefined || context.settling === turn.turn) return;
+  context.live?.ended(turn.turn);
+  try {
+    await post(context, sessionPlaneRoutes.turnFailure.path, {
+      turn: turn.turn,
+      failure: agentFailed,
+    });
+  } catch (failure) {
+    warn(`${context.scrub(String(failure))}\n`);
+  }
 }
 
 async function sessionFacts(context) {
@@ -1162,6 +1188,14 @@ function sessionStopHeard(context, stopped) {
  * refusals are a session the site placed and did not equip — with no
  * transcript to fork, or with no repository it can reach — and both are
  * checked after the mailbox, because the refusal is a failed turn.
+ *
+ * A SESSION THAT FAILS ENDS. The runtime reads the mailbox on its own, so a
+ * throw out of the turns leaves its input waiting on a turn nobody will settle
+ * and its process holding the pod open, with the turn claimed, until the
+ * attempt's deadline. So the mailbox is always stopped as this returns, and on
+ * a throw the runtime is closed and the claimed turn failed first. Only a throw
+ * closes it: every other ending has ended its input, and the runtime is left
+ * to mirror what it wrote behind that.
  */
 async function sessionRun(context, facts, opened) {
   const { pause, warn } = opened;
@@ -1197,7 +1231,12 @@ async function sessionRun(context, facts, opened) {
     context.reader = messageReader(context.runtime, pause);
     context.live = sessionLive(context, facts, opened);
     return await runSessionTurns(context);
+  } catch (failure) {
+    context.runtime?.close();
+    await sessionClaimedTurnFailed(context, warn);
+    throw failure;
   } finally {
+    context.mailbox.stop();
     context.stops?.released();
     context.live?.close();
     await reads.close();

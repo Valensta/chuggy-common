@@ -187,12 +187,12 @@ export function planeOf(
 }
 
 export function queryOf(script) {
-  const seen = {};
+  const seen = { closed: false };
   return {
     seen,
     query: ({ prompt, options }) => {
       seen.options = options;
-      return (async function* messages() {
+      const stream = (async function* messages() {
         let index = 0;
         for await (const asked of prompt) {
           for (const message of script(asked, index, options)) {
@@ -202,6 +202,53 @@ export function queryOf(script) {
           index += 1;
         }
       })();
+      stream.close = () => {
+        seen.closed = true;
+      };
+      return stream;
+    },
+  };
+}
+
+/**
+ * A runtime that reads its input as the SDK's does: on its own, whether or not
+ * anything reads its messages, until the input ends. `seen.input` settles once
+ * it has stopped reading, which a pod that never ends its input leaves
+ * pending, as the CLI this stands for is left holding its stdin open.
+ * `seen.closed` is whether the pod closed it.
+ */
+export function inputReadingQueryOf(script) {
+  const seen = { asked: [], closed: false };
+  return {
+    seen,
+    query: ({ prompt }) => {
+      const pending = [];
+      let wake = () => undefined;
+      let reading = true;
+      seen.input = (async () => {
+        for await (const asked of prompt) {
+          pending.push(...script(asked, seen.asked.length));
+          seen.asked.push(asked);
+          wake();
+        }
+        reading = false;
+        wake();
+      })();
+      const stream = (async function* messages() {
+        while (!seen.closed) {
+          if (pending.length > 0) yield pending.shift();
+          else if (!reading) return;
+          else
+            await new Promise((resolve) => {
+              wake = resolve;
+            });
+        }
+      })();
+      stream.close = () => {
+        seen.closed = true;
+        wake();
+      };
+      return stream;
     },
   };
 }

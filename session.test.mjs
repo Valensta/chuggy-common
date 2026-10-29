@@ -35,6 +35,7 @@ import {
   credentialFile,
   environment,
   facts,
+  inputReadingQueryOf,
   leadRoster,
   mintedCredential,
   planeOf,
@@ -775,6 +776,83 @@ test("a reference bind the plane did not accept ends the session rather than run
       `status ${String(status)} answered a turn the plane cannot resume`,
     );
   }
+});
+
+/**
+ * Catches a session that fails out of its turn loop leaving its input open and
+ * its runtime running, which keeps the process alive with the turn claimed.
+ */
+test("a session that fails mid-turn fails the turn, ends its input and closes its runtime", async () => {
+  const plane = planeOf(
+    [turnOne],
+    {
+      ...facts,
+      kind: "Thread",
+      capabilities: [...threadRoster],
+      agentReference: "runtime-0",
+    },
+    (path) => (path === sessionPlaneRoutes.reference.path ? 409 : undefined),
+  );
+  const runtime = inputReadingQueryOf(() => [
+    { type: "system", subtype: "init", session_id: "runtime-1" },
+    result("success", { result: "ok" }),
+  ]);
+
+  const code = await run({
+    request: plane.request,
+    requestOnce: plane.requestOnce,
+    query: runtime.query,
+  });
+
+  assert.equal(code, 1);
+  assert.deepEqual(
+    plane.calls
+      .filter(({ path }) => path === sessionPlaneRoutes.turnFailure.path)
+      .map(({ body }) => body),
+    [{ turn: "turn-1", failure: "AgentFailed" }],
+  );
+  assert.ok(runtime.seen.closed, "the runtime was left running");
+  const ended = await Promise.race([
+    runtime.seen.input.then(() => true),
+    wait(500).then(() => false),
+  ]);
+  assert.ok(ended, "the session's input was left open");
+});
+
+/** Catches a session that fails on a refused settlement asking the plane again with a failure of the same turn. */
+test("a turn whose settlement the plane refused is not settled again as the session ends", async () => {
+  const settlements = [
+    sessionPlaneRoutes.turnAnswer.path,
+    sessionPlaneRoutes.turnFailure.path,
+  ];
+  for (const refused of settlements)
+    for (const status of [400, 409]) {
+      const plane = planeOf([turnOne], facts, (path) =>
+        path === refused ? status : undefined,
+      );
+      const runtime = inputReadingQueryOf(() => [
+        { type: "system", subtype: "init", session_id: "runtime-1" },
+        result(
+          refused === sessionPlaneRoutes.turnAnswer.path
+            ? "success"
+            : "error_during_execution",
+          { result: "ok" },
+        ),
+      ]);
+
+      const code = await run({ request: plane.request, query: runtime.query });
+
+      const named = `${refused} answering ${String(status)}`;
+      assert.equal(code, 1, `${named} was treated as settled`);
+      assert.deepEqual(
+        plane.calls
+          .filter(({ path }) => settlements.includes(path))
+          .map(({ path }) => path),
+        [refused],
+        `${named} was settled again`,
+      );
+      assert.ok(runtime.seen.closed, `${named} left the runtime running`);
+    }
 });
 
 const leadFacts = {
