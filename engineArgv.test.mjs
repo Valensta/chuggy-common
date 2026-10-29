@@ -26,6 +26,7 @@ import {
   inspectArgv,
   killArgv,
   listArgv,
+  listLinesArgv,
   logsArgv,
   memoryStatsArgv,
   networkCreateArgv,
@@ -524,6 +525,17 @@ test("a pull for a platform names it, the engine's own and either engine's under
   );
 });
 
+test("a pool's containers are listed a line each, name, status and image", () => {
+  assert.deepEqual(listLinesArgv("vteng/chuggy/shame"), [
+    "ps",
+    "--all",
+    "--filter",
+    "label=io.chuggy.pool=vteng/chuggy/shame",
+    "--format",
+    "{{.Names}}  {{.Status}}  {{.Image}}",
+  ]);
+});
+
 test("every other call is handed to either engine as this argv", () => {
   assert.deepEqual(
     [
@@ -716,6 +728,7 @@ function chatRunOf(userns, tmpfs) {
     "--mount",
     "type=bind,source=/home/geoff/.chuggy/claude,target=/var/run/chuggy/credentials/provider,readonly",
     ...[
+      "CHUG_CHAT_PROTOCOL",
       "CHUG_CHAT_CREDENTIAL",
       "CHUG_CHAT_CREDENTIAL_UID",
       "CHUG_CHAT_CREDENTIAL_GID",
@@ -749,6 +762,7 @@ test("a chat supervisor is run attached, capped with no swap past it, its enviro
     chatRunOf([], ["uid=0,gid=0", "uid=1000,gid=1000"]),
   );
   assert.deepEqual(docker.environment, {
+    CHUG_CHAT_PROTOCOL: "1",
     CHUG_CHAT_CREDENTIAL: "/var/run/chuggy/credentials/provider/claude.json",
     CHUG_CHAT_CREDENTIAL_UID: "1000",
     CHUG_CHAT_CREDENTIAL_GID: "1000",
@@ -770,7 +784,7 @@ test("a chat supervisor is run attached, capped with no swap past it, its enviro
   );
 });
 
-test("a chat supervisor podman would leave another's tmpfs root's, whose bind cannot be named, or whose input is not held open, is refused", () => {
+test("a chat supervisor podman would leave another's tmpfs root's, whose bind cannot be named or is not read-only, or whose input is not held open, is refused", () => {
   assert.throws(
     () =>
       chatSupervisorRunArgv(
@@ -787,11 +801,29 @@ test("a chat supervisor podman would leave another's tmpfs root's, whose bind ca
         "docker",
         {
           ...container,
-          binds: [{ source: "/home/a,b", target: "/var/run/chuggy/x" }],
+          binds: [
+            {
+              source: "/home/a,b",
+              target: "/var/run/chuggy/x",
+              readonly: true,
+            },
+          ],
         },
         chatNaming,
       ),
     /cannot be named in a bind mount/u,
+  );
+  assert.throws(
+    () =>
+      chatSupervisorRunArgv(
+        "docker",
+        /** @type {any} */ ({
+          ...container,
+          binds: [{ source: "/home/a", target: "/var/run/chuggy/x" }],
+        }),
+        chatNaming,
+      ),
+    /binds are read-only/u,
   );
   assert.throws(
     () =>

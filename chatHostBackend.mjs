@@ -91,6 +91,7 @@ import { poolSessionPhase } from "./poolSessionPlane.mjs";
  *   attached: (handle: ChatSupervisorHandle) => Promise<{ready: ChatSupervisorReady} | {refused: string}>,
  *   phase: () => ChatSupervisorPhase,
  *   ceiling: () => number,
+ *   stopping: () => string[],
  *   drain: () => void,
  *   closed: () => Promise<void>,
  * }} ChatHostBackend
@@ -580,6 +581,10 @@ export function chatHostBackend(settings, seams) {
       state.supervisor?.phase === "Ready" && !state.supervisor.exited
         ? (state.supervisor.ready?.sessionsMax ?? 0)
         : 0,
+    stopping: () =>
+      [...state.entries]
+        .filter(([, entry]) => entry.stopping)
+        .map(([assignment]) => assignment),
     drain: () => chatHostDrained(state),
     closed: () => chatHostClosed(state),
   };

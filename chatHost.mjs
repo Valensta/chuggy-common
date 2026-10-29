@@ -23,6 +23,12 @@
  * could not be started, or ended of itself, is started again no sooner than
  * a backoff after.
  *
+ * A SESSION IS STOPPED ONCE. It is held until its supervisor answers the
+ * stop, and the plane answers at once a poll holding it, naming it to stop
+ * again; the host takes that as the stop it already made, and a pass that
+ * placed nothing while one is held waits `chatHostStoppingWaitMs` before it
+ * polls again.
+ *
  * THE SUPERVISOR'S CONTAINER IS ROOT WITH THE FEW CAPABILITIES IT NEEDS to
  * make each session's user, directories and mirrors and to drop to that
  * user, and gains none. Its memory is capped at room for each session the
@@ -45,6 +51,7 @@ import { lstat, readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import process from "node:process";
 
+import { chatProtocolVersion } from "@chuggy/worker-contract/chatHost";
 import { workerRepositoriesVariable } from "@chuggy/worker-contract/workerEnvironment";
 import { z } from "zod";
 
@@ -64,6 +71,8 @@ import {
   chatSessionsDirectory,
 } from "./chatSession.mjs";
 import {
+  chatSupervisorProtocolRefusal,
+  chatSupervisorProtocolVariable,
   chatSupervisorSettings,
   chatSupervisorVariables,
 } from "./chatSupervisor.mjs";
@@ -72,6 +81,7 @@ import { controlAsked } from "./control.mjs";
 import {
   chatSupervisorRunArgv,
   imageInspectArgv,
+  inspectArgv,
   killArgv,
   removeArgv,
 } from "./engineArgv.mjs";
@@ -124,7 +134,7 @@ import { imageRegistryHost, registryPull } from "./registryAuth.mjs";
  * @property {true} interactive its input held open, which is the host's stream to it
  * @property {readonly {volume: string, target: string}[]} volumes
  * @property {readonly {target: string, mode: number, uid: number, gid: number, sizeBytes: number, flags: readonly string[]}[]} tmpfs in the order they are mounted, each beneath the one before it
- * @property {readonly {source: string, target: string}[]} binds each read-only
+ * @property {readonly {source: string, target: string, readonly: true}[]} binds
  * @property {number} memoryBytes the most memory it may take, swap included
  * @property {Readonly<Record<string, string>>} environment
  *
@@ -250,13 +260,15 @@ export const chatHostConfigSchema = z.strictObject({
 export const chatHostStatusSchema = z.object({
   /** The image the plane last named. */
   named: z.string().optional(),
-  /** The image the supervisor runs, or the last one started ran. */
+  /** The image of the last supervisor to say it was ready, which may since have ended. */
   used: z.string().optional(),
   /** The host's own image, which it runs in place of the plane's. */
   own: chatHostImageSettingSchema.optional(),
   supervisor: z.enum(chatSupervisorPhases),
   /** Whether a supervisor is being started: its image pulled, or its Ready awaited. */
   starting: z.boolean(),
+  /** The image a supervisor is being started in, while one is. */
+  startingIn: z.string().optional(),
 });
 
 /** How long a supervisor started has to say it is ready, which takes it no more than opening its mirrors. */
@@ -280,6 +292,9 @@ export const chatHostStopWaitMs =
 
 /** The wait between polls of a host with no room, which ask for an answer at once. */
 export const chatHostUnreadyWaitMs = 5_000;
+
+/** The wait between polls of a host holding a session it was told to stop, which the plane answers at once. */
+export const chatHostStoppingWaitMs = 1_000;
 
 /** The least time between starts of a supervisor, after one that failed or ended of itself. */
 export const chatHostRestartBackoffMs = 30_000;
@@ -335,6 +350,7 @@ function chatSupervisorCredentialMount(file) {
 function chatSupervisorEnvironment(places, mount) {
   const names = chatSupervisorVariables;
   const environment = {
+    [chatSupervisorProtocolVariable]: String(chatProtocolVersion),
     ...chatSupervisorCounts(places),
     [names.credential]: mount.file,
     [names.credentialUid]: String(places.credentialOwner.uid),
@@ -344,6 +360,8 @@ function chatSupervisorEnvironment(places, mount) {
       ? {}
       : { [workerRepositoriesVariable]: places.repositories }),
   };
+  const refused = chatSupervisorProtocolRefusal(environment);
+  if (refused !== undefined) throw new RangeError(refused);
   chatSupervisorSettings(environment);
   return environment;
 }
@@ -397,7 +415,7 @@ export function chatSupervisorContainer(image, places, memoryBytes) {
         flags,
       },
     ],
-    binds: [{ source: mount.source, target: mount.target }],
+    binds: [{ source: mount.source, target: mount.target, readonly: true }],
     memoryBytes,
     environment,
   };
@@ -430,6 +448,70 @@ export function chatSupervisorNaming(identity, network) {
 }
 
 /**
+ * The container `name` removed where it has exited, which a run the engine did
+ * not see end leaves behind, and refused where it is still there, one running
+ * among them, which is never killed for it. None of that name is nothing to
+ * remove.
+ *
+ * @param {Engine} engine
+ * @param {string} name
+ * @returns {Promise<void>}
+ */
+export async function chatSupervisorLeftoverRemoved(engine, name) {
+  const removed = await engine.exec(removeArgv(name));
+  if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
+    throw new Error(
+      `the container ${name} is still there, and nothing is started beside it: ${engineFailureLine(removed)}`,
+    );
+}
+
+/**
+ * The states of a container the engine removes without force, as its
+ * inspection names them: podman's `stopped` is one that has exited and is
+ * not yet cleaned up.
+ */
+export const chatSupervisorRemovableStates = Object.freeze([
+  "created",
+  "exited",
+  "stopped",
+  "dead",
+]);
+
+/**
+ * @typedef {{asked: "None"} | {asked: "Failed", reason: string} | {asked: "Unread", reason: string}
+ *   | {asked: "State", state: string, removable: boolean}} ChatSupervisorState its host's supervisor's container as the engine has it: none, an engine that could not be asked, an answer this copy does not read, or its state and whether a start removes it
+ */
+
+/**
+ * What the engine says of `identity`'s supervisor's container.
+ *
+ * @param {Engine} engine
+ * @param {ChatHostIdentity} identity
+ * @returns {Promise<ChatSupervisorState>}
+ */
+export async function chatSupervisorStateAsked(engine, identity) {
+  const name = chatSupervisorName(identity);
+  const inspected = await engine.exec(inspectArgv([name]));
+  if (inspected.code !== 0)
+    return engineFailure(inspected) === "NoSuchContainer"
+      ? { asked: "None" }
+      : { asked: "Failed", reason: engineFailureLine(inspected) };
+  let state;
+  try {
+    state = JSON.parse(inspected.stdout)[0]?.State?.Status;
+  } catch {
+    return { asked: "Unread", reason: `the inspection of ${name} is no JSON` };
+  }
+  return typeof state === "string"
+    ? {
+        asked: "State",
+        state,
+        removable: chatSupervisorRemovableStates.includes(state),
+      }
+    : { asked: "Unread", reason: `the inspection of ${name} names no state` };
+}
+
+/**
  * @typedef {object} ChatSupervisorRunSeams
  * @property {Engine} engine the CLI the host's site names, which runs the supervisor too
  * @property {ChatSupervisorNaming} naming
@@ -459,11 +541,7 @@ export function chatSupervisorStarted(seams) {
       container,
       naming,
     );
-    const removed = await engine.exec(removeArgv(naming.name));
-    if (removed.code !== 0 && engineFailure(removed) !== "NoSuchContainer")
-      throw new Error(
-        `the container ${naming.name} is still there, and no supervisor is started beside it: ${engineFailureLine(removed)}`,
-      );
+    await chatSupervisorLeftoverRemoved(engine, naming.name);
     const child = spawn(engineName, argv, {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...environment },
@@ -485,81 +563,93 @@ export function chatSupervisorStarted(seams) {
   };
 }
 
-/** Whether the engine holds `image` now. */
-async function chatHostImageHere(state, image) {
-  const answer = await state.seams.engine.exec(imageInspectArgv(image), {
-    cut: state.cut.signal,
-  });
-  return answer.code === 0;
-}
-
-/** Runs one engine call of a pull, cut short once the host ends. */
-function chatHostPullRun(state) {
-  return (argv, environment) =>
-    state.seams.engine.exec(argv, { environment, cut: state.cut.signal });
-}
+/**
+ * @typedef {object} ChatImagePull what a session image is pulled through
+ * @property {Engine} engine
+ * @property {PullSite} site
+ * @property {string | undefined} registryHost the pool's registry, an image of which the plane names is pulled under the pool's token
+ * @property {Pick<WorkerPoolClient["tokens"], "acquire" | "invalidate">} tokens
+ * @property {ChatHostImageSetting} [own] the host's own image, where it runs one
+ * @property {AbortSignal} [cut] cuts each engine call short
+ *
+ * @typedef {{pulled: "Here"} | {pulled: "Pulled", pooled: boolean}} ChatImagePulled already here, or pulled, under the pool's token or not
+ */
 
 /**
- * An image of the plane's pulled, for the engine's own platform: under the
- * pool's token where it is in the pool's registry, once more under a fresh one
- * where that was refused, and otherwise as the engine's own login pulls it.
+ * `image` here, as a host has it before a supervisor starts in it, or why it
+ * is not. One the plane names is pulled where it is missing: under the pool's
+ * token where it is in the pool's registry, once more under a fresh one where
+ * that was refused, and otherwise as the engine's own login pulls it. The
+ * host's own is pulled by that login as its setting says: before each start,
+ * where it is missing, or never. Each pull is for the engine's own platform.
+ *
+ * @param {ChatImagePull} pull
+ * @param {string} image
+ * @returns {Promise<ChatImagePulled>}
  */
-async function chatHostNamedPulled(state, image) {
-  const { seams } = state;
+export async function chatImagePulled(pull, image) {
+  const { own } = pull;
+  if (own?.pull === "always") return chatImagePullMade(pull, image, undefined);
+  const here = await pull.engine.exec(imageInspectArgv(image), {
+    ...(pull.cut === undefined ? {} : { cut: pull.cut }),
+  });
+  if (here.code === 0) return { pulled: "Here" };
+  if (own?.pull === "never")
+    throw new Error(
+      `${image} is not here, and the host's setting pulls it never`,
+    );
   const host = imageRegistryHost(image);
-  if (host !== state.registryHost) return chatHostPullMade(state, image);
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const acquired = await state.client.tokens.acquire();
+  if (own !== undefined || host !== pull.registryHost)
+    return chatImagePullMade(pull, image, undefined);
+  for (let attempt = 0; ; attempt += 1) {
+    const acquired = await pull.tokens.acquire();
     if (acquired.acquired !== "Token")
       throw new Error(
         `the pool has no token to pull ${image} with: ${acquired.evidence}`,
       );
-    const answer = await registryPull(
-      seams.site,
-      image,
-      undefined,
-      { host, token: acquired.token },
-      chatHostPullRun(state),
-    );
-    if (answer.code === 0) return undefined;
-    if (engineFailure(answer) !== "Unauthorized" || attempt > 0)
-      throw new Error(
-        `${image} could not be pulled: ${engineFailureLine(answer)}`,
-      );
-    state.client.tokens.invalidate(acquired.token);
+    try {
+      return await chatImagePullMade(pull, image, {
+        host,
+        token: acquired.token,
+      });
+    } catch (failure) {
+      if (!(failure instanceof ChatImageUnauthorized) || attempt > 0)
+        throw failure;
+      pull.tokens.invalidate(acquired.token);
+    }
   }
-  return undefined;
 }
 
-/** An image pulled as the engine's own login pulls it, for its own platform. */
-async function chatHostPullMade(state, image) {
+/** A pull a registry refused as unauthorized, which a fresh token may not be. */
+class ChatImageUnauthorized extends Error {}
+
+/**
+ * `image` pulled, under `credential` where one is given and otherwise as the
+ * engine's own login pulls it.
+ *
+ * @param {ChatImagePull} pull
+ * @param {string} image
+ * @param {{host: string, token: string} | undefined} credential
+ * @returns {Promise<ChatImagePulled>}
+ */
+async function chatImagePullMade(pull, image, credential) {
   const answer = await registryPull(
-    state.seams.site,
+    pull.site,
     image,
     undefined,
-    undefined,
-    chatHostPullRun(state),
+    credential,
+    (argv, environment) =>
+      pull.engine.exec(argv, {
+        environment,
+        ...(pull.cut === undefined ? {} : { cut: pull.cut }),
+      }),
   );
-  if (answer.code !== 0)
-    throw new Error(
-      `${image} could not be pulled: ${engineFailureLine(answer)}`,
-    );
-}
-
-/** The image a supervisor is about to start in, here: the host's own as its setting says, the plane's where it is not here. */
-async function chatHostPulled(state, image) {
-  const own = state.settings.image;
-  if (own === undefined)
-    return (await chatHostImageHere(state, image))
-      ? undefined
-      : chatHostNamedPulled(state, image);
-  if (own.pull === "always") return chatHostPullMade(state, image);
-  if (await chatHostImageHere(state, image)) return undefined;
-  if (own.pull === "never")
-    throw new Error(
-      `${image} is not here, and the host's setting pulls it never`,
-    );
-  return chatHostPullMade(state, image);
+  if (answer.code === 0)
+    return { pulled: "Pulled", pooled: credential !== undefined };
+  const failed = `${image} could not be pulled: ${engineFailureLine(answer)}`;
+  throw engineFailure(answer) === "Unauthorized"
+    ? new ChatImageUnauthorized(failed)
+    : new Error(failed);
 }
 
 /** The image the host is to run: its own, or the one the plane last named. */
@@ -576,7 +666,19 @@ function chatHostWanted(state) {
 async function chatHostStarted(state, image) {
   const { seams } = state;
   try {
-    await chatHostPulled(state, image);
+    await chatImagePulled(
+      {
+        engine: seams.engine,
+        site: seams.site,
+        registryHost: state.registryHost,
+        tokens: state.client.tokens,
+        ...(state.settings.image === undefined
+          ? {}
+          : { own: state.settings.image }),
+        cut: state.cut.signal,
+      },
+      image,
+    );
     if (state.cut.signal.aborted) return;
     const handle = await seams.started(
       chatSupervisorContainer(
@@ -641,17 +743,20 @@ function chatHostFollowed(state, draining, idle) {
     return;
   state.endSeen = false;
   state.drained = false;
+  state.startingIn = wanted;
   state.starting = (async () => {
     await state.backend.closed();
     await chatHostStarted(state, wanted);
   })().finally(() => {
     state.starting = undefined;
+    state.startingIn = undefined;
   });
 }
 
 /**
  * The plane a pass polls: asking for an answer at once while the host has
- * no room, and keeping the image each answer names.
+ * no room, keeping the image each answer names, and naming no stop of a
+ * session already stopping.
  *
  * @param {ChatHostState} state
  * @param {WorkerPoolClient["plane"]} plane
@@ -675,7 +780,12 @@ function chatHostPlane(state, plane) {
           );
         state.named = polled.chatImage;
       }
-      return polled;
+      if (polled.polled !== "Reconciled") return polled;
+      const stopping = state.backend.stopping();
+      return {
+        ...polled,
+        stop: polled.stop.filter((stop) => !stopping.includes(stop)),
+      };
     },
   };
 }
@@ -688,6 +798,64 @@ function chatHostPlane(state, plane) {
  */
 export function chatHostMemoryBytes(settings) {
   return settings.sessionsMax * settings.sessionMemoryBytes;
+}
+
+/** How the host's own image is pulled, as a person says it. */
+const chatHostPulls = Object.freeze({
+  always: "before each start",
+  missing: "where it is missing",
+  never: "never",
+});
+
+/**
+ * A host's settings, as a CLI's `status` and `doctor` say them.
+ *
+ * @param {Omit<ChatHostSettings, "places">} settings
+ */
+export function chatHostSettingsLine(settings) {
+  const mib = (/** @type {number} */ bytes) => String(bytes / 2 ** 20);
+  const image =
+    settings.image === undefined
+      ? "the one chuggy names"
+      : `${settings.image.image}, pulled ${chatHostPulls[settings.image.pull]}`;
+  return `sessionsMax ${String(settings.sessionsMax)}, sessionMemoryMib ${mib(settings.sessionMemoryBytes)}, so the supervisor is capped at ${mib(chatHostMemoryBytes(settings))} MiB, idleSecs ${String(settings.idleSecs)}, outputBytesMax ${String(settings.outputBytesMax)}, image ${image}`;
+}
+
+/**
+ * What a host's service says of its supervisor: the image one starting is
+ * starting in, the one a ready or draining one runs, and the last one ready
+ * where none runs, beside any start under way.
+ *
+ * @param {ChatHostStatus} status
+ */
+function chatHostSupervisorSaid(status) {
+  const { supervisor, used, startingIn } = status;
+  const phase = supervisor.toLowerCase();
+  if (supervisor === "Starting")
+    return startingIn === undefined ? phase : `${phase} in ${startingIn}`;
+  const live = supervisor === "Ready" || supervisor === "Draining";
+  const ran =
+    used === undefined ? "" : live ? ` in ${used}` : `, last ready in ${used}`;
+  const start = status.starting
+    ? `; a start${startingIn === undefined ? "" : ` in ${startingIn}`} is under way`
+    : "";
+  return `${phase}${ran}${start}`;
+}
+
+/**
+ * What a host's service says of itself, a line each, as a CLI's `status`
+ * says it, or that none answers.
+ *
+ * @param {ChatHostStatus | undefined} status
+ * @returns {string[]}
+ */
+export function chatHostStatusLines(status) {
+  if (status === undefined) return ["service: not running"];
+  return [
+    "service: running",
+    `supervisor: ${chatHostSupervisorSaid(status)}`,
+    `image: chuggy names ${status.named ?? "none yet"}${status.own === undefined ? "" : `, and the host runs its own, ${status.own.image}`}`,
+  ];
 }
 
 /**
@@ -765,6 +933,7 @@ export function checkedChatHostSettings(settings, engineName) {
  * @property {boolean} endSeen
  * @property {boolean} drained
  * @property {Promise<void> | undefined} starting a supervisor's start, while one runs
+ * @property {string | undefined} startingIn the image that start is in
  * @property {AbortController} cut aborted once the host ends, which cuts a pull short and starts nothing more
  *
  * @typedef {object} ChatHost
@@ -818,6 +987,7 @@ export function chatHost(credentials, settings, seams) {
     endSeen: false,
     drained: false,
     starting: undefined,
+    startingIn: undefined,
     cut: new globalThis.AbortController(),
   };
   client.plane = chatHostPlane(state, client.plane);
@@ -829,6 +999,9 @@ export function chatHost(credentials, settings, seams) {
       own: checked.image,
       supervisor: backend.phase(),
       starting: state.starting !== undefined,
+      ...(state.startingIn === undefined
+        ? {}
+        : { startingIn: state.startingIn }),
     }),
   };
 }
@@ -891,6 +1064,8 @@ async function chatHostRun(state) {
       if (pass.placed + pass.stopped + pass.refused + pass.ended > 0)
         seams.log(poolRunnerPassLine(pass));
       if (waiting) await chatHostUnready(state);
+      else if (pass.placed === 0 && state.backend.stopping().length > 0)
+        await seams.sleep(chatHostStoppingWaitMs);
       else if (pass.claim !== undefined)
         await seams.sleep(workerPoolClaimWaitMs);
     }

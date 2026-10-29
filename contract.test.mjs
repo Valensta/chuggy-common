@@ -55,6 +55,7 @@ import {
 import { z } from "zod";
 
 import {
+  chuggyMemberTools,
   chuggyProjectTools,
   chuggyToolContext,
   chuggyToolDefinitions,
@@ -1168,7 +1169,7 @@ function toolRoutesMatching(pathname) {
 
 test("the pod's tools reach exactly the routes the contract gives them", async () => {
   const reached = new Set();
-  for (const definition of chuggyProjectTools) {
+  for (const definition of [...chuggyProjectTools, ...chuggyMemberTools]) {
     const paths = [];
     const docs = [];
     const context = chuggyToolContext(
@@ -1226,6 +1227,7 @@ function everyRoster() {
 test("the pod defines every tool the contract rosters, and no other", () => {
   const defined = [
     ...chuggyProjectTools.map(({ name }) => name),
+    ...chuggyMemberTools.map(({ name }) => name),
     ...leadDecisionStaging().definitions.map(({ name }) => name),
   ];
 

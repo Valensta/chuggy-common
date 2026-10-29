@@ -14,6 +14,7 @@ import {
   allChuggyTools,
   briefLineCharsMax,
   chuggyDocsIndex,
+  chuggyToolCapabilities,
   chuggyToolDocsResponseBytesMax,
   chuggyToolImageResponseBytesMax,
   chuggyToolPrefix,
@@ -43,6 +44,7 @@ import {
   chuggyToolAnswerBytesMax,
   chuggyToolAnswerCopiesInEntry,
   chuggyToolAnswerEnvelopeBytesMax,
+  chuggyMemberTools,
   chuggyProjectTools,
   chuggyToolContext,
   chuggyToolDefinitions,
@@ -205,6 +207,8 @@ const pageBounds = {
   read_refusals: agenticRefusalsAnsweredMax,
   list_executions: nativeHttpPageItemsMax,
   read_thread: threadTurnsAnsweredMax,
+  list_projects: nativeHttpPageItemsMax,
+  read_my_thread: threadTurnsAnsweredMax,
 };
 
 test("every read that takes a limit admits its route's bound and no more", () => {
@@ -3154,6 +3158,19 @@ const projectToolArguments = {
   },
 };
 
+/** What every member tool is driven with where a suite drives them all. */
+const memberToolArguments = {
+  read_my_abilities: {},
+  list_projects: {},
+  list_my_threads: {},
+  read_my_thread: { session: "session-9" },
+  list_my_runners: {},
+  read_chat_host: {},
+};
+
+/** Every tool's arguments, project and member alike. */
+const toolArguments = { ...projectToolArguments, ...memberToolArguments };
+
 /**
  * Catches a tool built on a route outside its session's own project, which the
  * API refuses a session bearer however the membership reads: an inventory of
@@ -3265,6 +3282,184 @@ test("every project tool a session holds asks its route, read_docs the docs host
   }
 });
 
+/** A member's own session's task: its tenant and its API, and no project at all, so a tool that read one would raise. */
+const memberTask = { tenant: "vteng", api: { url: task.api.url } };
+
+/**
+ * A member's own session's tools over a fake chuggy, which records each
+ * request with the bearer it carried and answers what `answer` makes of its
+ * path, or an empty body.
+ */
+function memberToolsOf(answer) {
+  const calls = [];
+  const docs = [];
+  const context = chuggyToolContext(memberTask, bearer, {
+    capabilities: ["MemberRead"],
+    request: async (_task, carried, path, init) => {
+      calls.push({ bearer: carried, path, method: init?.method ?? "GET" });
+      const given = answer?.(path) ?? { status: 200, body: "{}" };
+      return { status: given.status, text: async () => given.body };
+    },
+    docsFetch: async (url) => {
+      docs.push(String(url));
+      return new globalThis.Response("# docs");
+    },
+    turn: () => "turn-1",
+  });
+  const held = new Map(
+    chuggyToolDefinitions(context).map((definition) => [
+      definition.name,
+      chuggyToolHandler(definition, z),
+    ]),
+  );
+  return { calls, docs, held, call: (name, args) => held.get(name)(args) };
+}
+
+test("a member's own session is served its member tools and read_docs, and no project or decision tool", () => {
+  const { held } = memberToolsOf();
+
+  assert.deepEqual(
+    [...held.keys()].sort(),
+    [...chuggyToolCapabilities.MemberRead].sort(),
+  );
+  assert.deepEqual(
+    [...held.keys()].filter((name) => name !== "read_docs").sort(),
+    chuggyMemberTools.map(({ name }) => name).sort(),
+  );
+});
+
+/** Catches a member tool built on a project's route, which the API refuses a member's own session's bearer outright. */
+test("every member tool asks its own tenant's route under the session's bearer, and names no project", async () => {
+  const asked = {
+    read_my_abilities: [{}, "/api/v1/tenants/vteng/chat/abilities"],
+    list_projects: [
+      { after: "alpha", limit: 2 },
+      "/api/v1/tenants/vteng/chat/projects?after=alpha&limit=2",
+    ],
+    list_my_threads: [{}, "/api/v1/tenants/vteng/chat/threads"],
+    read_my_thread: [
+      { session: "session 9", before: 4, limit: 2 },
+      "/api/v1/tenants/vteng/chat/threads/session%209?before=4&limit=2",
+    ],
+    list_my_runners: [{}, "/api/v1/tenants/vteng/personal-runner"],
+    read_chat_host: [{}, "/api/v1/tenants/vteng/chat-host"],
+  };
+  assert.deepEqual(
+    Object.keys(asked).sort(),
+    chuggyMemberTools.map(({ name }) => name).sort(),
+  );
+  for (const [name, [args, path]] of Object.entries(asked)) {
+    const { calls, docs, call } = memberToolsOf(() => ({
+      status: 200,
+      body: '{"read":"yes"}',
+    }));
+
+    const answer = await call(name, args);
+
+    assert.equal(answer.isError, undefined, name);
+    assert.equal(textOf(answer), 'HTTP 200\n{"read":"yes"}', name);
+    assert.deepEqual(calls, [{ bearer, path, method: "GET" }], name);
+    assert.deepEqual(docs, [], name);
+  }
+});
+
+test("a member's own session reads the docs from the docs host and asks chuggy's API nothing", async () => {
+  const { calls, docs, call } = memberToolsOf();
+
+  const answer = await call("read_docs", {});
+
+  assert.equal(answer.isError, undefined);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(docs, [chuggyDocsIndex]);
+});
+
+test("a member tool relays a refusal as the API answered it", async () => {
+  for (const [name, status, body] of [
+    ["list_my_runners", 404, '{"code":"NotFound"}'],
+    ["read_chat_host", 404, '{"code":"NotFound"}'],
+    ["read_my_thread", 404, '{"code":"NotFound"}'],
+    ["list_projects", 403, '{"code":"Forbidden"}'],
+    ["read_my_abilities", 401, '{"action":"stop"}'],
+  ]) {
+    const { calls, call } = memberToolsOf(() => ({ status, body }));
+
+    const answer = await call(name, memberToolArguments[name]);
+
+    assert.equal(answer.isError, true, name);
+    assert.equal(textOf(answer), `HTTP ${String(status)}\n${body}`, name);
+    assert.equal(calls.length, 1, name);
+  }
+});
+
+test("a member tool refuses arguments outside its shape and asks nothing", async () => {
+  const { calls, call } = memberToolsOf();
+
+  for (const [name, args] of [
+    ["read_my_thread", {}],
+    ["read_my_thread", { session: "" }],
+    ["read_my_thread", { session: "s", before: 0 }],
+    ["read_my_thread", { session: "s", limit: threadTurnsAnsweredMax + 1 }],
+    ["list_projects", { limit: nativeHttpPageItemsMax + 1 }],
+    ["list_projects", { after: "" }],
+  ]) {
+    const answer = await call(name, args);
+    assert.equal(answer.isError, true, `${name} ${JSON.stringify(args)}`);
+  }
+  assert.deepEqual(calls, []);
+});
+
+/**
+ * Each member tool names the fields its route answers and what that route
+ * leaves out: projects in retention are never listed, the thread listing is
+ * capped with no marker of what it cut, a project's thread and a member with
+ * no runner or host are each answered 404, and a page's turns are oldest first.
+ */
+test("each member tool is described as its route answers it", () => {
+  const described = (tool) =>
+    chuggyMemberTools.find(({ name }) => name === tool).description;
+  const claims = {
+    read_my_abilities: [
+      /`principal`, their principal, encoded as a ticket's `creator` is/,
+      /`openUnscopedChat`, `executeHosted`, `registerPersonalRunner` and `administerTenant`, each true or false/,
+    ],
+    list_projects: [
+      /in identity order, none in retention/,
+      /its `lifecycle` \(Active, Suspended, IntegrityBlocked or Deleting\) and `role`/,
+      /may hold fewer, or none, and only `nextAfter`, present, says there are more/,
+    ],
+    list_my_threads: [
+      /Their own open threads come first, then their other open ones, then the rest, each by when it last moved, newest first/,
+      /as many as one answer holds, so an older one past them is not listed/,
+      /its `state` \(Open or Closed\)/,
+      /`lastActivityAt`, when it last moved, and `hidden`/,
+    ],
+    read_my_thread: [
+      /`turns`, the newest before `before`, oldest first/,
+      /`nextBefore`, present, is the cursor for the turns before them/,
+      /A project's thread, or a session that is not one of theirs, is answered 404/,
+    ],
+    list_my_runners: [
+      /`polledAt`, its newest poll, absent until it polls, `live`/,
+      /`executionsLive`, the same of its newest poll for executions alone, which may be older/,
+      /the version chuggy `pinned` for it where it pins one, absent where it named none; and `projects`/,
+      /Answers 404 where they have none/,
+    ],
+    read_chat_host: [
+      /`polledAt`, its newest poll, absent until it polls, `live`/,
+      /the version chuggy `pinned` for it where it pins one, absent where it named none/,
+      /Answers 404 where they have none/,
+    ],
+  };
+  assert.deepEqual(
+    Object.keys(claims).sort(),
+    chuggyMemberTools.map(({ name }) => name).sort(),
+  );
+  for (const [tool, said] of Object.entries(claims))
+    for (const claim of said) assert.match(described(tool), claim, tool);
+  assert.doesNotMatch(described("list_projects"), /Retention\)/);
+  assert.doesNotMatch(described("list_my_threads"), /Orphaned/);
+});
+
 /** The `limit` one request asked with, or nothing where it asked with none. */
 function limitAsked({ path }) {
   const asked = new URL(path, task.api.url).searchParams.get("limit");
@@ -3337,7 +3532,7 @@ test("a call that gave no limit asks again from half the largest its shape admit
       ),
     }));
 
-    const answer = await call(name, projectToolArguments[name]);
+    const answer = await call(name, toolArguments[name]);
 
     assert.ok(answer.isError === undefined, name);
     assert.equal(textOf(answer), `HTTP 200\n${pageBodyOf(name)}`, name);
@@ -3364,7 +3559,7 @@ test("an item too large alone is refused once one is asked for, inside what a to
     }));
 
     const answer = await call(name, {
-      ...projectToolArguments[name],
+      ...toolArguments[name],
       limit: max,
     });
 

@@ -36,16 +36,22 @@ import {
   chatHostMemoryBytes,
   chatHostRestartBackoffMs,
   chatHostSessionsMaxDefault,
+  chatHostSettingsLine,
   chatHostStatusAsked,
+  chatHostStatusLines,
   chatHostStopWaitMs,
+  chatHostStoppingWaitMs,
   chatHostUnreadyWaitMs,
   chatHostVolumes,
+  chatImagePulled,
   chatSessionIdsNeeded,
   chatSessionMemoryBytesDefault,
   chatSupervisorContainer,
+  chatSupervisorLeftoverRemoved,
   chatSupervisorName,
   chatSupervisorNaming,
   chatSupervisorStarted,
+  chatSupervisorStateAsked,
   checkedChatHostSettings,
 } from "./chatHost.mjs";
 import {
@@ -116,15 +122,20 @@ async function settled() {
 /**
  * A supervisor answering as the protocol says, of `sessionsMax`: each
  * session started at once, and, told to drain, each ended and itself gone,
- * or, `lingering`, once `finish` is called; `frames` is what the host wrote
- * it.
+ * or, `lingering`, once `finish` is called; each told to stop ended at once,
+ * or, `holding`, once `stopsEnded` is called; `frames` is what the host
+ * wrote it.
  */
-function supervisorOf(sessionsMax = 3, lingering = false) {
+function supervisorOf(
+  sessionsMax = 3,
+  { lingering = false, holding = false } = {},
+) {
   const input = new PassThrough();
   const output = new PassThrough();
   const errors = new PassThrough();
   const frames = [];
   const running = new Set();
+  const stopped = new Set();
   let exit;
   const exited = new Promise((resolve) => {
     exit = resolve;
@@ -141,6 +152,11 @@ function supervisorOf(sessionsMax = 3, lingering = false) {
     say({ frame: "Drained" });
     gone();
   };
+  const stopsEnded = () => {
+    for (const assignment of stopped)
+      say({ frame: "Ended", assignment, phase: "Failed" });
+    stopped.clear();
+  };
   let pending = "";
   input.on("data", (chunk) => {
     pending += String(chunk);
@@ -151,9 +167,10 @@ function supervisorOf(sessionsMax = 3, lingering = false) {
       if (frame.frame === "Start") {
         running.add(frame.assignment);
         say({ frame: "Started", assignment: frame.assignment });
-      } else if (frame.frame === "Stop" && running.delete(frame.assignment))
-        say({ frame: "Ended", assignment: frame.assignment, phase: "Failed" });
-      else if (frame.frame === "Drain" && !lingering) finish();
+      } else if (frame.frame === "Stop" && running.delete(frame.assignment)) {
+        stopped.add(frame.assignment);
+        if (!holding) stopsEnded();
+      } else if (frame.frame === "Drain" && !lingering) finish();
     }
   });
   input.on("finish", gone);
@@ -166,6 +183,7 @@ function supervisorOf(sessionsMax = 3, lingering = false) {
   return {
     frames,
     finish,
+    stopsEnded,
     crash: gone,
     handle: { input, output, errors, exited, kill: gone },
   };
@@ -217,12 +235,41 @@ function engineOf(seen, { present, pulls, gate }) {
 }
 
 /**
+ * A host's clock and its waits, each wait taken into `sleeps`: one outlasts
+ * a start the host is making unless `hasty`, so a start takes no time of the
+ * clock, and one the start's end cut short is on the clock by the first time
+ * it is read after, whenever the wait itself notices.
+ */
+function clockOf(sleeps, hasty, starting) {
+  let clock = 0;
+  let owed = 0;
+  const now = () => {
+    if (!starting()) {
+      clock += owed;
+      owed = 0;
+    }
+    return clock;
+  };
+  const sleep = async (ms) => {
+    sleeps.push(ms);
+    if (hasty || !starting()) {
+      clock += ms;
+      return;
+    }
+    owed += ms;
+    while (starting()) await moment();
+    now();
+  };
+  return { now, sleep };
+}
+
+/**
  * A chat host over fakes: `answers` is each poll's answer in turn, a poll
  * past them denied, and `present` the images the engine holds. A pull waits
- * on `gate`; a host's wait outlasts a start it is making unless `hasty`, so
- * a start takes no time of the host's clock. A start answers what `handed`
- * makes of each supervisor's handle, given what the host has logged. Its
- * site's engine is `engine`.
+ * on `gate`; its clock is as `clockOf` keeps it, `hasty` or not. Each
+ * supervisor answers as `answering` says, and a start answers what `handed`
+ * makes of its handle, given what the host has logged. Its site's engine is
+ * `engine`.
  */
 async function hostOf(
   t,
@@ -233,7 +280,7 @@ async function hostOf(
     given = {},
     gate,
     hasty = false,
-    lingering = false,
+    answering = {},
     handed = (handle) => handle,
     engine = "docker",
   },
@@ -253,10 +300,14 @@ async function hostOf(
   const logged = [];
   const supervisors = [];
   const invalidated = [];
-  let clock = 0;
   let minted = 0;
   /** @type {ReturnType<typeof chatHost> | undefined} */
   let host;
+  const { now, sleep } = clockOf(
+    seen.sleeps,
+    hasty,
+    () => host?.status().starting ?? false,
+  );
   host = chatHost(
     credentials,
     { ...settings, ...given },
@@ -266,20 +317,16 @@ async function hostOf(
       started: (container, engineName) => {
         seen.started.push(container);
         seen.engines.push(engineName);
-        seen.startedMs.push(clock);
+        seen.startedMs.push(now());
         seen.events.push(`started ${container.image}`);
-        const supervisor = supervisorOf(3, lingering);
+        const supervisor = supervisorOf(3, answering);
         supervisors.push(supervisor);
         return handed(supervisor.handle, logged);
       },
       log: (line) => logged.push(line),
       logFor: (assignment) => (line) => logged.push(`${assignment}: ${line}`),
-      sleep: async (ms) => {
-        seen.sleeps.push(ms);
-        while (!hasty && host?.status().starting) await moment();
-        clock += ms;
-      },
-      nowMs: () => clock,
+      sleep,
+      nowMs: now,
       tokens: {
         acquire: async () => ({
           acquired: "Token",
@@ -288,7 +335,7 @@ async function hostOf(
         invalidate: (token) => invalidated.push(token),
       },
       fetch: planeOf(seen, answers, supervisors, {
-        nowMs: () => clock,
+        nowMs: now,
         status: () => host?.status(),
       }),
     },
@@ -429,7 +476,7 @@ test("a drained supervisor's sessions are named as ended before a supervisor is 
       { chatImage: two },
       { chatImage: two },
     ],
-    lingering: true,
+    answering: { lingering: true },
   });
   await run.host.run();
   assert.deepEqual(run.seen.ended, ["Succeeded"]);
@@ -441,18 +488,67 @@ test("a drained supervisor's sessions are named as ended before a supervisor is 
   assert.deepEqual(run.host.status().used, two);
 });
 
+test("a session stopped is stopped once while its supervisor ends it, and the polls the plane answers at once with its stop meanwhile are a wait apart unless one placed a session", async (t) => {
+  const named = { chatImage: one };
+  const stop = { chatImage: one, stop: ["a"] };
+  const run = await hostOf(t, {
+    answers: [
+      named,
+      { chatImage: one, sessions: [sessionOf("a")] },
+      stop,
+      { ...stop, sessions: [sessionOf("b")] },
+      stop,
+      stop,
+      (supervisors) => {
+        supervisors[0].stopsEnded();
+        return named;
+      },
+      named,
+    ],
+    given: { sessionsMax: 3 },
+    answering: { holding: true },
+  });
+  assert.equal((await run.host.run()).passed, "Denied");
+  assert.deepEqual(
+    run.supervisors[0].frames.map(({ frame }) => frame),
+    ["Start", "Stop", "Start"],
+  );
+  assert.deepEqual(
+    run.seen.polls.map(({ held }) => held),
+    [[], [], ["a"], ["a"], ["a", "b"], ["a", "b"], ["a", "b"], ["b"], ["b"]],
+  );
+  assert.deepEqual(run.seen.sleeps, [
+    chatHostUnreadyWaitMs,
+    chatHostStoppingWaitMs,
+    chatHostStoppingWaitMs,
+    chatHostStoppingWaitMs,
+  ]);
+  assert.deepEqual(
+    run.logged.filter((line) => line.startsWith("placed ")),
+    [
+      "placed 1, stopped 0, refused 0",
+      "placed 0, stopped 1, refused 0",
+      "placed 1, stopped 0, refused 0",
+    ],
+  );
+  assert.deepEqual(run.seen.ended, []);
+});
+
 test("a host goes on polling while its image is pulled, and a pull the host's end cuts short starts nothing", async (t) => {
   let release = () => undefined;
   const gate = new Promise((resolve) => {
     release = resolve;
   });
   const named = () => ({ chatImage: one });
+  /** @type {unknown[]} */
+  const pulling = [];
   const run = await hostOf(t, {
     answers: [
       named(),
       named(),
       named(),
-      () => {
+      (_supervisors, _nowMs, status) => {
+        pulling.push(status());
         release();
         return named();
       },
@@ -473,6 +569,17 @@ test("a host goes on polling while its image is pulled, and a pull the host's en
     [`started ${one}`],
   );
   assert.equal(run.seen.polls.at(-1).wantedSessions, "2");
+  assert.deepEqual(pulling, [
+    {
+      named: one,
+      used: undefined,
+      own: undefined,
+      supervisor: "Absent",
+      starting: true,
+      startingIn: one,
+    },
+  ]);
+  assert.equal(run.host.status().startingIn, undefined);
   const cut = await hostOf(t, {
     answers: [named(), named(), named()],
     gate: new Promise(() => undefined),
@@ -710,6 +817,7 @@ test("a supervisor's container is root with the capabilities it needs and none t
       {
         source: "/home/geoff/.chuggy/claude",
         target: "/var/run/chuggy/credentials/provider",
+        readonly: true,
       },
     ],
     memoryBytes: 6 * gib,
@@ -717,8 +825,9 @@ test("a supervisor's container is root with the capabilities it needs and none t
   });
 });
 
-test("a supervisor's container is told its counts, the credential's file and owner, and the site's", () => {
+test("a supervisor's container is told the protocol its host speaks, its counts, the credential's file and owner, and the site's", () => {
   assert.deepEqual(supervisorContainerOf().environment, {
+    CHUG_CHAT_PROTOCOL: String(chatProtocolVersion),
     CHUG_CHAT_SESSIONS_MAX: "4",
     CHUG_CHAT_CREDENTIAL: "/var/run/chuggy/credentials/provider/claude.json",
     CHUG_CHAT_CREDENTIAL_UID: "1000",
@@ -989,7 +1098,7 @@ test("a supervisor is started once a container of its name that has exited is re
   });
   await assert.rejects(
     started(container, "docker"),
-    /is still there, and no supervisor is started beside it/u,
+    /is still there, and nothing is started beside it/u,
   );
   assert.deepEqual(seen.execs, [["rm", "-v", name]]);
   assert.deepEqual(seen.spawned, []);
@@ -1100,5 +1209,291 @@ test("a credential is handed a supervisor only alone in its directory, and not a
   assert.match(
     String(await chatCredentialAloneRefusal(join(root, "absent", "x.json"))),
     /cannot be read/u,
+  );
+});
+
+/**
+ * A pull of `image` through an engine holding `present`, whose pulls answer
+ * `pulls` in turn, and a pool whose tokens `acquired` says are issued.
+ */
+async function pullOf(t, { present = [], pulls = [], own, acquired = true }) {
+  const runtimeDir = await mkdtemp(join(tmpdir(), "chuggy-chat-pull-"));
+  t.after(() => rm(runtimeDir, { recursive: true, force: true }));
+  const seen = { execs: [], cuts: [], invalidated: [] };
+  const cut = new globalThis.AbortController().signal;
+  let minted = 0;
+  const pull = {
+    engine: {
+      exec: async (argv, call) => {
+        seen.execs.push({ argv: [...argv], environment: call?.environment });
+        seen.cuts.push(call?.cut);
+        if (argv[0] === "image")
+          return {
+            code: present.includes(argv.at(-1)) ? 0 : 1,
+            stdout: "",
+            stderr: "no such image",
+          };
+        return pulls.shift() ?? { code: 0, stdout: "", stderr: "" };
+      },
+      execTail: async () => assert.fail("no tail is read"),
+    },
+    site: { engine: "docker", runtimeDir, dockerHost: "unix:///docker.sock" },
+    registryHost: "registry.invalid",
+    tokens: {
+      acquire: async () =>
+        acquired
+          ? { acquired: "Token", token: `pool-${String((minted += 1))}` }
+          : { acquired: "Unavailable", evidence: "the issuer is down" },
+      invalidate: (token) => seen.invalidated.push(token),
+    },
+    ...(own === undefined ? {} : { own }),
+    cut,
+  };
+  return { pull, seen, cut };
+}
+
+const unauthorized = {
+  code: 1,
+  stdout: "",
+  stderr: "Error: unauthorized: authentication required",
+};
+
+/**
+ * Catches a CLI's doctor pulling a pool's image other than as its host
+ * would: without the pool's token, or not once more under a fresh one.
+ */
+test("a session image the plane names is pulled under the pool's token, once more under a fresh one, and no more", async (t) => {
+  const pooled = await pullOf(t, { pulls: [unauthorized] });
+  assert.deepEqual(await chatImagePulled(pooled.pull, one), {
+    pulled: "Pulled",
+    pooled: true,
+  });
+  const pulls = pooled.seen.execs.filter(({ argv }) => argv[0] === "pull");
+  assert.equal(pulls.length, 2);
+  for (const { environment } of pulls)
+    assert.equal(environment.DOCKER_AUTH_CONFIG, "");
+  assert.deepEqual(pooled.seen.invalidated, ["pool-1"]);
+  assert.ok(pooled.seen.cuts.every((cut) => cut === pooled.cut));
+
+  const refused = await pullOf(t, { pulls: [unauthorized, unauthorized] });
+  await assert.rejects(
+    chatImagePulled(refused.pull, one),
+    /could not be pulled: /u,
+  );
+  assert.equal(
+    refused.seen.execs.filter(({ argv }) => argv[0] === "pull").length,
+    2,
+  );
+  const tokenless = await pullOf(t, { acquired: false });
+  await assert.rejects(
+    chatImagePulled(tokenless.pull, one),
+    /the pool has no token to pull .+: the issuer is down/u,
+  );
+});
+
+/** Catches a host's own image pulled other than as its setting says, or under the pool's token. */
+test("a host's own image is pulled by the engine's login as its setting says, and a session image here is not pulled", async (t) => {
+  const here = await pullOf(t, { present: [one] });
+  assert.deepEqual(await chatImagePulled(here.pull, one), { pulled: "Here" });
+  assert.deepEqual(
+    here.seen.execs.map(({ argv }) => argv[0]),
+    ["image"],
+  );
+
+  const elsewhere = "ghcr.io/geoff/chat:dev";
+  for (const own of [
+    undefined,
+    { image: elsewhere, pull: "missing" },
+    { image: one, pull: "missing" },
+  ]) {
+    const image = own?.image ?? elsewhere;
+    const login = await pullOf(t, { own });
+    assert.deepEqual(await chatImagePulled(login.pull, image), {
+      pulled: "Pulled",
+      pooled: false,
+    });
+    assert.deepEqual(
+      login.seen.execs.map(({ argv, environment }) => [
+        argv.join(" "),
+        environment,
+      ]),
+      [
+        [`image inspect --format {{.Id}} ${image}`, undefined],
+        [`pull --quiet ${image}`, {}],
+      ],
+    );
+  }
+
+  const always = await pullOf(t, {
+    present: [elsewhere],
+    own: { image: elsewhere, pull: "always" },
+  });
+  assert.deepEqual(await chatImagePulled(always.pull, elsewhere), {
+    pulled: "Pulled",
+    pooled: false,
+  });
+  assert.deepEqual(
+    always.seen.execs.map(({ argv }) => argv[0]),
+    ["pull"],
+  );
+  const kept = await pullOf(t, {
+    present: [elsewhere],
+    own: { image: elsewhere, pull: "never" },
+  });
+  assert.deepEqual(await chatImagePulled(kept.pull, elsewhere), {
+    pulled: "Here",
+  });
+  const never = await pullOf(t, { own: { image: elsewhere, pull: "never" } });
+  await assert.rejects(
+    chatImagePulled(never.pull, elsewhere),
+    /is not here, and the host's setting pulls it never/u,
+  );
+  assert.deepEqual(
+    never.seen.execs.map(({ argv }) => argv[0]),
+    ["image"],
+  );
+});
+
+/** An engine answering `rm` and `container inspect` with `answer`, and anything else with nothing. */
+function engineAnswering(answer) {
+  const seen = [];
+  return {
+    seen,
+    engine: {
+      exec: async (argv) => {
+        seen.push([...argv]);
+        return answer;
+      },
+      execTail: async () => assert.fail("no tail is read"),
+    },
+  };
+}
+
+/** Catches a CLI removing a container that is still running, or taking one it could not remove as gone. */
+test("a leftover container is removed where it has exited or is not there, and refused where it is still there", async () => {
+  for (const answer of [
+    { code: 0, stdout: "x", stderr: "" },
+    { code: 1, stdout: "", stderr: "Error: No such container: x" },
+  ]) {
+    const { engine, seen } = engineAnswering(answer);
+    await chatSupervisorLeftoverRemoved(engine, "x");
+    assert.deepEqual(seen, [["rm", "-v", "x"]]);
+  }
+  const { engine } = engineAnswering({
+    code: 1,
+    stdout: "",
+    stderr:
+      'Error response from daemon: cannot remove container "x": container is running: stop the container before removing or force remove',
+  });
+  await assert.rejects(
+    chatSupervisorLeftoverRemoved(engine, "x"),
+    /^Error: the container x is still there, and nothing is started beside it: /u,
+  );
+});
+
+/** Catches a CLI taking a paused or restarting supervisor as one a start removes, or an engine it could not ask as one holding none. */
+test("a supervisor's container is asked of the engine: none, its state and whether a start removes it, or why that could not be read", async () => {
+  const name = chatSupervisorName(geoffHost);
+  const stateOf = (Status) => ({
+    code: 0,
+    stdout: JSON.stringify([{ State: { Status } }]),
+    stderr: "",
+  });
+  for (const [answer, asked] of [
+    [
+      { code: 1, stdout: "", stderr: `Error: No such container: ${name}` },
+      { asked: "None" },
+    ],
+    [
+      { code: 1, stdout: "", stderr: "Cannot connect to the Docker daemon" },
+      { asked: "Failed", reason: "Cannot connect to the Docker daemon" },
+    ],
+    [
+      { code: 0, stdout: "not json", stderr: "" },
+      { asked: "Unread", reason: `the inspection of ${name} is no JSON` },
+    ],
+    [
+      { code: 0, stdout: "[{}]", stderr: "" },
+      { asked: "Unread", reason: `the inspection of ${name} names no state` },
+    ],
+    [stateOf("exited"), { asked: "State", state: "exited", removable: true }],
+    [stateOf("created"), { asked: "State", state: "created", removable: true }],
+    [stateOf("stopped"), { asked: "State", state: "stopped", removable: true }],
+    [
+      stateOf("running"),
+      { asked: "State", state: "running", removable: false },
+    ],
+    [stateOf("paused"), { asked: "State", state: "paused", removable: false }],
+  ]) {
+    const { engine, seen } = engineAnswering(answer);
+    assert.deepEqual(await chatSupervisorStateAsked(engine, geoffHost), asked);
+    assert.deepEqual(seen, [["container", "inspect", name]]);
+  }
+});
+
+/** Catches two CLIs saying a host's settings or its service's status apart. */
+test("a host's settings and its service's status are said in lines a CLI prints", () => {
+  assert.equal(
+    chatHostSettingsLine(chatHostConfigured(undefined, 4_096)),
+    "sessionsMax 4, sessionMemoryMib 2048, so the supervisor is capped at 8192 MiB, idleSecs 600, outputBytesMax 4096, image the one chuggy names",
+  );
+  assert.equal(
+    chatHostSettingsLine({
+      ...settings,
+      image: { image: "ghcr.io/geoff/chat:dev", pull: "always" },
+    }),
+    "sessionsMax 2, sessionMemoryMib 3072, so the supervisor is capped at 6144 MiB, idleSecs 600, outputBytesMax 4096, image ghcr.io/geoff/chat:dev, pulled before each start",
+  );
+  assert.deepEqual(chatHostStatusLines(undefined), ["service: not running"]);
+  assert.deepEqual(
+    chatHostStatusLines({ supervisor: "Absent", starting: false }),
+    ["service: running", "supervisor: absent", "image: chuggy names none yet"],
+  );
+  assert.deepEqual(
+    chatHostStatusLines({
+      named: two,
+      used: one,
+      own: { image: one, pull: "missing" },
+      supervisor: "Ready",
+      starting: false,
+    }),
+    [
+      "service: running",
+      `supervisor: ready in ${one}`,
+      `image: chuggy names ${two}, and the host runs its own, ${one}`,
+    ],
+  );
+});
+
+/**
+ * Catches a status naming the image of a supervisor that has ended, or one
+ * still being started, as the image a supervisor runs.
+ */
+test("a host's status names the image a supervisor is starting in, and the one last ready where none runs", () => {
+  const said = (status) =>
+    chatHostStatusLines({ named: two, used: one, ...status })[1];
+  assert.equal(
+    said({ supervisor: "Draining", starting: false }),
+    `supervisor: draining in ${one}`,
+  );
+  assert.equal(
+    said({ supervisor: "Ended", starting: true, startingIn: two }),
+    `supervisor: ended, last ready in ${one}; a start in ${two} is under way`,
+  );
+  assert.equal(
+    said({ supervisor: "Starting", starting: true, startingIn: two }),
+    `supervisor: starting in ${two}`,
+  );
+  assert.equal(
+    said({ supervisor: "Ended", starting: false }),
+    `supervisor: ended, last ready in ${one}`,
+  );
+  assert.equal(
+    chatHostStatusLines({
+      supervisor: "Absent",
+      starting: true,
+      startingIn: one,
+    })[1],
+    `supervisor: absent; a start in ${one} is under way`,
   );
 });

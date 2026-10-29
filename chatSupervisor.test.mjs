@@ -6,6 +6,7 @@
  */
 
 import assert from "node:assert/strict";
+import process from "node:process";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -19,6 +20,9 @@ import { workerContractRelease } from "@chuggy/worker-contract/workerContract";
 
 import {
   chatSupervised,
+  chatSupervisorMain,
+  chatSupervisorProtocolRefusal,
+  chatSupervisorProtocols,
   chatSupervisorSettings,
   chatSupervisorVariables,
 } from "./chatSupervisor.mjs";
@@ -417,6 +421,56 @@ const credentialed = {
   [chatSupervisorVariables.credentialUid]: "1000",
   [chatSupervisorVariables.credentialGid]: "1001",
 };
+
+/**
+ * Catches a supervisor that reads a host of another protocol's environment as
+ * its own, which refuses it for a setting it misnames or, worse, runs it and
+ * fails every session it is handed.
+ */
+test("a supervisor refuses a host that names no protocol or one it does not speak, saying which side to update", () => {
+  assert.deepEqual(chatSupervisorProtocols, [chatProtocolVersion]);
+  assert.equal(
+    chatSupervisorProtocolRefusal({
+      CHUG_CHAT_PROTOCOL: String(chatProtocolVersion),
+    }),
+    undefined,
+  );
+  const spoken = `this image's supervisor speaks protocol(s) [${String(chatProtocolVersion)}]`;
+  for (const [named, said, side] of [
+    [undefined, "none", "the host's runner"],
+    ["", "none", "the host's runner"],
+    ["0", "0", "the host's runner"],
+    ["x", "x", "the host's runner"],
+    [
+      String(chatProtocolVersion + 1),
+      String(chatProtocolVersion + 1),
+      "this image",
+    ],
+  ]) {
+    const refused = String(
+      chatSupervisorProtocolRefusal(
+        named === undefined ? {} : { CHUG_CHAT_PROTOCOL: named },
+      ),
+    );
+    assert.ok(
+      refused.startsWith(
+        `${spoken}; the host speaks ${said}: run matching versions; update ${side}`,
+      ),
+      refused,
+    );
+  }
+});
+
+test("a supervisor reads the host's protocol before any other setting, and exits saying why", async (t) => {
+  const written = [];
+  t.mock.method(process.stderr, "write", (text) => written.push(String(text)));
+  assert.equal(await chatSupervisorMain({}), 1);
+  assert.match(
+    written.join(""),
+    /the host speaks none: run matching versions/u,
+  );
+  assert.ok(!written.join("").includes("CHUG_CHAT_CREDENTIAL"));
+});
 
 test("a supervisor's places and bounds are its constants unless its environment names others", () => {
   const settings = chatSupervisorSettings(credentialed);
