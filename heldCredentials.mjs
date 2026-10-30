@@ -2,9 +2,10 @@
  * The credentials an attempt's grant names and its launcher did not mount,
  * asked of the worker plane, which serves those its deployment holds as files.
  *
- * ONLY WHAT NO LAUNCHER MOUNTED IS ASKED FOR. A cluster pod is mounted every
- * name its grant gives, so it never asks; a personal runner's job is mounted
- * only its agent's credential, and asks once for the rest. The plane answers
+ * ONLY WHAT NO LAUNCHER MOUNTED IS ASKED FOR. A pod launched with a credential
+ * map is mounted every name its grant gives, so it never asks; one launched by
+ * envelope, any pool's, is mounted only its agent's credential, and asks once
+ * for the rest. The plane answers
  * each name asked that the attempt's recorded grant names and its deployment
  * holds for the project, and none other.
  *

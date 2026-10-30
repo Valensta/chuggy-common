@@ -79,7 +79,7 @@ test("only the granted names the launcher did not mount are asked for", async ()
   );
 });
 
-/** Catches a pod every granted name was mounted for asking anyway, as a cluster pod would. */
+/** Catches a pod every granted name was mounted for asking anyway, as a pod launched with a credential map would. */
 test("a pod mounted every granted name asks nothing", async () => {
   const plane = heldPlane({ status: 200, body: { credentials: [] } });
 
