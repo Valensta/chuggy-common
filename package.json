@@ -52,6 +52,7 @@
     "fileLock.mjs",
     "git-askpass.sh",
     "gitRemote.mjs",
+    "heldCredentials.mjs",
     "hostBackend.mjs",
     "imageCleanup.mjs",
     "imageRecord.mjs",

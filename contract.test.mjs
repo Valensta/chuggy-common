@@ -77,6 +77,7 @@ import {
   workerWorkspace,
 } from "./entrypoint.mjs";
 import { envelope, fetchedAnswer, pushed } from "./envelope.fixture.mjs";
+import { heldCredentials } from "./heldCredentials.mjs";
 import { heartbeatIntervalMilliseconds, keepWorkerLease } from "./lease.mjs";
 import { leadDecisionStaging } from "./leadDecision.mjs";
 import {
@@ -138,6 +139,13 @@ const imagePinned = {
   digest: createHash("sha256").update(image).digest("hex"),
 };
 
+/** A credential the plane holds, as the held credentials route serves it. */
+const heldCredential = {
+  credential: "track-record",
+  variable: "TRACK_RECORD_TOKEN_FILE",
+  secret: "track-record-secret",
+};
+
 /** What each job route answers when it is not the one a case is about. */
 function jobSuccess(route) {
   switch (route) {
@@ -161,6 +169,8 @@ function jobSuccess(route) {
       return { status: 200, body: { turnsRecorded: 1 } };
     case "credential":
       return { status: 200, body: mintedCredential };
+    case "heldCredentials":
+      return { status: 200, body: { credentials: [heldCredential] } };
     case "inputArtifact":
       return { status: 200, body: image };
     default:
@@ -282,6 +292,17 @@ const jobCallers = {
       task: jobTask,
       bearer,
       path: workerCredentialPath,
+      request,
+      write: async () => undefined,
+    }),
+  heldCredentials: (request) =>
+    heldCredentials({
+      task: jobTask,
+      bearer,
+      granted: [heldCredential.credential],
+      credentialFiles: {},
+      directory: "/minted",
+      keep: () => undefined,
       request,
       write: async () => undefined,
     }),
@@ -439,6 +460,13 @@ async function reaction(wire, success, transport, caller, route, answer) {
 /** Every status of every job route the pod calls. */
 const jobReactions = {
   task: { 200: "reads", 401: "stops", 409: "stops" },
+  heldCredentials: {
+    200: "reads",
+    400: "stops",
+    401: "stops",
+    409: "stops",
+    503: "retries",
+  },
   input: { 200: "reads", 401: "stops", 409: "stops" },
   heartbeat: { 204: "reads", 401: "stops", 409: "stops" },
   artifact: {

@@ -114,6 +114,7 @@ import {
 } from "./checks.mjs";
 import { hostJobVariable } from "./coreRuntime.mjs";
 import { gitFailureLine, gitRemoteTried } from "./gitRemote.mjs";
+import { heldCredentials } from "./heldCredentials.mjs";
 import { jobHostPlaces, jobRepositoryDirectory } from "./job.mjs";
 import { keepWorkerLease } from "./lease.mjs";
 import {
@@ -171,6 +172,7 @@ const workerSecretKinds = {
   mounted: "a credential the launcher mounted",
   minted: "the git credential the plane minted",
   read: "a read the plane minted for a repository",
+  held: "a credential the plane holds",
 };
 
 let activeTask;
@@ -496,6 +498,7 @@ async function runAgent(context) {
   const shell = await context.agent.prepareShell(
     workerShellEnvironment(process.env, {
       setupEnvironment: context.setupEnvironment,
+      heldCredentials: context.heldCredentials,
       changeBase: context.changeBase,
       job: context.job,
       git: context.git,
@@ -881,6 +884,7 @@ export async function runWorkerTask(context, commands) {
     {
       directory: context.directory,
       setupEnvironment: context.setupEnvironment,
+      heldCredentials: context.heldCredentials,
       changeBase: context.changeBase,
       job: context.job,
       git: context.git,
@@ -1094,13 +1098,49 @@ function workerProjectReads({
 }
 
 /**
+ * The credentials the plane holds of those `task` grants and
+ * `credentialFiles` does not hold, each kept among the attempt's secrets and
+ * written under `minted`: the variables naming their files, as a job's shells
+ * are handed them. One the pod already holds is overridden, which is logged by
+ * its name alone.
+ */
+export async function workerHeldCredentials({
+  task,
+  bearer,
+  credentialFiles,
+  minted,
+  keepSecret,
+  request,
+  environment = process.env,
+  warn = (text) => process.stderr.write(text),
+}) {
+  const held = await heldCredentials({
+    task,
+    bearer,
+    granted: task.authority.credentials,
+    credentialFiles,
+    directory: minted,
+    keep: (value) => keepSecret({ kind: workerSecretKinds.held, value }),
+    ...(request === undefined ? {} : { request }),
+  });
+  for (const { credential, variable } of held)
+    if (Object.hasOwn(environment, variable))
+      warn(
+        `the held credential ${credential} is handed as ${variable}, over the value the job's environment set\n`,
+      );
+  return Object.fromEntries(held.map(({ variable, file }) => [variable, file]));
+}
+
+/**
  * What one attempt does in the workspace it cloned, every git it runs handed
- * `git` and every shell told which job it is in: its setup, its run, handed
- * what that setup passed on, and what that run leaves behind.
+ * `git` and every shell told which job it is in and handed its held
+ * credentials' files: its setup, its run, handed what that setup passed on,
+ * and what that run leaves behind.
  */
 async function workerAttemptWorked(attempt, workspace, git) {
   const { task, bearer, evidence, scrub } = attempt;
   const handed = {
+    heldCredentials: attempt.heldCredentials,
     changeBase: workspace.changeBase,
     job: workerJobEnvironment(task, workspace.repositoryId),
     git,
@@ -1145,8 +1185,9 @@ async function workerAttemptWorked(attempt, workspace, git) {
 /**
  * One attempt, run from its task onwards the same whichever carrier brought it.
  * `seams` are `workerWorkspace`'s, less the directory, which is the launch's;
- * `minted`, the directory checked and the reads served under in place of the
- * contract's; and `agent`, run in place of the one the task names.
+ * `minted`, the directory checked, the held credentials written to and the
+ * reads served under in place of the contract's; and `agent`, run in place of
+ * the one the task names.
  */
 export async function workerAttempt(launch, seams = {}) {
   const {
@@ -1180,6 +1221,14 @@ export async function workerAttempt(launch, seams = {}) {
   const stopLease = keepWorkerLease(task, bearer);
   let reads;
   try {
+    const heldCredentials = await workerHeldCredentials({
+      task,
+      bearer,
+      credentialFiles,
+      minted,
+      keepSecret: ran.keepSecret,
+      request: workspaceSeams.request,
+    });
     const workspace = await workerWorkspace(
       task,
       repositories,
@@ -1197,7 +1246,7 @@ export async function workerAttempt(launch, seams = {}) {
       request: workspaceSeams.request,
     });
     await workerAttemptWorked(
-      { ...ran, task, bearer, agent, commands, stopLease },
+      { ...ran, task, bearer, agent, commands, stopLease, heldCredentials },
       workspace,
       reads.git,
     );
