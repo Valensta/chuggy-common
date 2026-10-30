@@ -5,9 +5,8 @@
  * ONLY WHAT NO LAUNCHER MOUNTED IS ASKED FOR. A pod launched with a credential
  * map is mounted every name its grant gives, so it never asks; one launched by
  * envelope, any pool's, is mounted only its agent's credential, and asks once
- * for the rest. The plane answers
- * each name asked that the attempt's recorded grant names and its deployment
- * holds for the project, and none other.
+ * for the rest. The plane answers each name asked that the attempt's recorded
+ * grant names and its deployment holds for the project, and none other.
  *
  * A REFUSAL OR AN OUTAGE IS THE ATTEMPT'S FAILURE. A job's shells run on
  * without a credential its grant names only where the plane holds none, which
@@ -55,11 +54,16 @@ function heldCredentialsRead(body, asked) {
     throw new Error(
       "the worker plane answered held credentials this pod cannot read",
     );
-  for (const { credential } of answer.data.credentials)
-    if (!asked.includes(credential) || credential.includes("/"))
+  for (const { credential } of answer.data.credentials) {
+    if (!asked.includes(credential))
       throw new Error(
         `the worker plane answered a held credential this attempt did not ask for: ${credential}`,
       );
+    if (credential.includes("/"))
+      throw new Error(
+        `the worker plane answered a held credential no file in the minted directory can be named by: ${credential}`,
+      );
+  }
   return answer.data.credentials;
 }
 

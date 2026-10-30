@@ -186,3 +186,36 @@ test("an answer this pod cannot read, or one serving a name not asked, fails the
   await unread({ credentials: [{ ...trackRecord, credential: "forge" }] });
   await unread("not an answer");
 });
+
+/** Catches a granted name that would write its secret outside the minted directory. */
+test("an answer serving a name no file in the minted directory can be named by fails the ask, keeping and writing nothing", async () => {
+  const credential = "a/../../x";
+  const plane = heldPlane({
+    status: 200,
+    body: { credentials: [{ ...trackRecord, credential }] },
+  });
+  const kept = [];
+  const written = [];
+
+  await assert.rejects(
+    heldCredentials({
+      task,
+      bearer: "capability",
+      granted: [credential],
+      credentialFiles: {},
+      directory: "/m",
+      keep: (value) => kept.push(value),
+      request: plane.request,
+      write: async (file) => {
+        written.push(file);
+      },
+    }),
+    /no file in the minted directory can be named by/u,
+  );
+  assert.deepEqual(
+    plane.asked.map(({ body }) => body),
+    [{ credentials: [credential] }],
+  );
+  assert.deepEqual(kept, []);
+  assert.deepEqual(written, []);
+});
