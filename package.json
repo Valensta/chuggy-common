@@ -7,7 +7,7 @@
   },
   "private": true,
   "dependencies": {
-    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.29.0/chuggy-worker-contract-1.29.0.tgz"
+    "@chuggy/worker-contract": "https://github.com/kasofsk/chuggy/releases/download/worker-contract-v1.30.0/chuggy-worker-contract-1.30.0.tgz"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -52,6 +52,7 @@
     "fileLock.mjs",
     "git-askpass.sh",
     "gitRemote.mjs",
+    "heldCredentials.mjs",
     "hostBackend.mjs",
     "imageCleanup.mjs",
     "imageRecord.mjs",

@@ -68,6 +68,7 @@ import {
   chatMintedVariable,
 } from "./chatChannel.mjs";
 import { claudeCredentialVariable } from "./claudeCredential.mjs";
+import { codexAgent } from "./codex.mjs";
 import {
   decidingFor,
   strayEnvironment,
@@ -84,6 +85,7 @@ import {
   runWorkerTask,
   workerAttempt,
   workerCredential,
+  workerHeldCredentials,
   workerMintedWritable,
   workerMode,
   workerRun,
@@ -137,6 +139,19 @@ const repositories = {
   },
 };
 const credentialFiles = { forge: "/var/run/chuggy/credentials/forge" };
+
+/** A credential the plane holds for the attempt's project, as the held credentials route serves it. */
+const trackRecord = {
+  credential: "track-record",
+  variable: "TRACK_RECORD_TOKEN_FILE",
+  secret: "track-record-0123456789abcdefghij",
+};
+
+/** The held credentials route serving `trackRecord`. */
+const trackRecordHeld = { status: 200, body: { credentials: [trackRecord] } };
+
+/** A value the pod holds for `trackRecord`'s variable, as a runner's `environment` sets one. */
+const trackRecordRunners = "/the-runners/track-record";
 
 /** The kind a minted credential is held as, and a refused push names it by. */
 const mintedKind = "the git credential the plane minted";
@@ -401,10 +416,13 @@ test("a commanded work task without network or workspace write is refused", asyn
  * contract's own tables: `answer(route)` is what each route answers, `asked`
  * is every route in order with the bearer it was asked under, and `requests`
  * is each one as the plane read it, its body included. `wire` is the job
- * plane's unless a case names another.
+ * plane's unless a case names another. The held credentials route answers
+ * `held`, which holds none unless a case names what it holds.
  */
-async function servedPlane(answer, wire = planes.job) {
-  const plane = planeFetch(wire, answer);
+async function servedPlane(answer, wire = planes.job, held = nothingHeld) {
+  const plane = planeFetch(wire, (route, ...asked) =>
+    route === "heldCredentials" ? held : answer(route, ...asked),
+  );
   const asked = [];
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -447,6 +465,9 @@ async function servedPlane(answer, wire = planes.job) {
     close: () => new Promise((closed) => server.close(() => closed(undefined))),
   };
 }
+
+/** What the held credentials route answers where the plane holds none of those asked. */
+const nothingHeld = { status: 200, body: { credentials: [] } };
 
 /** A work task whose worker runs `commands`. */
 function commandedTask(commands) {
@@ -520,9 +541,15 @@ test("a pod launched with an envelope fetches its task and runs it under the env
     );
     assert.deepEqual(
       plane.asked,
-      ["task", "input", "credential", "runTotals", "artifact", "runEnded"].map(
-        (route) => ({ route, authorization: `Bearer ${envelope.bearer}` }),
-      ),
+      [
+        "task",
+        "heldCredentials",
+        "input",
+        "credential",
+        "runTotals",
+        "artifact",
+        "runEnded",
+      ].map((route) => ({ route, authorization: `Bearer ${envelope.bearer}` })),
     );
     assert.deepEqual(plane.requests.at(-1)?.body, {
       evidence: runCloneFailed,
@@ -736,7 +763,15 @@ test("a job run on its runner's host finds its minted credential directory in it
     );
     assert.deepEqual(
       plane.asked.map(({ route }) => route),
-      ["task", "input", "credential", "runTotals", "artifact", "runEnded"],
+      [
+        "task",
+        "heldCredentials",
+        "input",
+        "credential",
+        "runTotals",
+        "artifact",
+        "runEnded",
+      ],
     );
   } finally {
     await plane.close();
@@ -2931,9 +2966,10 @@ async function finishedFrom(
 /**
  * Each kind of secret a work attempt holds is one its push is checked for, and
  * the kind is what the refusal names: the agent's credential, the bearer, what
- * the launcher mounted and what the plane minted. Catches a secret the run's
- * scrub holds and its push is never checked for, a refusal that prints the
- * value it found, and a refused push reported as the attempt's source.
+ * the launcher mounted, what the plane minted and what it holds. Catches a
+ * secret the run's scrub holds and its push is never checked for, a refusal
+ * that prints the value it found, and a refused push reported as the attempt's
+ * source.
  */
 test("a passing work attempt pushes no commit carrying any secret it holds", async () => {
   const root = await mkdtemp(join(tmpdir(), "chuggy-held-"));
@@ -2957,11 +2993,20 @@ test("a passing work attempt pushes no commit carrying any secret it holds", asy
       [],
     );
     await workerCredential({ ...asked, keepSecret: run.keepSecret });
+    await workerHeldCredentials({
+      task: { ...task, authority: { credentials: [trackRecord.credential] } },
+      bearer,
+      credentialFiles: {},
+      minted: root,
+      keepSecret: run.keepSecret,
+      request: async () => ({ json: async () => trackRecordHeld.body }),
+    });
     const expected = [
       { kind: "the Claude Code credential", value: secret },
       { kind: "the attempt's bearer", value: bearer },
       { kind: "a credential the launcher mounted", value: forge },
       { kind: mintedKind, value: minted.password },
+      { kind: "a credential the plane holds", value: trackRecord.secret },
     ];
     assert.deepEqual(run.held(), expected);
 
@@ -4087,4 +4132,266 @@ test("an agent's git is handed only a read of its own repository, and the clone 
   for (const password of fetched)
     assert.ok(plane.ownReads.includes(password), "a write was presented");
   assert.ok(!credentialAsks(plane).includes(undefined));
+});
+
+/**
+ * An evaluation whose grant names `trackRecord` beside the forge, which no
+ * launcher mounted, running `commands` after the setup lines `setup`.
+ */
+function trackRecordTask(commands, setup = []) {
+  return {
+    status: 200,
+    body: workTaskAnswerSchema.parse({
+      ...fetchedAnswer,
+      taskKind: "Evaluation",
+      authority: {
+        ...fetchedAnswer.authority,
+        credentials: ["forge", trackRecord.credential],
+      },
+      worker: { mode: { type: "Commands", commands }, setup, files: [] },
+    }),
+  };
+}
+
+/**
+ * A job in a container and one on its runner's host each write a held
+ * credential where they write the git credential, and ask for every granted
+ * name no launcher mounted. Catches the file written anywhere else, readable
+ * past the pod's user, or a name mounted asked for.
+ */
+test("a held credential is written privately in the minted directory, in a container and on a runner's host", async (t) => {
+  const plane = await servedPlane(
+    (route) => {
+      switch (route) {
+        case "task":
+          return trackRecordTask(["true"]);
+        case "input":
+          return inputAnswer("repository-1", "0".repeat(40));
+        case "credential":
+          return { status: 404 };
+        default:
+          return { status: 204 };
+      }
+    },
+    planes.job,
+    trackRecordHeld,
+  );
+  t.after(() => plane.close());
+  const job = {
+    [workerTaskVariable]: JSON.stringify({
+      ...envelope,
+      callbackUrl: plane.url,
+    }),
+  };
+  const container = await suiteDirectory(t, "chuggy-minted-");
+  const host = await suiteDirectory(t, "chuggy-host-job-");
+  await mkdir(join(host, "minted"));
+
+  for (const [ran, minted] of [
+    [await launched(job, container), container],
+    [await launched({ ...job, CHUGGY_HOST_JOB: host }), join(host, "minted")],
+  ]) {
+    assert.equal(ran.code, 1, ran.stderr);
+    assert.ok(!ran.stderr.includes(trackRecord.secret), ran.stderr);
+    const file = join(minted, "held-track-record");
+    assert.equal(await readFile(file, "utf8"), trackRecord.secret);
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+  }
+  assert.deepEqual(
+    plane.requests
+      .filter(({ route }) => route === "heldCredentials")
+      .map(({ body }) => body),
+    [
+      { credentials: ["forge", trackRecord.credential] },
+      { credentials: ["forge", trackRecord.credential] },
+    ],
+  );
+});
+
+/** A shell line printing the variable `trackRecord` is handed under, and what the file it names holds. */
+const printsTrackRecord = `printf "%s|%s" "$${trackRecord.variable}" "$(cat "$${trackRecord.variable}")"`;
+
+/**
+ * Catches a held credential's file not reaching a job's setup lines or its
+ * commands, reaching them under the pod's own value, or its secret reaching
+ * the report a command that printed it fails with.
+ */
+test("a job's shells are handed a held credential's file over the pod's own value, and its secret is scrubbed from the report", async (t) => {
+  podHolds(t, { [trackRecord.variable]: trackRecordRunners });
+  const mintedDirectory = await suiteDirectory(t, "chuggy-minted-");
+  await inCheckout(async ({ directory, base }) => {
+    const plane = await servedPlane(
+      (route) => {
+        switch (route) {
+          case "task":
+            return trackRecordTask(
+              [`${printsTrackRecord} > told; ${printsTrackRecord}; false`],
+              [`${printsTrackRecord} > set-up`],
+            );
+          case "input":
+            return inputAnswer("repository-1", base);
+          case "credential":
+            return {
+              status: 200,
+              body: { ...minted, expiresAtMs: 1_900_000_000_000 },
+            };
+          case "report":
+            return { status: 202, body: { action: "stop" } };
+          default:
+            return { status: 204 };
+        }
+      },
+      planes.job,
+      trackRecordHeld,
+    );
+    try {
+      const served = { ...envelope, callbackUrl: plane.url };
+      const { task: answered } = await envelopeTask(served);
+      await workerAttempt(envelopeLaunch(served, answered), {
+        minted: mintedDirectory,
+        write: async () => undefined,
+        clone: async () => directory,
+      });
+
+      const told = `${join(mintedDirectory, "held-track-record")}|${trackRecord.secret}`;
+      assert.equal(await readFile(join(directory, "set-up"), "utf8"), told);
+      assert.equal(await readFile(join(directory, "told"), "utf8"), told);
+      const report = JSON.stringify(
+        plane.requests.find(({ route }) => route === "report")?.body,
+      );
+      assert.ok(!report.includes(trackRecord.secret), report);
+      assert.match(report, /\[redacted credential\]/u);
+    } finally {
+      await plane.close();
+    }
+  });
+});
+
+/**
+ * Catches a held credential's file not reaching an agent's shell, for Claude
+ * through what its Bash tool sources and for Codex through the table its
+ * shell is set, or reaching it under the pod's own value.
+ */
+test("an agent's shell is handed a held credential's file over the pod's own value, for Claude and for Codex", async (t) => {
+  podHolds(t, { [trackRecord.variable]: trackRecordRunners });
+  const root = await suiteDirectory(t, "chuggy-held-agent-");
+  const file = join(root, "held-track-record");
+  const context = {
+    task,
+    directory: process.cwd(),
+    heldCredentials: { [trackRecord.variable]: file },
+    agentEnvironment: {},
+    evidence: { observed: () => undefined, record: () => undefined },
+  };
+  const ended = (summary) =>
+    `printf '{"type":"result","structured_output":{"verdict":"Pass","summary":"%s"}}\\n' ${summary}`;
+
+  const claude = await runWorkerTask({
+    ...context,
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: (handed) =>
+        prepareClaudeShell(handed, join(root, "claude-shell.sh")),
+      invocation: () => [
+        "-c",
+        `. "$CLAUDE_ENV_FILE"; ${ended(`"$${trackRecord.variable}"`)}`,
+      ],
+    },
+  });
+  assert.equal(claude.result.summary, file);
+
+  const argued = [];
+  await runWorkerTask({
+    ...context,
+    agent: {
+      ...claudeAgent,
+      executable: "/bin/sh",
+      prepareShell: codexAgent.prepareShell,
+      invocation: (_, prepared) => {
+        argued.push(prepared.shellArguments);
+        return ["-c", ended("set")];
+      },
+    },
+  });
+  assert.equal(argued.length, 1);
+  assert.ok(
+    argued[0][1].includes(`${trackRecord.variable} = ${JSON.stringify(file)}`),
+    argued[0][1],
+  );
+  assert.ok(!argued[0][1].includes(trackRecordRunners), argued[0][1]);
+});
+
+/**
+ * Catches a held credential's variable the pod already holds overridden
+ * without a word, or the word printing either value.
+ */
+test("a held credential's variable the pod already holds is overridden, and the log names it and neither value", async (t) => {
+  const minted = await suiteDirectory(t, "chuggy-minted-");
+  const handedFor = async (environment) => {
+    const warned = [];
+    const handed = await workerHeldCredentials({
+      task: { ...task, authority: { credentials: [trackRecord.credential] } },
+      bearer: envelope.bearer,
+      credentialFiles: {},
+      minted,
+      keepSecret: () => undefined,
+      request: async () => ({ json: async () => trackRecordHeld.body }),
+      environment,
+      warn: (text) => warned.push(text),
+    });
+    return { handed, warned };
+  };
+  const file = join(minted, "held-track-record");
+
+  const over = await handedFor({ [trackRecord.variable]: trackRecordRunners });
+  assert.deepEqual(over.handed, { [trackRecord.variable]: file });
+  assert.equal(over.warned.length, 1);
+  assert.ok(over.warned[0].includes(trackRecord.variable), over.warned[0]);
+  for (const value of [trackRecordRunners, trackRecord.secret, file])
+    assert.ok(!over.warned[0].includes(value), over.warned[0]);
+
+  assert.deepEqual(await handedFor({}), {
+    handed: { [trackRecord.variable]: file },
+    warned: [],
+  });
+});
+
+/**
+ * Catches an attempt run on without the credential its grant names where the
+ * plane refused to say whether it holds it or was away past the retries.
+ */
+test("an attempt whose held credentials the plane refuses, or is away for past the retries, fails before it clones", async (t) => {
+  for (const status of [400, 401, 409, 503]) {
+    const plane = planeFetch(planes.job, (route) => {
+      switch (route) {
+        case "task":
+          return trackRecordTask(["true"]);
+        case "heldCredentials":
+          return { status };
+        default:
+          return { status: 204 };
+      }
+    });
+    const request = overPlane(workerRequest, plane.fetch);
+    const { task: answered } = await envelopeTask(envelope, request);
+    const minted = await suiteDirectory(t, "chuggy-minted-");
+
+    await assert.rejects(
+      workerAttempt(envelopeLaunch(envelope, answered), {
+        minted,
+        request,
+        clone: async () => {
+          throw new Error("cloned");
+        },
+      }),
+      (failure) => failure.message.includes(`answered ${String(status)}`),
+      String(status),
+    );
+    assert.ok(
+      !plane.asked.some(({ route }) => route === "input"),
+      String(status),
+    );
+    assert.deepEqual(await readdir(minted), [], String(status));
+  }
 });

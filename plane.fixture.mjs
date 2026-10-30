@@ -36,6 +36,7 @@ import {
 import { resultManifestDocumentSchema } from "@chuggy/worker-contract/workerDocuments";
 import {
   workerCredentialSchema,
+  workerHeldCredentialsSchema,
   workerPlaneAnswers,
   workerPlaneBytesMediaType,
   workerPlaneRoutes,
@@ -62,6 +63,7 @@ export const planes = {
       runEnded: workerRunEndedSchema,
       report: resultManifestDocumentSchema,
       credential: workerCredentialSchema,
+      heldCredentials: workerHeldCredentialsSchema,
     },
     optional: ["credential"],
     bytes: ["artifact", "runConfiguration", "runTranscript"],

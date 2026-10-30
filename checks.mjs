@@ -44,6 +44,10 @@
  * under `workerSetupEnvironmentVariable`, and one the pod inherited is dropped,
  * so no other shell finds it set.
  *
+ * THOSE SHELLS ARE HANDED EACH HELD CREDENTIAL'S FILE (`heldCredentials.mjs`)
+ * under the variable the plane names for it, over any value the pod, the image
+ * or the setup lines hold for it.
+ *
  * THOSE SHELLS ARE HANDED THE ATTEMPT'S GIT CONFIGURATION, through the
  * variables git reads entries from after every file it reads, appended to any
  * the pod holds. The pod's own entries are named again beside the attempt's,
@@ -58,8 +62,8 @@
  * runs is handed what the stage's would be. The agent is started from what
  * they inherit, and its shell is handed the moved values, the attempt's own
  * change base, which job it is in and its git configuration by the agent's own
- * means, with what its setup passed on, beside what the agent itself was given
- * to run with.
+ * means, with what its setup passed on and its held credentials' files,
+ * beside what the agent itself was given to run with.
  *
  * THE FIRST FAILURE STOPS THE STAGE, and a command killed by a signal is a
  * failure like any other. What follows a command that did not exit cleanly
@@ -381,14 +385,22 @@ export function workerGitEnvironment(environment, git) {
  * handed by the agent's own means: each variable `check.sh` moved aside, back
  * under its own name; `handed.setupEnvironment`, what the job's setup lines
  * passed on, over those; `handed.changeBase` where the attempt knows one;
- * `handed.job`, what `workerJobEnvironment` tells a job's shells; and
- * `handed.git`, the entries the attempt's git configuration adds.
+ * `handed.heldCredentials`, each held credential's variable naming its file,
+ * over those; `handed.job`, what `workerJobEnvironment` tells a job's shells;
+ * and `handed.git`, the entries the attempt's git configuration adds.
  */
 export function workerShellEnvironment(environment, handed = {}) {
-  const { setupEnvironment = {}, changeBase, job = {}, git = [] } = handed;
+  const {
+    setupEnvironment = {},
+    heldCredentials = {},
+    changeBase,
+    job = {},
+    git = [],
+  } = handed;
   return {
     ...workerImageEnvironment(environment),
     ...setupEnvironment,
+    ...heldCredentials,
     ...(changeBase === undefined
       ? {}
       : { [workerChangeBaseVariable]: changeBase }),
@@ -573,9 +585,10 @@ function checkReport(commands, ran, scrub) {
  * Runs one check stage: every command in order, stopping at the first that does
  * not exit cleanly, and reporting each command's own status through the
  * caller's credential scrub. `context` names the directory the commands run in,
- * what the job's setup lines passed on, the commit the change started from
- * where the attempt knows it, what a job's shells are told of which job they
- * are in, and the attempt's git configuration where it has one.
+ * what the job's setup lines passed on, the variables naming its held
+ * credentials' files, the commit the change started from where the attempt
+ * knows it, what a job's shells are told of which job they are in, and the
+ * attempt's git configuration where it has one.
  */
 export async function runChecks(context, commands, services = {}) {
   if (commands.length === 0)
@@ -587,6 +600,7 @@ export async function runChecks(context, commands, services = {}) {
   } = services;
   const environment = workerStageEnvironment(process.env, {
     setupEnvironment: context.setupEnvironment,
+    heldCredentials: context.heldCredentials,
     changeBase: context.changeBase,
     job: context.job,
     git: context.git,
